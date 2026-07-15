@@ -1,0 +1,231 @@
+---
+name: mm
+description: Implement, extend, or debug a matter-in-motion (mm) RPC server or client in Swift. Use this skill whenever the task involves MMService, MMClientConnection, a #schema contract, EntityACL tables, RPC handlers, streaming (follow/import-style calls), or any daemon/client that talks over this library's Unix-socket/TCP protocol — even if the user just says "add a method", "expose X over the socket", "write a client for the daemon", or "the call is denied". Also use it before reviewing or refactoring code that imports MMWire, MMSchema, MMServer, or MMClient.
+---
+
+# Implementing a matter-in-motion server and client
+
+matter-in-motion is a binary RPC library: length-prefixed MessagePack envelopes over Unix domain sockets (or TCP), schemas declared once as Swift values, and filesystem-style rwx/ugo authorization enforced from kernel peer credentials. Everything below is the golden path; the runnable proof of every pattern is in `Examples/` (API + Daemon + Client).
+
+Pick products by role — the dependency direction is load-bearing:
+
+- Shared contract module: depends on `MMSchema` only. Never imports server or client.
+- Daemon: `MMServer` + `MMSchema` (+ swift-service-lifecycle, swift-log).
+- Client process: `MMClient` + `MMSchema`. A client never links `MMServer`.
+
+## Step 1 — declare the contract once, with `#schema`
+
+The contract lives in its own module (so clients can import it without the server) as a single macro block. The macro generates the payload structs, typed descriptors, `all`, `types`, and a runtime `contract` — there is no second copy to keep in sync:
+
+```swift
+import MMSchema
+
+public enum Journal: MethodNamespace {
+    #schema("journal") {
+        Enum("Priority", description: "How urgent a line is") {
+            Case("normal")
+            Case("urgent")
+        }
+        Type("ChangeEvent", description: "One appended line") {
+            Field("entity", .string)
+            Field("line", .string)
+        }
+        Call("append", description: "Appends one line") {
+            Access { .write }
+            Request { Field("line", .string) }
+            Response { Field("count", .int) }
+        }
+        // Server → client stream: an ordinary method with a ResponseStream —
+        // correlated to one call, authorized once at open, discoverable.
+        Call("follow") {
+            Access { .read }
+            ResponseStream(.reference("ChangeEvent"))
+            Response("FollowSummary") { Field("delivered", .int) }
+        }
+        // Client → server stream: RequestStream; the terminal reports totals.
+        Call("import") {
+            Access { .write }
+            RequestStream("ImportLine") { Field("line", .string) }
+            Response("ImportSummary") { Field("imported", .int) }
+        }
+    }
+}
+
+// Generated types nest inside Journal; re-export for natural call sites.
+public typealias ChangeEvent = Journal.ChangeEvent
+public let journalContract: SchemaDeclaration = Journal.contract
+```
+
+Rules that keep the wire stable:
+
+- A method is four independent, freely combinable parts: `Request`, `RequestStream`, `ResponseStream`, `Response`. Unary is just "no stream parts". Omitted `Request` means an empty payload.
+- The call's target entity rides the **open envelope**, never the payload. Do not add an `entity` field to a request "for routing" — handlers read `context.entity`, clients pass `on:`.
+- Field keys are declaration-order integers. When evolving, pin keys (`Field(3, "note", .string)`) and make every new field `.optional(...)` — unknown keys are skipped, so old and new peers interoperate without a version bump. The protocol version stays 1; evolution is optional fields, not versions.
+- `Access { .read / .write / .execute }` is the permission class the verb demands on the target entity. Choose it like a file mode, not like HTTP semantics.
+- `description:` everywhere is served by discovery but never fingerprinted — doc edits are not schema drift.
+- Any part can BE a named type: `Request(.reference("X"))`, `ResponseStream(.reference("ChangeEvent"))`, or a `SchemaDescribable` Swift type. The macro then generates no struct for that part.
+- Shared types across schemas go in `#schemaTypes("common") { ... }` — but a compiler limitation means same-module macro arguments cannot see another macro's generated members, so shared containers need their own module (or hand-written `SchemaDescribable` types).
+- Hand-written types outside the macro work too; an empty request struct with no stored properties must declare `static var schema: TypeSchema { .structure(fields: []) }` (`SchemaDescribable`) because a property-less decoder cannot be probed.
+
+## Step 2 — the server
+
+Declare the whole daemon as data inside `MMService { ... }` and hand it to a `ServiceGroup`. Verify the contract before listening — drift becomes a boot failure instead of a wire surprise:
+
+```swift
+import Logging
+import MMSchema
+import MMServer
+import ServiceLifecycle
+
+switch journalContract.verify(against: Journal.self) {
+    case .failure(let error): fatalError("schema probe failed: \(error)")
+    case .success(let breaks) where !breaks.isEmpty: fatalError("contract drift: \(breaks)")
+    case .success: break
+}
+
+let store = JournalStore()  // your state: an actor, injected into handlers
+
+let service = MMService {
+    Configuration(endpoint: .unix(path: socketPath))
+    ACLProvider {
+        // The ACL table IS an entity tree: children take relative paths,
+        // inherit owner/group, default to mode 0o750.
+        Entity("journal", owner: getuid(), group: getgid(), mode: 0o750) {
+            Entity("notes")
+            Entity("system", owner: 0, group: 0, mode: 0o700)
+        }
+    }
+    Log(logger)
+    // For(...) groups routes AND enrolls the startup cross-check: every
+    // Journal method needs a handler here or the daemon refuses to boot.
+    For(Journal.self) {
+        JournalHandlers(store: store)
+    }
+}
+
+let group = ServiceGroup(configuration: .init(
+    services: [.init(service: service)],
+    gracefulShutdownSignals: [.sigterm],   // drains, removes the socket
+    cancellationSignals: [.sigint],
+    logger: logger
+))
+try await group.run()
+```
+
+Keep handlers in a reusable `RouteGroup` in its own file, carrying its dependencies. `On` has one overload per method shape; the context (`auth` below) always carries the already-authorized `entity`:
+
+```swift
+struct JournalHandlers: RouteGroup {
+    let store: JournalStore
+
+    @RouterBuilder var routes: [Route] {
+        On(Journal.append) { auth, request in
+            .success(Journal.AppendResponse(count: await store.append(request.line, to: auth.entity)))
+        }
+        On(Journal.follow) { auth, request, sink in          // server-stream: + MMResponseSink
+            var delivered = 0
+            loop: for await event in store.follow(auth.entity) {
+                switch await sink.send(event) {              // credit-gated: suspends on backpressure
+                case .sent: delivered += 1
+                case .peerStopped, .callEnded: break loop    // graceful outcomes, not errors
+                }
+            }
+            return .success(Journal.FollowSummary(delivered: delivered))
+        }
+        On(Journal.import) { auth, request, elements in      // client-stream: + MMRequestStream
+            var imported = 0
+            for await element in elements {                  // sequence ends on the client's END
+                _ = await store.append(element.line, to: auth.entity)
+                imported += 1
+            }
+            return .success(Journal.ImportSummary(imported: imported))
+        }
+        // Bidirectional: { auth, request, elements, sink in ... }
+    }
+}
+```
+
+Server facts to design around:
+
+- Handlers return `Result<Response, MMErrorObject>`; error codes 1–63 are reserved for the protocol — application errors start at 64.
+- Every server auto-registers the builtins `rpc.schema` (discovery, filtered by the caller's traversal rights) and `entity.stat`.
+- Cross-connection fan-out (broadcasting one connection's append to another's `follow` stream) is application infrastructure — see `Examples/Daemon/FollowerHub.swift` for the safe registry pattern (synchronous `onTermination`, idempotent removal, never finish under the lock).
+- Root-targeted requests (empty entity) are denied unless the route opts in with `acceptsRoot: true` on `Handle`/`On`.
+- Dynamic authorization (SQLite etc.): implement `EntityACLProvider` and pass the instance — `ACLProvider(provider)`. The builder tree is sugar over `InMemoryACLProvider`.
+- Startup ordering (ServiceLifecycle starts everything concurrently): `Ready(readiness)` in the builder fires a `ServiceReadiness` at bind; wrap dependents in `GatedService` to start after it. `OnBind { address in }` gives you ephemeral TCP ports.
+
+## Step 3 — the client
+
+`connect` returns a `Result`; the host runs the inbound loop as a structured child — no hidden tasks:
+
+```swift
+import MMClient
+
+let connection = try await MMClientConnection.connect(to: .unix(path: socketPath)).get()
+await withTaskGroup(of: Void.self) { tasks in
+    tasks.addTask { _ = await connection.run() }             // the inbound loop
+
+    let notes = try! EntityName.parse("journal.notes").get() // validated dotted path
+
+    // Unary: Result<Journal.AppendResponse, MMCallError>
+    let reply = await connection.call(Journal.append, on: notes, Journal.AppendRequest(line: "hi"))
+
+    // Server-stream: iterate (iterating grants credit), then read the terminal.
+    let follow = await connection.call(Journal.follow, on: notes, Journal.FollowRequest())
+    tasks.addTask {
+        for await change in follow { print(change.line) }
+        _ = await follow.result()      // Result<Journal.FollowSummary, MMCallError>
+    }
+    await follow.stop()                // graceful: ask the server to wrap up; terminal still arrives
+    // follow.cancel() aborts the whole call instead.
+
+    // Client-stream: send through the credit-gated writer, END, await terminal.
+    let imp = await connection.call(Journal.import, on: notes, Journal.ImportRequest())
+    _ = await imp.send(Journal.ImportLine(line: "bulk"))
+    await imp.finish()
+    _ = await imp.result()
+
+    await connection.close()
+}
+```
+
+In a daemon-style client, skip the task group and add `MMClientConnectionService(connection: connection)` to the `ServiceGroup` instead of calling `run()` by hand.
+
+Verify the schema like the server does:
+
+```swift
+switch await connection.discoverSchema() {
+case .success(let schema):
+    let difference = SchemaDifference(local: journalContract, remote: schema)
+    print(difference)                  // "in sync" or the non-empty buckets
+case .failure(let error): ...
+}
+```
+
+A hello fingerprint mismatch is a signal to run discovery and degrade deliberately — never a disconnect. Reconnection is out of scope by design: a closed connection stays closed; watch `stateUpdates()` (`.connected` → `.closed(reason:)`) and let the application own retry policy.
+
+## Authorization model (why calls get denied)
+
+- Identity is kernel-attested peer credentials on Unix sockets; TCP peers are `anonymous`. No token crosses the wire, and uid 0 is not special.
+- Entities are dotted paths forming a tree. Dispatch needs `.execute` on **every ancestor** of the target (like directory x bits), then the method's declared class on the target itself.
+- Classes resolve first-matching-class-wins: an owner match is judged by owner bits alone even if group/other would grant more — exactly POSIX.
+- A missing ACL record means `permissionDenied`, and existence is never leaked. If discovery shows fewer methods than the server defines, that's traversal filtering, not a bug.
+- Authorization runs before a single payload byte is decoded.
+
+## House rules that apply to any code you write here
+
+Swift 6 strict concurrency, macOS 15+/Linux. No Dispatch/GCD, no free-floating `Task {}`, no `.wait()`, no `print()`, no `Date()`, no `@unchecked Sendable`. Public APIs surface failures as typed `Result`s (`MMCallError`, `MMWireError`, `MMErrorObject`), not thrown errors. Tests use Swift Testing (`@Test`/`#expect`), in the repo's three tiers: `EmbeddedChannel` for handlers, plain value tests for domain logic, real temp-dir Unix sockets for integration. Read `CLAUDE.md` before deviating from anything.
+
+## Verify your work
+
+1. `swift build` — the `For` cross-check and macro fidelity are compile/boot-time gates.
+2. Boot the daemon: `contract.verify(against:)` must pass and log clean.
+3. Run the client against it end-to-end (the repo's own pair: `swift run mm-example-daemon` + `swift run mm-example-client`), including one deliberate denial to confirm the ACL table does what you think.
+4. `swift test` — add tests in the tier that matches what you touched.
+
+## Where to go deeper
+
+- `Sources/MMWire/MMWire.docc/WireProtocol.md` — the normative byte-level spec (framing, hello, envelope kinds 0–6, termination matrix, fingerprint, conformance vectors).
+- `Sources/MMServer/MMServer.docc/IntegrationGuide.md` — production embedding: SQLite-backed ACL provider, hardening knobs, operational defaults.
+- `Sources/MMServer/MMServer.docc/RemoteAccess.md` — SSH socket forwarding, systemd/launchd recipes, TCP caveats.
+- `Examples/` — the runnable daemon + client pair mirroring everything above.

@@ -1,0 +1,100 @@
+# ``MMSchema``
+
+The contract layer: method descriptors, wire type schemas, the declarative schema DSL and `#schema` macro, filesystem-style ACLs, peer identity, and the schema fingerprint.
+
+## Overview
+
+MMSchema is pure values — no NIO import, no IO — so client-only processes can depend on it (plus MMClient) without pulling in server machinery.
+
+A wire contract is a set of **method descriptors**: ``Method`` for unary calls, and ``ServerStreamMethod``, ``ClientStreamMethod``, and ``BidirectionalStreamMethod`` for the three streaming shapes of the four-part method model (opening request, optional request stream, optional response stream, terminal response). Descriptors erase to ``AnyMethod`` and are grouped in a ``MethodNamespace``, whose `all` list is what a server cross-checks at startup and what discovery serves as ``MethodSignature`` values.
+
+Contracts can be *declared as data* with the runtime DSL — `Schema("prefix") { Enum / Type / Call { Access; Request; RequestStream; ResponseStream; Response } }` — producing a ``SchemaDeclaration`` that can compute its ``SchemaFingerprint`` and `verify(against:)` the compiled Swift types. The `Call` part functions — `Access`, `Request`, `Response`, `RequestStream`, and `ResponseStream` — are overloaded to take a fields block, a bare ``TypeSchema``, a ``SchemaDescribable`` metatype, or a named-type reference; the full overload set is listed in the function index below. The `#schema` macro (see ``schema(_:_:)``) takes the same declaration at compile time and generates everything it implies: integer-keyed request/response/element structs, string-valued wire enums with an `unknown` fallback, the typed descriptors, `all`, `types`, and the re-emitted contract. Shared named types live in `#schemaTypes` containers (``schemaTypes(_:_:)``) or hand-written ``SchemaDescribable`` types.
+
+Wire shapes are modeled by ``TypeSchema`` (structures with integer-keyed fields, string-valued enumerations, nominal ``TypeDefinition`` references) and discovered from Swift types by `TypeSchema.of(_:)` — a memoized decoder probe with ``SchemaDescribable`` as the escape hatch. Descriptions are doc-only everywhere: served by discovery, never hashed into the fingerprint.
+
+Authorization is filesystem-style: ``EntityName`` is a validated dotted path, ``EntityACL`` carries owner uid, group gid, and 9 rwx/ugo mode bits with first-matching-class-wins semantics, and ``AccessMode`` is the rwx option set a method declares. ``PeerIdentity`` is deliberately not Codable — it is kernel-derived only and never crosses the wire.
+
+Every server also speaks the ``Builtins``: `rpc.schema` (discovery, scoped by the envelope entity) and `entity.stat` (an entity's ACL record).
+
+## Topics
+
+### Method descriptors
+
+- ``Method``
+- ``ServerStreamMethod``
+- ``ClientStreamMethod``
+- ``BidirectionalStreamMethod``
+- ``AnyMethod``
+- ``MethodSignature``
+- ``MethodDocumentation``
+- ``MethodNamespace``
+- ``SchemaBuilder``
+
+### Contract DSL
+
+- ``Schema(_:_:)``
+- ``Types(_:_:)``
+- ``Call(_:description:_:)``
+- ``Enum(_:description:_:)``
+- ``Type(_:description:_:)``
+- ``Case(_:description:)``
+- ``Field``
+- ``Fields(_:)``
+- ``StreamOptions``
+
+### Contract declarations
+
+- ``SchemaDeclaration``
+- ``TypeNamespaceDeclaration``
+- ``MethodDeclaration``
+- ``TypeDeclaration``
+- ``EnumCaseDeclaration``
+- ``SchemaEntry``
+- ``MethodPart``
+
+### DSL result builders
+
+- ``SchemaDeclarationBuilder``
+- ``MethodDeclarationBuilder``
+- ``SchemaFieldsBuilder``
+- ``EnumCasesBuilder``
+- ``SchemaTypesBuilder``
+
+### Macros
+
+- ``schema(_:_:)``
+- ``schemaTypes(_:_:)``
+
+### Type schemas
+
+- ``TypeSchema``
+- ``TypeDefinition``
+- ``TypeNamespace``
+- ``SchemaDescribable``
+
+### Builtins
+
+- ``Builtins``
+- ``SchemaRequest``
+- ``SchemaResponse``
+- ``StatRequest``
+- ``StatResponse``
+
+### Authorization
+
+- ``AccessMode``
+- ``EntityACL``
+
+### Identity and naming
+
+- ``PeerIdentity``
+- ``EntityName``
+
+### Fingerprint
+
+- ``SchemaFingerprint``
+
+### Errors
+
+- ``SchemaError``
+- ``InvalidEntityNameReason``

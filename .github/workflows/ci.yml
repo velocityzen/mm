@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  no-dispatch:
+    name: No Dispatch symbols
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Forbid Dispatch and GCD symbols in sources and tests
+        run: |
+          # Matches GCD API symbols only — not the English word "Dispatch" in prose.
+          if grep -rn --include='*.swift' -E '\bDispatch(Queue|Group|Semaphore|Source|Sources|WorkItem|IO|Data|Time|TimeInterval|Wall|WallTime|Predicate|QoS|SpecificKey|Object)\b|\bdispatch_[a-z_]+\b|^[[:space:]]*import[[:space:]]+Dispatch\b' Sources Tests; then
+            echo 'Dispatch/GCD symbols are forbidden in this codebase (see CLAUDE.md).'
+            exit 1
+          fi
+
+  test-macos:
+    name: Test (macOS)
+    # macos-26 ships Xcode 26.x (Swift >= 6.2) by default; the suite uses
+    # Swift Testing exit tests (#expect(processExitsWith:), ST-0008), which
+    # require Swift 6.2+.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: swift test
+
+  test-linux:
+    name: Test (Linux)
+    runs-on: ubuntu-24.04
+    # Swift 6.2+ required for #expect(processExitsWith:) exit tests; 6.3
+    # matches the toolchain the suite is developed and verified against.
+    container: swift:6.3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: swift test

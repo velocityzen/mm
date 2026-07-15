@@ -1,0 +1,381 @@
+import Logging
+import MMSchema
+import MMWire
+import NIOConcurrencyHelpers
+import NIOCore
+import ServiceLifecycle
+import Testing
+
+@testable import MMClient
+@testable import MMServer
+
+/// End-to-end tests driving the real `MMService` through the real
+/// `MMClientConnection` over a temp-dir unix socket — the typed twin of the
+/// raw-frame suite in `ServerIntegrationTests`. The raw suite validates the
+/// server against the wire spec with hand-built bytes; this one validates that
+/// the two library halves actually compose.
+@Suite("MMClient against MMServer over a real temp-dir unix socket")
+struct ClientIntegrationTests {
+    @Test("a typed call round-trips: encode, authorize, dispatch, decode")
+    func typedEchoRoundTrip() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                let (reply, runResult) = try await withConnectedClient(unixPath: path) {
+                    connection in
+                    await connection.call(
+                        TestMethods.echo, on: entity("box.item"),
+                        EchoRequest(entity: entity("box.item"), value: 42))
+                }
+                #expect(reply == .success(EchoResponse(value: 42)))
+                if case .failure(let error) = runResult {
+                    Issue.record("run() must end cleanly, got \(error)")
+                }
+            }
+        }
+    }
+
+    @Test("concurrent calls multiplex on one connection; each response reaches its caller")
+    func concurrentCallsMultiplex() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                _ = try await withConnectedClient(unixPath: path) { connection in
+                    try await withThrowingTaskGroup(of: Void.self) { calls in
+                        for value in 1...TestServer.burstConcurrency {
+                            calls.addTask {
+                                let reply = await connection.call(
+                                    TestMethods.burst, on: entity("box.item"),
+                                    EchoRequest(entity: entity("box.item"), value: value)
+                                )
+                                #expect(reply == .success(EchoResponse(value: value)))
+                            }
+                        }
+                        // All 8 handlers parked: every request is in flight
+                        // simultaneously, so their responses race the funnel.
+                        _ = try await withDeadline { try await server.burstStarted.wait() }
+                        server.burstGate.fire(())
+                        try await calls.waitForAll()
+                    }
+                }
+            }
+        }
+    }
+
+    @Test("authorization and application failures surface as their typed call errors")
+    func errorMapping() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                _ = try await withConnectedClient(unixPath: path) { connection in
+                    // box.locked: we are the owner and the owner class denies
+                    // (mode 0o077) — first-matching-class-wins, so .denied.
+                    let denied = await connection.call(
+                        TestMethods.echo, on: entity("box.locked"),
+                        EchoRequest(entity: entity("box.locked"), value: 1))
+                    #expect(denied == .failure(.denied))
+                    // nope.method is registered nowhere.
+                    let unknown = await connection.call(
+                        TestMethods.unregistered, on: entity("box.item"),
+                        TargetRequest(entity: entity("box.item"), ))
+                    #expect(unknown == .failure(.unknownMethod))
+                    // fail.run answers a fixed application error: code >= 64
+                    // reaches the caller verbatim, payload intact.
+                    let remote = await connection.call(
+                        TestMethods.fail, on: entity("box.item"),
+                        TargetRequest(entity: entity("box.item"), ))
+                    #expect(remote == .failure(.remote(applicationErrorObject())))
+                }
+            }
+        }
+    }
+
+    @Test("the typed client connects over TCP: anonymous peer reaches other-class grants")
+    func typedClientOverTCP() async throws {
+        let server = makeTestServer(
+            configuration: .init(endpoint: .tcp(host: "127.0.0.1", port: 0))
+        )
+        try await withRunningServer(server) { _ in
+            let address = try await withDeadline { try await server.bound.wait() }
+            let port = try #require(address.port)
+            let (replies, runResult) = try await withConnectedClient(
+                to: .tcp(host: "127.0.0.1", port: port)
+            ) {
+                connection -> (Result<PingResponse, MMCallError>, Result<EchoResponse, MMCallError>)
+                in
+                // The other-class x grant is callable for the anonymous TCP
+                // peer; owner-class-only entities deny it.
+                let ping = await connection.call(
+                    TestMethods.ping, on: entity("pub.thing"),
+                    TargetRequest(entity: entity("pub.thing"), ))
+                let denied = await connection.call(
+                    TestMethods.echo, on: entity("box.item"),
+                    EchoRequest(entity: entity("box.item"), value: 1))
+                return (ping, denied)
+            }
+            #expect(replies.0 == .success(PingResponse(ok: true)))
+            #expect(replies.1 == .failure(.denied))
+            if case .failure(let error) = runResult {
+                Issue.record("run() must end cleanly over TCP, got \(error)")
+            }
+        }
+    }
+
+    @Test("client idleTimeout reaps a silent connection: the pending call fails connectionClosed")
+    func clientIdleReapsSilentConnection() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                let (outcome, runResult) = try await withConnectedClient(
+                    unixPath: path,
+                    configuration: .init(idleTimeout: .milliseconds(200))
+                ) { connection in
+                    // slow.wait parks server-side, so after the request write
+                    // the wire is silent in both directions: the client's
+                    // reaper closes the connection (real time — the test only
+                    // waits for it, so load affects duration, not outcome).
+                    let reply = await connection.call(
+                        TestMethods.slow, on: entity("box.item"),
+                        TargetRequest(entity: entity("box.item"), ))
+                    // A local reaper close is a clean end, per the
+                    // configuration contract.
+                    #expect(connection.state == .closed(reason: nil))
+                    return reply
+                }
+                // Release the parked handler so the server drain never waits.
+                server.slowGate.fire(())
+                #expect(outcome == .failure(.connectionClosed))
+                if case .failure(let error) = runResult {
+                    Issue.record("run() must end cleanly on idle reap, got \(error)")
+                }
+            }
+        }
+    }
+
+    @Test("graceful server shutdown completes the in-flight call, then the client closes cleanly")
+    func gracefulShutdownCompletesInFlightCall() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { group in
+                _ = try await withConnectedClient(unixPath: path) { connection in
+                    try await withThrowingTaskGroup(of: Void.self) { calls in
+                        calls.addTask {
+                            let reply = await connection.call(
+                                TestMethods.slow, on: entity("box.item"),
+                                TargetRequest(entity: entity("box.item"), ))
+                            #expect(reply == .success(EchoResponse(value: 99)))
+                        }
+                        _ = try await withDeadline { try await server.slowStarted.wait() }
+                        // Drain begins with the call still parked server-side.
+                        await group.triggerGracefulShutdown()
+                        server.slowGate.fire(())
+                        try await calls.waitForAll()
+                        // The server drained and closed; the client observes it
+                        // as a clean close, not an error.
+                        let terminal = try await withDeadline { () -> ClientState? in
+                            var states = connection.stateUpdates().makeAsyncIterator()
+                            while let state = await states.next() {
+                                if case .closed = state { return state }
+                            }
+                            return nil
+                        }
+                        #expect(terminal == .closed(reason: nil))
+                    }
+                }
+            }
+        }
+    }
+
+    @Test("abrupt server death fails every pending call exactly once")
+    func abruptServerDeathFailsPendingCalls() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            let stopServer = Signal<Void>()
+            try await withThrowingTaskGroup(of: Void.self) { tasks in
+                tasks.addTask {
+                    // The server's task tree, killed by cancellation on signal:
+                    // SIGINT-equivalent — no drain, connections torn down.
+                    try? await withDeadline(seconds: 60) {
+                        await withThrowingTaskGroup(of: Void.self) { serverGroup in
+                            serverGroup.addTask { try await server.service.run() }
+                            serverGroup.addTask {
+                                try await stopServer.wait()
+                                throw DeadlineExceeded()  // any throw cancels run()
+                            }
+                            _ = try? await serverGroup.next()
+                            serverGroup.cancelAll()
+                        }
+                    }
+                }
+                _ = try await withDeadline { try await server.bound.wait() }
+                let (callResult, runResult) = try await withConnectedClient(unixPath: path) {
+                    connection -> Result<EchoResponse, MMCallError> in
+                    try await withThrowingTaskGroup(
+                        of: Result<EchoResponse, MMCallError>.self
+                    ) { calls in
+                        calls.addTask {
+                            await connection.call(
+                                TestMethods.slow, on: entity("box.item"),
+                                TargetRequest(entity: entity("box.item"), ))
+                        }
+                        _ = try await withDeadline { try await server.slowStarted.wait() }
+                        stopServer.fire(())
+                        guard let result = try await calls.next() else {
+                            throw DeadlineExceeded()
+                        }
+                        return result
+                    }
+                }
+                // Exactly-once is structural (the continuation resumes once or
+                // the harness deadline fires); the failure is a death, not a
+                // response. EOF surfaces as connectionClosed, an RST as
+                // transport — both are honest deaths.
+                switch callResult {
+                    case .failure(.connectionClosed), .failure(.transport):
+                        break
+                    default:
+                        Issue.record("pending call must fail on server death, got \(callResult)")
+                }
+                _ = runResult  // clean or transport — the loop must have returned either way
+                tasks.cancelAll()
+                try? await tasks.waitForAll()
+            }
+        }
+    }
+
+    @Test("cancelling a gated call abandons its msgid; the late response is dropped harmlessly")
+    func cancellationAbandonsGatedCall() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                _ = try await withConnectedClient(unixPath: path) { connection in
+                    let result = NIOLockedValueBox<Result<EchoResponse, MMCallError>?>(nil)
+                    try await withThrowingTaskGroup(of: Void.self) { calls in
+                        calls.addTask {
+                            let reply = await connection.call(
+                                TestMethods.slow, on: entity("box.item"),
+                                TargetRequest(entity: entity("box.item"), ))
+                            result.withLockedValue { $0 = reply }
+                        }
+                        _ = try await withDeadline { try await server.slowStarted.wait() }
+                        calls.cancelAll()
+                        try await calls.waitForAll()
+                    }
+                    #expect(result.withLockedValue { $0 } == .failure(.cancelled))
+                    // Release the handler: its late response hits an abandoned
+                    // msgid and is dropped. The connection must stay healthy
+                    // and must not misdeliver it to the next call.
+                    server.slowGate.fire(())
+                    let echo = await connection.call(
+                        TestMethods.echo, on: entity("box.item"),
+                        EchoRequest(entity: entity("box.item"), value: 8))
+                    #expect(echo == .success(EchoResponse(value: 8)))
+                }
+            }
+        }
+    }
+
+    @Test(
+        "discovery returns the traversal-filtered list, the unfiltered fingerprint, and feeds SchemaDifference"
+    )
+    func discoveryEndToEnd() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                // First connection: no expectation — fingerprintMatched is nil.
+                let (schema, _) = try await withConnectedClient(unixPath: path) { connection in
+                    #expect(connection.helloInfo.fingerprintMatched == nil)
+                    return try await connection.discoverSchema().get()
+                }
+                // Filtered by OUR traversal rights (see fixtureACLs); the
+                // fingerprint covers the complete, unfiltered method set. The
+                // S3 streaming fixtures live under "box" (owner 0o700), so they
+                // are traversable-and-visible to us alongside echo/pub.
+                #expect(
+                    schema.methods.map(\.name) == [
+                        "box.follow", "box.followEndPark", "box.followFail",
+                        "box.followGated", "box.followStoppable", "box.import",
+                        "box.importGated", "box.importStop", "box.pipe",
+                        "echo.run", "pub.ping",
+                    ]
+                )
+                #expect(schema.fingerprint == server.service.router.fingerprint)
+
+                // Reconnect expecting the right fingerprint, then a wrong one.
+                _ = try await withConnectedClient(
+                    unixPath: path,
+                    configuration: .init(expectedFingerprint: schema.fingerprint)
+                ) { connection in
+                    #expect(connection.helloInfo.fingerprintMatched == true)
+                }
+                _ = try await withConnectedClient(
+                    unixPath: path,
+                    configuration: .init(expectedFingerprint: schema.fingerprint &+ 1)
+                ) { connection in
+                    #expect(connection.helloInfo.fingerprintMatched == false)
+                    #expect(connection.helloInfo.serverFingerprint == schema.fingerprint)
+                    // The mismatch triggers discovery; the diff pinpoints how
+                    // this build's view skews from what the server serves.
+                    let remote = try await connection.discoverSchema().get()
+                    let localEcho = try Method<EchoRequest, EchoResponse>(
+                        name: "echo.run", access: .read  // server declares .write
+                    ).signature().get()
+                    let localPing = try Method<EchoRequest, PingResponse>(
+                        name: "pub.ping", access: .execute  // request shape differs
+                    ).signature().get()
+                    let localGone = try TestMethods.unregistered.signature().get()
+                    let diff = SchemaDifference(
+                        local: [localEcho, localPing, localGone], remote: remote)
+                    #expect(diff.missingMethods.map(\.name) == ["nope.method"])
+                    #expect(diff.accessChanged.map(\.local.name) == ["echo.run"])
+                    #expect(diff.signatureChanged.map(\.local.name) == ["pub.ping"])
+                    // Remote-only: every S3 streaming method the local view does
+                    // not declare (the diff surfaces them so a stale client sees
+                    // what the server gained).
+                    #expect(
+                        diff.remoteOnly.map(\.name) == [
+                            "box.follow", "box.followEndPark", "box.followFail",
+                            "box.followGated", "box.followStoppable", "box.import",
+                            "box.importGated", "box.importStop", "box.pipe",
+                        ]
+                    )
+                }
+            }
+        }
+    }
+
+    @Test("the ServiceGroup adapter runs the loop and drains cleanly on graceful shutdown")
+    func serviceGroupLifecycle() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                let connection = try await MMClientConnection.connect(
+                    to: .unix(path: path),
+                    configuration: .init(),
+                    logger: quietClientLogger()
+                ).get()
+                let clientGroup = ServiceGroup(
+                    configuration: .init(
+                        services: [
+                            .init(service: MMClientConnectionService(connection: connection))
+                        ],
+                        logger: Logger(label: "mm.test.client-group")
+                    )
+                )
+                try await withThrowingTaskGroup(of: Void.self) { tasks in
+                    tasks.addTask {
+                        try await withDeadline(seconds: 30) { try await clientGroup.run() }
+                    }
+                    // Calls park until the group starts the loop, then flow.
+                    let reply = await connection.call(
+                        TestMethods.echo, on: entity("box.item"),
+                        EchoRequest(entity: entity("box.item"), value: 5))
+                    #expect(reply == .success(EchoResponse(value: 5)))
+                    await clientGroup.triggerGracefulShutdown()
+                    try await tasks.waitForAll()
+                }
+                #expect(connection.state == .closed(reason: nil))
+            }
+        }
+    }
+}
