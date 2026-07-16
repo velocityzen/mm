@@ -834,12 +834,20 @@ public struct MMService: Service {
         }
     }
 
-    /// Filesystem identity (device + inode) of the socket file this instance
-    /// bound, captured right after `bind(2)` and compared before the shutdown
-    /// unlink. Internal so the guard is unit-testable.
+    /// Filesystem identity (device + inode + change time) of the socket file
+    /// this instance bound, captured right after `bind(2)` and compared before
+    /// the shutdown unlink. Device+inode alone is not enough: ext4 (and
+    /// friends) reuse a freed inode number immediately, so a successor's
+    /// replacement file at the same path can collide with the identity
+    /// captured here — the ctime (set at creation, untouched thereafter; the
+    /// bind-time chmod happens before capture) disambiguates the two files.
+    /// APFS never reuses inode numbers, which is why the collision only
+    /// occurs on Linux. Internal so the guard is unit-testable.
     struct SocketFileIdentity: Hashable, Sendable {
         var device: UInt64
         var inode: UInt64
+        var changeTimeSeconds: Int64
+        var changeTimeNanoseconds: Int64
     }
 
     /// `lstat(2)` the path into a ``SocketFileIdentity``; nil when the path
@@ -848,9 +856,16 @@ public struct MMService: Service {
     static func socketFileIdentity(path: String) -> SocketFileIdentity? {
         var info = stat()
         guard lstat(path, &info) == 0 else { return nil }
+        #if canImport(Darwin)
+        let changeTime = info.st_ctimespec
+        #else
+        let changeTime = info.st_ctim
+        #endif
         return SocketFileIdentity(
             device: UInt64(truncatingIfNeeded: info.st_dev),
-            inode: UInt64(truncatingIfNeeded: info.st_ino)
+            inode: UInt64(truncatingIfNeeded: info.st_ino),
+            changeTimeSeconds: Int64(changeTime.tv_sec),
+            changeTimeNanoseconds: Int64(changeTime.tv_nsec)
         )
     }
 
@@ -865,9 +880,10 @@ public struct MMService: Service {
     /// path is refused, so a *successor* instance's liveness probe rightly
     /// classifies the file as stale, unlinks it, and binds its own socket at
     /// the same path. An unconditional unlink here would then delete the
-    /// successor's live socket. Comparing the path's current device/inode
-    /// against the identity captured at bind time restricts the unlink to the
-    /// file this instance actually created. (The lstat→unlink pair is not
+    /// successor's live socket. Comparing the path's current identity (see
+    /// ``SocketFileIdentity``) against the one captured at bind time restricts
+    /// the unlink to the file this instance actually created. (The
+    /// lstat→unlink pair is not
     /// atomic; the guard is best-effort against the drain-window race, which
     /// is the one that occurs in practice.)
     static func removeSocketFile(

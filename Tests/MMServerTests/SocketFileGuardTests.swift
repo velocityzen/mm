@@ -47,6 +47,17 @@ struct SocketFileGuardTests {
             try self.createFile(path: path)
             let original = try #require(MMService.socketFileIdentity(path: path))
 
+            // Hold the original file open across the replacement: ext4 reuses
+            // a freed inode number immediately, so without this the
+            // replacement can collide with `original` on device+inode AND on
+            // ctime (created within the same kernel clock tick) — a same-tick
+            // collision no production drain window can produce, but a
+            // back-to-back unlink/create here does. The open descriptor pins
+            // the inode, guaranteeing the replacement gets a fresh one.
+            let held = open(path, O_RDONLY)
+            #expect(held >= 0)
+            defer { close(held) }
+
             // Simulate the successor: the path is unlinked and re-bound while
             // the original instance is still draining.
             #expect(unlink(path) == 0)
@@ -71,7 +82,8 @@ struct SocketFileGuardTests {
             // Path absent: nothing to do, no crash, regardless of identity.
             MMService.removeSocketFile(
                 path: path,
-                owned: MMService.SocketFileIdentity(device: 1, inode: 1),
+                owned: MMService.SocketFileIdentity(
+                    device: 1, inode: 1, changeTimeSeconds: 0, changeTimeNanoseconds: 0),
                 logger: logger
             )
             #expect(MMService.socketFileIdentity(path: path) == nil)
