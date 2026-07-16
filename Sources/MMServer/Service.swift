@@ -197,6 +197,14 @@ public struct MMService: Service {
                 .serverChannelInitializer { channel in
                     self.initializeServerChannel(channel)
                 }
+                // Half-closure is load-bearing for the graceful drain: the
+                // shutdown path closes the input half (see handleConnection)
+                // and expects in-flight responses to keep flushing. Without
+                // this option, Linux (epoll) reports the shut-down input as
+                // read-EOF and NIO escalates it to a full channel close,
+                // killing the write side before terminals flush; kqueue does
+                // not, which is how the drain worked on Darwin only.
+                .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
                 .bind(descriptor) { channel in
                     self.initializeChildChannel(channel)
                 }
@@ -232,6 +240,9 @@ public struct MMService: Service {
                 self.initializeServerChannel(channel)
             }
             .childChannelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
+            // Same rationale as the unix bootstrap: the graceful-shutdown
+            // input close must not escalate to a full close on Linux.
+            .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
             .bind(host: host, port: port) { channel in
                 self.initializeChildChannel(channel)
             }
@@ -740,7 +751,9 @@ public struct MMService: Service {
     /// after — run unconditionally on every platform for uniformity.
     static func makeUnixStreamSocket() throws -> CInt {
         #if canImport(Glibc)
-        let socketType = SOCK_STREAM | CInt(bitPattern: Glibc.SOCK_CLOEXEC.rawValue)
+        // Glibc imports SOCK_STREAM/SOCK_CLOEXEC as the __socket_type enum,
+        // not CInt, so OR the raw values and convert once.
+        let socketType = CInt(bitPattern: SOCK_STREAM.rawValue | Glibc.SOCK_CLOEXEC.rawValue)
         #elseif canImport(Musl)
         let socketType = SOCK_STREAM | Musl.SOCK_CLOEXEC
         #else

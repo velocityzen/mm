@@ -158,6 +158,17 @@ enum PeerCredentials {
         return Self.identity(uid: credentials.cr_uid, groups: groups, pid: pid)
     }
     #elseif os(Linux)
+    /// Layout-compatible mirror of Linux `struct ucred` from `<sys/socket.h>`
+    /// (`{pid, uid, gid}` in declaration order). Declared locally because the
+    /// type is guarded by `__USE_GNU` in the C headers and not exported by
+    /// the Glibc/Musl Swift overlays; `unsafeGetSocketOption` only needs a
+    /// value type whose size and layout match what the kernel writes.
+    struct PeerUcred {
+        var pid: pid_t
+        var uid: uid_t
+        var gid: gid_t
+    }
+
     /// Linux capture path: `getsockopt(SOL_SOCKET, SO_PEERCRED)` for
     /// `ucred{pid, uid, gid}` (read on the event loop through NIO's
     /// `SocketOptionProvider` unsafe accessors), then one bounded read of
@@ -180,7 +191,7 @@ enum PeerCredentials {
             return .failure(.unsupportedChannel)
         }
         do {
-            let credentials: ucred = try await provider.unsafeGetSocketOption(
+            let credentials: PeerUcred = try await provider.unsafeGetSocketOption(
                 level: SocketOptionLevel(SOL_SOCKET),
                 name: SocketOptionName(SO_PEERCRED)
             ).get()
