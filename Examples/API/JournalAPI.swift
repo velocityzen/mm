@@ -1,3 +1,5 @@
+import ArgumentParser
+import MMCLI
 import MMSchema
 
 /// The example's shared wire contract — written exactly once.
@@ -32,7 +34,7 @@ import MMSchema
 /// self-documenting — while staying out of the fingerprint and all
 /// compatibility checks: doc edits are never schema drift.
 public enum Journal: MethodNamespace {
-    #schema("journal") {
+    #schema("journal", cli: .enabled) {
         Enum("Priority", description: "How urgent a line is") {
             Case("normal")
             Case("urgent", description: "Surfaces immediately to followers")
@@ -47,9 +49,11 @@ public enum Journal: MethodNamespace {
             Field("count", .int)
         }
         Call("append", description: "Appends one line to a journal") {
+            // The wire method stays journal.append; the CLI says `journal add`.
+            CLI(.command("add", aliases: ["append"]))
             Access { .write }
             Request {
-                Field("line", .string, description: "The line text")
+                Field("line", .string, description: "The line text", cli: .argument)
                 Field(
                     "meta", .optional(.reference("LineMeta")),
                     description: "Optional attribution")

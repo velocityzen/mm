@@ -337,6 +337,10 @@ public struct MethodDeclaration: Sendable, Hashable {
     public let responseDescription: String?
     public let requestStreamDescription: String?
     public let responseStreamDescription: String?
+    /// The CLI presentation overlay, when the call declares one. Local to the
+    /// declaration: never forwarded into ``MethodSignature``, never on the
+    /// wire — consumed by `#schema`'s CLI generation.
+    public let cli: CLIOverlay?
 }
 
 /// One declared named type, produced by ``Enum(_:description:_:)`` or
@@ -471,23 +475,34 @@ public struct Field: Sendable, Hashable {
     let name: String
     let type: TypeSchema
     let description: String?
+    /// CLI presentation hint, consumed by `#schema`'s CLI generation; never
+    /// part of the wire contract (dropped when the declaration's shapes are
+    /// assembled).
+    let cli: CLIArgument?
 
     /// An auto-keyed field of any wire shape: `Field("line", .string)`,
     /// `Field("note", .optional(.string))`, `Field("tags", .array(.string))`.
-    public init(_ name: String, _ type: TypeSchema, description: String? = nil) {
+    public init(
+        _ name: String, _ type: TypeSchema, description: String? = nil, cli: CLIArgument? = nil
+    ) {
         self.pinnedKey = nil
         self.name = name
         self.type = type
         self.description = description
+        self.cli = cli
     }
 
     /// A key-pinned field — the evolution-safe form.
-    public init(_ key: Int, _ name: String, _ type: TypeSchema, description: String? = nil) {
+    public init(
+        _ key: Int, _ name: String, _ type: TypeSchema, description: String? = nil,
+        cli: CLIArgument? = nil
+    ) {
         precondition(key >= 0, "field keys are non-negative integers (\(name) pinned \(key))")
         self.pinnedKey = key
         self.name = name
         self.type = type
         self.description = description
+        self.cli = cli
     }
 
     /// An auto-keyed field referencing a named type by name:
@@ -495,13 +510,18 @@ public struct Field: Sendable, Hashable {
     /// (qualified by the enclosing `Schema`/`Types`), or
     /// `Field("meta", "common.LineMeta")` for a dotted, already-qualified
     /// cross-schema reference (validated at server startup).
-    public init(_ name: String, _ typeName: String, description: String? = nil) {
-        self.init(name, .reference(typeName), description: description)
+    public init(
+        _ name: String, _ typeName: String, description: String? = nil, cli: CLIArgument? = nil
+    ) {
+        self.init(name, .reference(typeName), description: description, cli: cli)
     }
 
     /// A key-pinned named-type reference.
-    public init(_ key: Int, _ name: String, _ typeName: String, description: String? = nil) {
-        self.init(key, name, .reference(typeName), description: description)
+    public init(
+        _ key: Int, _ name: String, _ typeName: String, description: String? = nil,
+        cli: CLIArgument? = nil
+    ) {
+        self.init(key, name, .reference(typeName), description: description, cli: cli)
     }
 
     /// A field referencing a named type through its generated Swift type —
@@ -509,32 +529,34 @@ public struct Field: Sendable, Hashable {
     /// type's described schema (a qualified `.reference`) lands in the wire
     /// contract, and `#schema` emits the Swift type as the property type.
     public init(
-        _ name: String, _ type: (some SchemaDescribable).Type, description: String? = nil
+        _ name: String, _ type: (some SchemaDescribable).Type, description: String? = nil,
+        cli: CLIArgument? = nil
     ) {
-        self.init(name, type.schema, description: description)
+        self.init(name, type.schema, description: description, cli: cli)
     }
 
     /// A key-pinned Swift-type reference.
     public init(
         _ key: Int, _ name: String, _ type: (some SchemaDescribable).Type,
-        description: String? = nil
+        description: String? = nil, cli: CLIArgument? = nil
     ) {
-        self.init(key, name, type.schema, description: description)
+        self.init(key, name, type.schema, description: description, cli: cli)
     }
 
     /// An auto-keyed nested structure: `Field("owner") { Field("uid", .uint) }`.
     public init(
-        _ name: String, description: String? = nil, @SchemaFieldsBuilder _ fields: () -> [Field]
+        _ name: String, description: String? = nil, cli: CLIArgument? = nil,
+        @SchemaFieldsBuilder _ fields: () -> [Field]
     ) {
-        self.init(name, Fields(fields), description: description)
+        self.init(name, Fields(fields), description: description, cli: cli)
     }
 
     /// A key-pinned nested structure.
     public init(
-        _ key: Int, _ name: String, description: String? = nil,
+        _ key: Int, _ name: String, description: String? = nil, cli: CLIArgument? = nil,
         @SchemaFieldsBuilder _ fields: () -> [Field]
     ) {
-        self.init(key, name, Fields(fields), description: description)
+        self.init(key, name, Fields(fields), description: description, cli: cli)
     }
 }
 
@@ -558,8 +580,8 @@ public enum SchemaFieldsBuilder {
 }
 
 /// One element inside a ``Call(_:description:_:)`` block: `Access`,
-/// `Request`, `RequestStream`, `Response` or
-/// `ResponseStream`.
+/// `Request`, `RequestStream`, `Response`, `ResponseStream` or the
+/// presentation-only `CLI`.
 public struct MethodPart: Sendable {
     enum Kind {
         case access(AccessMode)
@@ -567,6 +589,7 @@ public struct MethodPart: Sendable {
         case requestStream(TypeSchema, description: String?)
         case response(TypeSchema, description: String?)
         case responseStream(TypeSchema, description: String?)
+        case cli(CLIOverlay)
     }
 
     let kind: Kind
@@ -771,6 +794,7 @@ public func Call(
     var requestStream: (element: TypeSchema, description: String?)?
     var response: (payload: TypeSchema, description: String?)?
     var responseStream: (element: TypeSchema, description: String?)?
+    var cli: CLIOverlay?
     for part in parts() {
         switch part.kind {
             case .access(let mode):
@@ -790,6 +814,9 @@ public func Call(
                 precondition(
                     responseStream == nil, "Call(\"\(name)\"): ResponseStream declared twice")
                 responseStream = (element, partDescription)
+            case .cli(let overlay):
+                precondition(cli == nil, "Call(\"\(name)\"): CLI declared twice")
+                cli = overlay
         }
     }
     guard let access else {
@@ -808,7 +835,8 @@ public func Call(
         requestDescription: request?.description,
         responseDescription: response?.description,
         requestStreamDescription: requestStream?.description,
-        responseStreamDescription: responseStream?.description
+        responseStreamDescription: responseStream?.description,
+        cli: cli
     )
 }
 

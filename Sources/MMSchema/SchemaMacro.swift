@@ -46,9 +46,15 @@
 /// runtime conditionals, and no `payload:`/`.bytes` shapes (those need
 /// hand-written types with the runtime DSL). Expansion happens at member
 /// scope; `#schema` cannot be used at file scope.
+/// CLI generation (`cli: .enabled`) additionally emits one
+/// swift-argument-parser command per non-omitted call plus a namespace command
+/// group (`Journal.Command`), shaped by the declaration's `CLI(...)` parts and
+/// `Field(..., cli:)` hints. The expanding file must import `ArgumentParser`
+/// and `MMCLI` — the generated commands reference both.
 @freestanding(declaration, names: arbitrary)
 public macro schema(
     _ namespace: String,
+    cli: SchemaCLIMode = .disabled,
     @SchemaDeclarationBuilder _ content: () -> [SchemaEntry]
 ) = #externalMacro(module: "MMSchemaMacros", type: "SchemaContractMacro")
 

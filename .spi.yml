@@ -1,4 +1,4 @@
 version: 1
 builder:
   configs:
-    - documentation_targets: [MMWire, MMSchema, MMServer, MMClient]
+    - documentation_targets: [MMWire, MMSchema, MMServer, MMClient, MMCLI]

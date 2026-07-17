@@ -14,8 +14,9 @@ One package, `MatterInMotion`, four library products:
 - `MMSchema` — Method descriptors, `TypeSchema` and the schema fingerprint, `EntityACL`, `PeerIdentity`. Pure values: no NIO import, no IO.
 - `MMServer` — `Router` with a result-builder DSL, authorization, peer-credential capture, streaming handlers, `MMService` bootstrap.
 - `MMClient` — `MMClientConnection`: typed unary and streaming calls with msgid multiplexing, credit-based flow control, schema discovery.
+- `MMCLI` — the runtime behind schema-generated command-line tools (swift-argument-parser): connection options, exit-code mapping, stream drivers, `discover` and raw `call` commands.
 
-Dependency direction: `MMWire` and `MMSchema` depend on nothing internal; `MMServer` and `MMClient` depend on both. `MMSchema` stays importable by client-only processes.
+Dependency direction: `MMWire` and `MMSchema` depend on nothing internal; `MMServer` and `MMClient` depend on both; `MMCLI` sits on `MMClient`. `MMSchema` stays importable by client-only processes.
 
 ## Design principles
 
@@ -156,6 +157,48 @@ await withTaskGroup(of: Void.self) { tasks in
 
 Daemons drop `MMClientConnectionService(connection:)` into their `ServiceGroup` instead of running the loop by hand. Reconnection is deliberately out of scope: a closed connection stays closed, and retry policy belongs to the application, driven by `stateUpdates()`.
 
+### CLI
+
+The same declaration can generate a command-line tool. `#schema("echo", cli: .enabled)` additionally emits one swift-argument-parser command per call — names, `--help` text, and argument shapes all from the contract — plus a namespace group; the file then imports `ArgumentParser` and `MMCLI`. A `CLI(...)` part renames or omits commands, `Field(..., cli:)` shapes arguments (positional, flag, short, renamed, omitted), and none of it touches the wire: the overlay is never served, fingerprinted, or compared.
+
+```swift
+Call("append", description: "Appends one line to a journal") {
+    CLI(.command("add", aliases: ["append"]))      // wire: journal.append — CLI: journal add
+    Access { .write }
+    Request {
+        Field("line", .string, description: "The line text")
+    }
+    Response { Field("count", .int) }
+}
+```
+
+Mount the generated group in a root command and the whole tool is a few lines:
+
+```swift
+@main
+struct MM: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mm",
+        subcommands: [Journal.Command.self]
+    )
+}
+```
+
+```sh
+$ mm journal add journal.notes --line "hello" --socket /tmp/mm.sock
+{"count":1}
+$ mm journal add journal.system --line "nope" --socket /tmp/mm.sock
+denied: journal.append on journal.system            # exit code 77
+```
+
+**What `journal.notes` is — and why it is not in the schema.** Every call binds a verb to a noun. The schema declares the verbs and their payload shapes (`journal.append` needs `-w-` on its target and carries `{line}`); the nouns are **entities** — the runtime tree of things the daemon manages, declared server-side with their ACLs (`Entity("journal") { Entity("notes"); Entity("system", owner: 0, mode: 0o700) }`, see [Authorization model](#authorization-model)). Think syscall table versus file paths: nobody lists `/etc/passwd` in the syscall table, and `cat` still needs a path. Entities are created and destroyed without any schema change — the fingerprint never moves — and the same verb against a different entity can be a denial, as `journal.system` shows above. The two `journal`s in `mm journal add journal.notes` are different things: the command group comes from the method namespace, the entity path merely lives under the same prefix by convention (discovery filters methods by their prefix entity).
+
+So the entity is the one argument every command has, always the leading positional. Request fields default to `--field-name` options; opting a field into positional style is explicit — `Field("line", .string, cli: .argument)` turns the same command into `mm journal add journal.notes "hello"` (the shape the runnable example in `Examples/` uses).
+
+Unary calls print their response as JSON (`--output json-pretty` to taste); server-stream commands print elements as JSON lines with SIGINT mapped to a graceful STOP; client-stream commands read stdin. `MMCLI` also ships schema-driven generic commands: `discover` (what the server serves) and `call` (invoke any method by wire name with `--params` JSON).
+
+**Schema verification is automatic — never manual.** Every generated command confirms its own namespace against the live server before dispatching (one scoped discovery diff; drift prints the difference and exits 76; `--no-verify` skips it for one invocation). A purpose-built CLI upgrades that to a free check: install a completeness claim at startup — `MMCLIServerContract.install(.complete([journalContract]))` — and the expected whole-server hello fingerprint is folded at build time from the same declarations the daemon compiled (builtins included), so a matching hello proves the entire composition with zero extra round-trips; on mismatch, commands fall back to the scoped diff of the namespace in use. The same slice-check is available to any client as `connection.verifyContracts([journalContract])`. For humans and scripts there is still the explicit `verify` subcommand per group, and `--expect-fingerprint` remains as an operator-supplied deployment pin (refuses outright, exit 76).
+
 ## Streaming
 
 Every method declares four independent parts — an opening `Request`, a client-push `RequestStream`, a server-push `ResponseStream`, and a terminal `Response` — freely combinable; a unary call is the degenerate case with no stream parts. Server push is an ordinary method with a `ResponseStream`: correlated to a msgid, authorized once at open on the request's entity, fingerprinted, and discoverable — there is no separate notification mechanism.
@@ -168,7 +211,7 @@ Every method declares four independent parts — an opening `Request`, a client-
 
 Entities are dotted paths (`box.item`) forming a tree. Each entity carries an `EntityACL` — owner uid, group gid, and a 9-bit rwx/ugo mode, exactly like a file:
 
-- Peer identity comes from kernel credentials on Unix sockets; TCP peers are `anonymous` in v1 and match only the *other* class. uid 0 is not special.
+- Peer identity comes from kernel credentials on Unix sockets; TCP peers are `anonymous` in v1 and match only the _other_ class. uid 0 is not special.
 - Classes resolve **first-matching-class-wins**: an owner match is judged by the owner bits alone, even when group or other bits would grant more.
 - Dispatch requires `.execute` on **every ancestor prefix** of the target entity (like directory x bits, outermost first), then the method's declared access class (r, w, or x) on the target itself.
 - An entity with no ACL record is `permissionDenied` — existence is never leaked. Root-targeted requests are denied unless the route explicitly opts in.
@@ -204,6 +247,7 @@ The API reference is DocC, generated from the catalogs in `Sources/<Target>/<Tar
 - [MMSchema](https://swiftpackageindex.com/velocityzen/mm/documentation/mmschema) — method descriptors, the contract DSL and `#schema` macro, ACLs, the fingerprint.
 - [MMServer](https://swiftpackageindex.com/velocityzen/mm/documentation/mmserver) — router, authorization, streaming handlers, service bootstrap.
 - [MMClient](https://swiftpackageindex.com/velocityzen/mm/documentation/mmclient) — typed calls, streaming handles, discovery.
+- [MMCLI](https://swiftpackageindex.com/velocityzen/mm/documentation/mmcli) — the schema-generated CLI runtime.
 
 The long-form guides ship as DocC articles inside those catalogs (hosted with the reference, readable in-repo too):
 

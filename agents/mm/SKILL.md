@@ -204,6 +204,21 @@ case .failure(let error): ...
 
 A hello fingerprint mismatch is a signal to run discovery and degrade deliberately — never a disconnect. Reconnection is out of scope by design: a closed connection stays closed; watch `stateUpdates()` (`.connected` → `.closed(reason:)`) and let the application own retry policy.
 
+## Generating a CLI from the contract
+
+`#schema("journal", cli: .enabled)` additionally emits a swift-argument-parser command per call plus a `Journal.Command` group — names, help text, and argument shapes all come from the declaration. Requirements: the file must `import ArgumentParser` and `import MMCLI`, and the module must depend on both (the daemon then links them transitively — accepted tradeoff).
+
+- Rename/omit commands with a `CLI(...)` part: `CLI(.command("add", aliases: ["append"]))`, `CLI(.omitted)`. Default name is the kebab-cased call name.
+- Shape arguments with `Field(..., cli:)`: `.argument` (positional after the entity), `.flag` (bools), `.option("name", short: "n")`, `.omitted` (optional fields only). Defaults: `--field-name` options; wire enums become typed options (the `unknown` fallback is hidden and refused); structure/map/named-type fields take JSON literals.
+- The overlay is presentation-only by construction — stored on `MethodDeclaration`, never forwarded to `MethodSignature`, so it cannot affect discovery, fingerprints, or compatibility.
+- Every command gets the shared connection options (`--socket`/`--tcp`, timeouts, `--output json|json-pretty|raw`), an entity positional first, and sysexits-style failures (denied → 77, usage → 64, transport → 69, SIGINT → 130).
+- The entity positional (`journal.notes`) is NOT from the schema and never will be: the schema declares verbs and payload shapes; entities are the daemon's runtime tree, declared server-side with ACLs. Syscall table vs. file paths — don't try to enumerate entities in a contract, and don't drop the entity argument from a command.
+- Server-stream commands print elements as JSON lines (SIGINT = graceful STOP, second = CANCEL); client-stream commands read stdin lines (single-string-field elements take plain lines, others JSON; EOF = END); bidirectional does both.
+- `MMCLI` also ships `MMCLIDiscover` ("discover") and `MMCLIRawCall` ("call" — any method by wire name, `--params` JSON, schema-driven) to mount alongside generated groups.
+- Schema verification is automatic: every generated command diffs its own namespace against the server before dispatch (drift → exit 76; `--no-verify` opts out per invocation; denied discovery skips with a note — call rights don't imply read on the namespace entity). A companion CLI should install `MMCLIServerContract.install(.complete([journalContract]))` in its custom `main()` — the whole-server hello fingerprint folds at build time (builtins included via `SchemaFingerprint.expected(serving:)`), making verification free when it matches and a fallback diff when it doesn't. Client daemons get the same slice-check as `connection.verifyContracts([...])`.
+- Every generated group also includes explicit `verify` (exit 1 on drift, like diff). `--expect-fingerprint` stays as an *operator* deployment pin (exit 76 on mismatch) — runtime knowledge, not build knowledge; don't confuse the two scopes.
+- Assemble the tool with a root `AsyncParsableCommand` (async dispatch requires the root to be async) listing `Journal.Command.self` and friends — see `Examples/CLI/CLI.swift`.
+
 ## Authorization model (why calls get denied)
 
 - Identity is kernel-attested peer credentials on Unix sockets; TCP peers are `anonymous`. No token crosses the wire, and uid 0 is not special.

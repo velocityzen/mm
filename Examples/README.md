@@ -8,6 +8,8 @@ A runnable pair demonstrating the full matter-in-motion story — schema definit
 - [Daemon/JournalStore.swift](Daemon/JournalStore.swift) — the application state in its own file: an actor holding the journals, delegating the cross-connection change fan-out (every append, from any connection, broadcasts a `ChangeEvent` to that journal's followers) to [Daemon/FollowerHub.swift](Daemon/FollowerHub.swift) — a lock-guarded registry so each follower stream's synchronous `onTermination` can unregister a dead consumer without spawning a task; both cleanup paths (handler exit and stream termination) race safely.
 - [Client/Client.swift](Client/Client.swift) — a CLI client: hello negotiation, schema discovery + `SchemaDifference`, a `journal.follow` server → client stream with a graceful STOP, typed append/read, a `journal.import` client → server stream, and a deliberate authorization denial.
 
+- [CLI/CLI.swift](CLI/CLI.swift) — the generated command-line face: `#schema("journal", cli: .enabled)` emits every subcommand (names, help, argument shapes) from the same contract declaration; this file is just the root command mounting `Journal.Command`. The `CLI(.command("add", aliases: ["append"]))` overlay renames `journal.append` to `journal add` without touching the wire.
+
 ## Run it
 
 Two terminals:
@@ -16,6 +18,16 @@ Two terminals:
 swift run mm-example-daemon            # terminal 1: listens on /tmp/mm-example.sock
 swift run mm-example-client            # terminal 2
 ```
+
+Or drive the daemon with the generated CLI instead:
+
+```sh
+swift run mm-example-cli journal add journal.notes "hello" --socket /tmp/mm-example.sock
+swift run mm-example-cli journal read journal.notes --socket /tmp/mm-example.sock --output json-pretty
+swift run mm-example-cli journal --help
+```
+
+`journal.notes` here is the target entity — the daemon's noun, declared in its ACL tree (Daemon.swift), not in the schema. The schema contributes the verbs (`add`, `read`, their options and help); which journals exist, and who may touch them, is runtime state. Swap in `journal.system` to watch the same verb get denied by the entity's ACL alone.
 
 Both accept an optional socket path argument if `/tmp/mm-example.sock` does not suit. Stop the daemon with Ctrl-C (SIGINT) or `kill -TERM` for a graceful drain that removes the socket file.
 
