@@ -15,8 +15,8 @@ import MMSchema
 /// - one struct per request/response/stream element (integer `CodingKeys`,
 ///   `Codable & Hashable & Sendable`, public memberwise inits) — nested in
 ///   `Journal`, re-exported below as top-level aliases;
-/// - the typed descriptors (`Journal.append`, `.read`, `.follow`, `.import`)
-///   that make `client.call(...)` and `Handle(...)` compile-time typed;
+/// - the typed descriptors (`Journal.append`, `.read`, `.follow`, `.import`,
+///   `.sync`) that make `client.call(...)` and `Handle(...)` compile-time typed;
 /// - the namespace list (`Journal.all`) the router cross-checks at startup;
 /// - the runtime declaration (`Journal.contract`), re-emitted from the same
 ///   source, so the daemon's boot-time `contract.verify(against:)` is a
@@ -94,6 +94,21 @@ public enum Journal: MethodNamespace {
                 Field("total", .int)
             }
         }
+        // Duplex: both directions stream on one correlated call — lines up
+        // through the credit-gated request stream, the resulting ChangeEvent
+        // for each straight back down the response stream, and a shared
+        // terminal once the request direction ENDs.
+        Call("sync", description: "Appends a stream of lines, echoing each change back") {
+            Access { .write }
+            RequestStream("SyncLine", description: "One line to append") {
+                Field("line", .string)
+            }
+            ResponseStream(.reference("ChangeEvent"))
+            Response("SyncSummary") {
+                Field("synced", .int)
+                Field("total", .int)
+            }
+        }
     }
 }
 
@@ -111,6 +126,9 @@ public typealias FollowSummary = Journal.FollowSummary
 public typealias ImportRequest = Journal.ImportRequest
 public typealias ImportLine = Journal.ImportLine
 public typealias ImportSummary = Journal.ImportSummary
+public typealias SyncRequest = Journal.SyncRequest
+public typealias SyncLine = Journal.SyncLine
+public typealias SyncSummary = Journal.SyncSummary
 
 /// The runtime declaration the macro re-emitted — both sides hold themselves
 /// to it: the daemon verifies at boot, the client verifies and diffs it

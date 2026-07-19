@@ -125,37 +125,47 @@ Handlers can also live in reusable `RouteGroup` types — their own files, their
 
 ### Client
 
-`connect` bootstraps the transport and exchanges hellos; the host then runs the inbound loop as a structured child — no hidden tasks:
+The simple shape is the bracket — one scope owns the whole connect → run → close lifecycle, no hidden tasks and nothing to leak. `with` is sugar over `MMClientConnection.open`, the live connection as an FPBracket resource (acquire connects and starts the inbound loop; dispose closes and joins it):
 
 ```swift
 import MMClient
 
-let connection = try await MMClientConnection.connect(to: .unix(path: "/tmp/echo.sock")).get()
-await withTaskGroup(of: Void.self) { tasks in
-    tasks.addTask { _ = await connection.run() }  // the inbound loop
+let main = try! EntityName.parse("echo.main").get()
+let reply = await MMClientConnection.with(.unix(path: "/tmp/echo.sock")) { connection in
+    await connection.call(Echo.run, on: main, Echo.RunRequest(value: 42, mode: .shouted))
+}
+// Result<Result<Echo.RunResponse, MMCallError>, MMClientError>:
+// the outer layer is the connection — .failure means connect failed or the
+// connection did not survive the scope (a transport error or protocol
+// violation while the body ran; a clean EOF or the bracket's own close
+// releases successfully). The inner layer is your call.
+```
 
+One connection multiplexes many calls (msgid-correlated, concurrent callers welcome, bounded by `maxInFlightCalls`) — open one per unit of work, never per call.
+
+When the body needs its own choreography (concurrent streams, staged teardown), it happens *inside* the bracket as structured children — the bracket still owns the lifecycle around it. For the commonest case, a stream consumed alongside other calls, `withStream(_:each:_:)` packages the split (`each` runs in a structured sibling that grants credit as it consumes; the trailing closure is your main flow, free to use the connection; the join is built in — it returns only after the stream ended):
+
+```swift
+let outcome = await MMClientConnection.with(.unix(path: "/tmp/echo.sock")) { connection in
     let main = try! EntityName.parse("echo.main").get()
 
-    // Typed call: Result<Echo.RunResponse, MMCallError>.
-    let reply = await connection.call(
-        Echo.run, on: main, Echo.RunRequest(value: 42, mode: .shouted))
-
     // Server-streaming call: a typed, backpressured AsyncSequence of elements
-    // (iterating grants credit), plus a terminal result. `stop()` asks the
-    // server to wrap up gracefully; `cancel()` aborts the whole call.
+    // plus a terminal result. `stop()` asks the server to wrap up gracefully,
+    // `cancel()` aborts.
     let watch = await connection.call(Echo.watch, on: main, Echo.WatchRequest(count: 5))
-    tasks.addTask {
-        for await event in watch {  // ends on server END, terminal, or close
-            print(event.value)
-        }
-        _ = await watch.result()    // Result<Echo.WatchResponse, MMCallError>
+    let reply = await withStream(watch, each: { event in
+        print(event.value)              // ends on server END, terminal, or close
+    }) {
+        // Typed call on the same connection while events flow:
+        // Result<Echo.RunResponse, MMCallError>.
+        await connection.call(Echo.run, on: main, Echo.RunRequest(value: 42, mode: .shouted))
     }
-
-    await connection.close()
+    let summary = await watch.result()  // Result<Echo.WatchResponse, MMCallError>
+    return (reply, summary)
 }
 ```
 
-Daemons drop `MMClientConnectionService(connection:)` into their `ServiceGroup` instead of running the loop by hand. Reconnection is deliberately out of scope: a closed connection stays closed, and retry policy belongs to the application, driven by `stateUpdates()`.
+Daemons drop `MMClientConnectionService(connection:)` into their `ServiceGroup` instead of using the bracket. Reconnection is deliberately out of scope: a closed connection stays closed, and retry policy belongs to the application, driven by `stateUpdates()`.
 
 ### CLI
 
@@ -205,7 +215,7 @@ Every method declares four independent parts — an opening `Request`, a client-
 
 - **Descriptors:** `ServerStreamMethod` (server → client), `ClientStreamMethod` (client → server), `BidirectionalStreamMethod` (both). Handlers get a credit-gated `MMResponseSink` to push elements and/or an `MMRequestStream` AsyncSequence of inbound elements; clients get an `InboundStreamHandle` (an element `AsyncSequence` plus `result()`/`stop()`/`cancel()`), an `OutboundStreamHandle` (`send()`/`finish()`/`result()`), or a two-halved `BidirectionalStreamHandle`.
 - **Credit-based flow control:** each direction starts with a window of 8 items; the receiver grants more (watermark-batched) as its consumer drains. A sender at zero credit suspends — backpressure reaches the producing task and memory stays bounded, with no head-of-line blocking between sibling streams.
-- **Graceful termination:** END finishes your own direction, STOP asks the peer to finish theirs (surfaced as a typed `.peerStopped`, never an error), and CANCEL aborts the whole call. Every call — unary or streaming — ends with exactly one terminal response, the client's signal of graceful versus failed.
+- **Graceful termination:** END finishes your own direction, STOP asks the peer to finish theirs (surfaced as a typed `.peerStopped`, never an error), and CANCEL aborts the whole call. Every call — unary or streaming — ends with exactly one terminal response, the client's signal of graceful versus failed. A handler relaying a quiet source observes STOP promptly via `sink.stopRequested()` instead of waiting for its next send.
 
 ## Authorization model
 

@@ -101,6 +101,61 @@ public struct InboundStreamHandle<
     var _isInboundParked: Bool { self.state.isInboundParked }
 }
 
+/// The consumer/producer split as one scope: consumes every element of
+/// `handle` in a structured sibling while `body` runs, and returns `body`'s
+/// value only after **both** the body finished and the element sequence
+/// ended.
+///
+/// This packages the two rules that are easy to get wrong by hand:
+///
+/// - **Head-of-line**: the sibling iterates the sequence (granting credit)
+///   and awaits nothing else on the connection, so `body` is free to make
+///   calls on the same connection while elements flow.
+/// - **The join is built in**: an `async let` child that is never awaited is
+///   cancelled at scope exit; here the sibling can neither leak nor be torn
+///   down mid-element, and every `each` has completed before this returns —
+///   so an ``InboundStreamHandle/result()`` read after it is ordered after
+///   all element handling.
+///
+/// Ending the sequence is still the caller's story: it ends on server END or
+/// terminal, after ``InboundStreamHandle/stop()`` (which `each` may call —
+/// e.g. after N elements), or on connection death. A body that returns while
+/// the server streams on simply waits here for the stream to end.
+///
+/// The call's terminal is deliberately **not** the return value — read it
+/// afterwards via ``InboundStreamHandle/result()``. By the time this returns
+/// the sequence has ended, and the sequence only ends once the terminal (or
+/// the connection's death) arrived, so that read is already resolved and
+/// completes immediately. Every call has a terminal, even one whose contract
+/// declares no `Response` fields (the generated response type is then an
+/// empty struct): graceful-versus-failed always arrives there.
+///
+/// - Parameters:
+///   - handle: The inbound stream to consume (a server-stream handle, or a
+///     bidirectional call's `inbound` half).
+///   - each: Runs for every element, in order.
+///   - body: The main flow, running concurrently with consumption.
+/// - Returns: `body`'s value.
+public func withStream<
+    Element: Codable & Sendable,
+    OutboundElement: Codable & Sendable,
+    Response: Codable & Sendable,
+    Value
+>(
+    _ handle: InboundStreamHandle<Element, OutboundElement, Response>,
+    each: @escaping @Sendable (Element) async -> Void,
+    _ body: () async -> Value
+) async -> Value {
+    async let drained: Void = {
+        for await element in handle {
+            await each(element)
+        }
+    }()
+    let value = await body()
+    await drained
+    return value
+}
+
 /// The client's handle to the outbound (client → server) direction of a
 /// streaming call: credit-gated ``send(_:)`` of request `Element`s, a one-shot
 /// ``finish()`` (END), and an awaitable ``result()`` terminal.

@@ -1,5 +1,5 @@
 {
-  "originHash" : "24906c7608fc31e6bee09b676bc4a0d8111fea1acfb6b1c1ab731bc53bf7f078",
+  "originHash" : "7ca36cbace12514129f88b91a8f70cd2005c6f3648b980a184a9d45f6e983c07",
   "pins" : [
     {
       "identity" : "fp-swift",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "34fa04eb2b41f8c5e0b63cd19fe79262958edebc",
         "version" : "3.3.0"
+      }
+    },
+    {
+      "identity" : "fp-swift-bracket",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/velocityzen/fp-swift-bracket.git",
+      "state" : {
+        "revision" : "e432d4a38f9db375c17d14e94855886592296d82",
+        "version" : "1.1.0"
       }
     },
     {

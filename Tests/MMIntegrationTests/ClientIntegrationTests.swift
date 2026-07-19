@@ -4,6 +4,7 @@ import MMTestSupport
 import MMWire
 import NIOConcurrencyHelpers
 import NIOCore
+import NIOPosix
 import ServiceLifecycle
 import Testing
 
@@ -17,6 +18,124 @@ import Testing
 /// the two library halves actually compose.
 @Suite("MMClient against MMServer over a real temp-dir unix socket")
 struct ClientIntegrationTests {
+    @Test("the bracket surfaces a connection that did not survive the scope")
+    func bracketSurfacesLoopDeath() async throws {
+        try await withTempSocketPath { path in
+            // A raw misbehaving server: a valid hello, then — upon the
+            // client's first frame — one undecodable frame. The client's
+            // loop dies of .protocolViolation; dispose must surface it as
+            // the bracket's failure. Bound BEFORE the client connects so
+            // the connect cannot race the listener.
+            let listener = try await ServerBootstrap(
+                group: MultiThreadedEventLoopGroup.singleton
+            )
+            .bind(unixDomainSocketPath: path) { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    try NIOAsyncChannel<ByteBuffer, ByteBuffer>(
+                        wrappingChannelSynchronously: channel)
+                }
+            }
+            try await withThrowingTaskGroup(of: Void.self) { tasks in
+                tasks.addTask {
+                    try await listener.executeThenClose { inbound in
+                        for try await accepted in inbound {
+                            try await accepted.executeThenClose { input, output in
+                                var frame = ByteBuffer()
+                                var hello = try MMHello(
+                                    protocolVersion: 1, schemaFingerprint: 0, capabilities: 0
+                                ).encode().get()
+                                frame.writeInteger(
+                                    UInt32(hello.readableBytes), endianness: .little)
+                                frame.writeBuffer(&hello)
+                                try await output.write(frame)
+                                for try await _ in input {
+                                    // Framed 0x81 (a fixmap header) is not an
+                                    // envelope: decode fails connection-fatally.
+                                    var garbage = ByteBuffer()
+                                    garbage.writeInteger(UInt32(1), endianness: .little)
+                                    garbage.writeInteger(UInt8(0x81))
+                                    try await output.write(garbage)
+                                    break
+                                }
+                            }
+                            return
+                        }
+                    }
+                }
+                let outcome = try await withDeadline {
+                    await MMClientConnection.with(.unix(path: path)) { connection in
+                        // The call can only end via the death (the raw server
+                        // never dispatches); its failure stays in the body value.
+                        await connection.call(
+                            TestMethods.echo, on: entity("box.item"),
+                            EchoRequest(entity: entity("box.item"), value: 1))
+                    }
+                }
+                // Tear the fake server down before asserting so no failure
+                // path can park on the accept loop.
+                tasks.cancelAll()
+                try? await tasks.waitForAll()
+                guard case .failure(.protocolViolation) = outcome else {
+                    Issue.record("expected .failure(.protocolViolation), got \(outcome)")
+                    return
+                }
+            }
+        }
+    }
+
+    @Test("open() brackets a LIVE connection: calls work inside, closed and joined after")
+    func openBracketLifecycle() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                let withConnection = MMClientConnection.open(.unix(path: path))
+                let outcome = await withConnection { connection in
+                    // A round-trip inside the scope proves the bracket-owned
+                    // loop is live (no loop, no response routing).
+                    let reply = await connection.call(
+                        TestMethods.echo, on: entity("box.item"),
+                        EchoRequest(entity: entity("box.item"), value: 3))
+                    #expect(reply == .success(EchoResponse(value: 3)))
+                    return .success(connection)
+                }
+                guard case .success(let connection) = outcome else {
+                    Issue.record("bracket must succeed, got \(outcome)")
+                    return
+                }
+                // Dispose closed AND joined: post-return the state is
+                // deterministically .closed (clean — a local close).
+                #expect(connection.state == .closed(reason: nil))
+            }
+        }
+    }
+
+    @Test("the with-bracket owns the whole lifecycle: connect, run, body, close, join")
+    func bracketRoundTrip() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                let outcome = await MMClientConnection.with(.unix(path: path)) { connection in
+                    await connection.call(
+                        TestMethods.echo, on: entity("box.item"),
+                        EchoRequest(entity: entity("box.item"), value: 7))
+                }
+                #expect(outcome == .success(.success(EchoResponse(value: 7))))
+            }
+        }
+        // Connect failure is the bracket's own failure channel; the body
+        // never runs.
+        let refused = await MMClientConnection.with(
+            .unix(path: "/nonexistent/mm-bracket.sock")
+        ) { _ in
+            Issue.record("body must not run when connect fails")
+            return false
+        }
+        guard case .failure(.transport) = refused else {
+            Issue.record("expected .failure(.transport), got \(refused)")
+            return
+        }
+    }
+
     @Test("a typed call round-trips: encode, authorize, dispatch, decode")
     func typedEchoRoundTrip() async throws {
         try await withTempSocketPath { path in
@@ -295,7 +414,7 @@ struct ClientIntegrationTests {
                 #expect(
                     schema.methods.map(\.name) == [
                         "box.follow", "box.followEndPark", "box.followFail",
-                        "box.followGated", "box.followStoppable", "box.import",
+                        "box.followGated", "box.followQuiet", "box.followStoppable", "box.import",
                         "box.importGated", "box.importStop", "box.pipe",
                         "echo.run", "pub.ping",
                     ]
@@ -340,7 +459,7 @@ struct ClientIntegrationTests {
                     #expect(
                         diff.remoteOnly.map(\.name) == [
                             "box.follow", "box.followEndPark", "box.followFail",
-                            "box.followGated", "box.followStoppable", "box.import",
+                            "box.followGated", "box.followQuiet", "box.followStoppable", "box.import",
                             "box.importGated", "box.importStop", "box.pipe",
                         ]
                     )

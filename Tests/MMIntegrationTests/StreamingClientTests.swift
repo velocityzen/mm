@@ -318,6 +318,80 @@ struct StreamingClientTests {
         }
     }
 
+    @Test(
+        "withStream consumes in a sibling, runs the body on the same connection, and joins before returning"
+    )
+    func withStreamJoinsAfterSequenceEnd() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                let (result, runResult) = try await withConnectedClient(unixPath: path) {
+                    connection -> (
+                        seen: [Int],
+                        bodyReply: Result<EchoResponse, MMCallError>,
+                        terminal: Result<StreamSummary, MMCallError>
+                    ) in
+                    let handle = await connection.call(
+                        TestMethods.follow, on: Self.box,
+                        FollowRequest(entity: Self.box, count: 3)
+                    )
+                    let seen = NIOLockedValueBox<[Int]>([])
+                    // The body makes its own call on the SAME connection while
+                    // elements flow — the head-of-line freedom the sibling
+                    // consumer exists to provide.
+                    let bodyReply = await withStream(handle, each: { item in
+                        seen.withLockedValue { $0.append(item.value) }
+                    }) {
+                        await connection.call(
+                            TestMethods.echo, on: entity("box.item"),
+                            EchoRequest(entity: entity("box.item"), value: 9))
+                    }
+                    // withStream returned ⇒ the sequence ended: every element
+                    // was consumed, so the terminal is already resolved.
+                    return (seen.withLockedValue { $0 }, bodyReply, await handle.result())
+                }
+                #expect(result.seen == [0, 1, 2])
+                #expect(result.bodyReply == .success(EchoResponse(value: 9)))
+                #expect(result.terminal == .success(StreamSummary(count: 3)))
+                expectCleanRun(runResult)
+            }
+        }
+    }
+
+    @Test(
+        "client STOP reaches a quiet handler promptly: stopRequested() releases a relay that never sends"
+    )
+    func quietHandlerObservesStop() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                let (result, runResult) = try await withConnectedClient(unixPath: path) {
+                    connection -> (
+                        items: [Int], terminal: Result<StreamSummary, MMCallError>
+                    ) in
+                    // The quiet fixture never sends: without stopRequested()
+                    // the STOP below could only be observed on a next send
+                    // that never comes, and the terminal would never arrive.
+                    let handle = await connection.call(
+                        TestMethods.followQuiet, on: Self.box,
+                        FollowRequest(entity: Self.box, count: 0)
+                    )
+                    await handle.stop()
+                    let terminal = try await withDeadline {
+                        await handle.result()
+                    }
+                    // The terminal also ended the (empty) element sequence.
+                    var items: [Int] = []
+                    for await item in handle { items.append(item.value) }
+                    return (items, terminal)
+                }
+                #expect(result.items.isEmpty)
+                #expect(result.terminal == .success(StreamSummary(count: 0)))
+                expectCleanRun(runResult)
+            }
+        }
+    }
+
     // Row 6 --------------------------------------------------------------
 
     @Test(

@@ -1,4 +1,5 @@
 import FP
+import FPBracket
 import Logging
 import MMSchema
 import MMWire
@@ -18,7 +19,12 @@ import NIOPosix
 /// the inbound loop, ``run()``, as a structured child. Two sanctioned shapes:
 ///
 /// ```swift
-/// // 1. swift-service-lifecycle (daemons): drop the adapter in a ServiceGroup.
+/// // 1. The bracket — one scope owns connect/run/close/join (tools, tests):
+/// let reply = await MMClientConnection.with(.unix(path: sock)) { connection in
+///     await connection.call(Journal.append, on: notes, request)
+/// }
+///
+/// // 2. swift-service-lifecycle (daemons): drop the adapter in a ServiceGroup.
 /// let connection = try await MMClientConnection.connect(to: .unix(path: sock)).get()
 /// let group = ServiceGroup(configuration: .init(
 ///     services: [.init(service: MMClientConnectionService(connection: connection))],
@@ -26,14 +32,11 @@ import NIOPosix
 ///     logger: logger
 /// ))
 /// try await group.run()
-///
-/// // 2. Plain structured concurrency (tools, tests):
-/// await withTaskGroup(of: Void.self) { tasks in
-///     tasks.addTask { _ = await connection.run() }
-///     let reply = await connection.call(Journal.append, request)
-///     connection.close()
-/// }
 /// ```
+///
+/// Custom choreography — stream drainers, staged teardown — lives *inside*
+/// the bracket body as structured children (`async let`, a local group); the
+/// bracket still owns the lifecycle around it.
 ///
 /// Calls may be issued before `run()` has started — they park (bounded by the
 /// in-flight cap and their own callers) until the loop produces the outbound
@@ -166,6 +169,110 @@ public actor MMClientConnection {
                 configuration: configuration,
                 logger: logger
             )
+        }
+    }
+
+    /// The bracket-owned live pair behind ``open``. The loop task is NOT a
+    /// free-floating `Task {}` (house rule): the bracket's dispose is its
+    /// guaranteed owner — every use path closes the connection and awaits
+    /// the loop before the scope returns, so the task can neither leak nor
+    /// outlive the resource. The loop's outcome is carried, not discarded:
+    /// dispose returns it as the release verdict.
+    private struct RunningConnection: Sendable {
+        let connection: MMClientConnection
+        let loop: Task<Result<Void, MMClientError>, Never>
+    }
+
+    /// The **live** connection as a scoped resource (FPBracket): acquire
+    /// connects AND starts the inbound loop; dispose closes AND joins it —
+    /// open a connection the way you open a file. The typical
+    /// acquire/release pattern, with the loop inside the resource:
+    ///
+    /// ```swift
+    /// let withConnection = MMClientConnection.open(.unix(path: socketPath))
+    /// let reply = await withConnection { connection in
+    ///     await connection.call(Journal.append, on: notes, request)
+    ///         .map { $0 }  // body returns Result<_, MMClientError>-compatible values
+    /// }
+    /// ```
+    ///
+    /// Cancellation of the surrounding task converges through the bracket
+    /// rather than the task tree: the body's awaits resume `.cancelled`, the
+    /// body returns, and dispose closes and joins the loop — nothing
+    /// outlives the scope on any path. Dispose returns the loop's outcome as
+    /// the release verdict, so the bracket fails when the connection did not
+    /// survive the scope (transport error, protocol violation); a clean EOF
+    /// or this close releases successfully. Composes with other bracketed
+    /// resources via `flatMap`/`BracketAsyncDo` (acquire outer→inner,
+    /// release inner→outer).
+    public static func open(
+        _ endpoint: MMEndpoint,
+        configuration: MMClientConfiguration = MMClientConfiguration(),
+        eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
+        logger: Logger = Logger(label: "mm.client")
+    ) -> BracketAsync<MMClientConnection, MMClientError> {
+        BracketAsync<RunningConnection, MMClientError>(
+            acquire: {
+                await Self.connect(
+                    to: endpoint,
+                    configuration: configuration,
+                    eventLoopGroup: eventLoopGroup,
+                    logger: logger
+                )
+                .map { connection in
+                    RunningConnection(
+                        connection: connection,
+                        loop: Task { await connection.run() }
+                    )
+                }
+            },
+            dispose: { running in
+                await running.connection.close()
+                // The join IS the release verdict: a clean end (EOF, this
+                // close, cancellation) releases successfully; a loop that
+                // already died of a transport error or protocol violation
+                // surfaces that as the bracket's failure — dispose failure
+                // wins over body success, so the scope's result reports
+                // that the connection did not survive it.
+                return await running.loop.value
+            }
+        )
+        .map(\.connection)
+    }
+
+    /// Sugar over ``open(_:configuration:eventLoopGroup:logger:)`` for a
+    /// plain-value body — the whole connect → run → body → close → join
+    /// lifecycle in one call, nothing to leak, nothing to forget:
+    ///
+    /// ```swift
+    /// let reply = await MMClientConnection.with(.unix(path: socketPath)) { connection in
+    ///     await connection.call(Journal.append, on: notes, request)
+    /// }
+    /// ```
+    ///
+    /// The failure channel is the *connection*'s: `.failure` means connect
+    /// (bootstrap or hello) failed and `body` never ran, **or** the
+    /// connection did not survive the scope — the loop died of a transport
+    /// error or protocol violation while `body` ran (a clean EOF or the
+    /// bracket's own close is success). Per-call failures stay inside
+    /// `body`'s own value — typically a `Result` from `call`. For long-lived
+    /// daemons prefer ``MMClientConnectionService`` in a `ServiceGroup`; the
+    /// bracket is the tool-and-test shape.
+    public static func with<Value: Sendable>(
+        _ endpoint: MMEndpoint,
+        configuration: MMClientConfiguration = MMClientConfiguration(),
+        eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
+        logger: Logger = Logger(label: "mm.client"),
+        _ body: @escaping @Sendable (MMClientConnection) async -> Value
+    ) async -> Result<Value, MMClientError> {
+        let withConnection = Self.open(
+            endpoint,
+            configuration: configuration,
+            eventLoopGroup: eventLoopGroup,
+            logger: logger
+        )
+        return await withConnection { connection in
+            .success(await body(connection))
         }
     }
 

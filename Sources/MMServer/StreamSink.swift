@@ -44,6 +44,18 @@ public struct MMResponseSink<Element: Codable & Sendable>: Sendable {
         }
         return await self.state.send(item)
     }
+
+    /// Suspends until the client asks this response direction to STOP (or the
+    /// call ends). ``send(_:)`` already reports a STOP as `.peerStopped` — this
+    /// is for handlers relaying a **quiet** source, whose next send may be
+    /// arbitrarily far away: watch from a structured sibling and release
+    /// whatever the relay is parked on, so the terminal goes out promptly
+    /// instead of on the source's next event. Returns immediately when the
+    /// STOP (or the end) already happened, and on task cancellation — the
+    /// normal release when the relay ends first and cancels its watcher.
+    public func stopRequested() async {
+        await self.state.stopRequested()
+    }
 }
 
 /// The credit-gated send state machine behind ``MMResponseSink``.
@@ -64,6 +76,11 @@ public struct MMResponseSink<Element: Codable & Sendable>: Sendable {
 /// A grant or stop that races the park is folded into `pendingGrant` /
 /// `stopped` and observed by the next park attempt, so no wakeup is lost and no
 /// continuation is resumed twice.
+///
+/// `stopRequested()` watchers park separately in `stopWaiters` (any number,
+/// keyed): each is resumed exactly once by STOP, by end, or by its own
+/// cancellation — the register↔cancel race is made deterministic by the
+/// `cancelledStopWaiters` tombstone, mirroring the client-side park utility.
 final class MMResponseSinkState: Sendable {
     /// Emits one outbound item frame through the connection's single writer
     /// funnel. Returns whether the write landed (false ⇒ the connection died).
@@ -105,6 +122,15 @@ final class MMResponseSinkState: Sendable {
         /// A grant that arrived while no sender was parked, folded in for the
         /// next park attempt so a racing grant is never lost.
         var parked: CheckedContinuation<ParkResolution, Never>?
+        /// Handlers parked in `stopRequested()`, keyed so a cancelled watcher
+        /// removes exactly itself. All resumed on STOP and on end.
+        var stopWaiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
+        /// Watchers whose cancellation ran before their park installed
+        /// (the register↔cancel race): the tombstone makes the register step
+        /// resume immediately instead of parking unresumable.
+        var cancelledStopWaiters: Set<UInt64> = []
+        /// Key generator for `stopWaiters` / `cancelledStopWaiters`.
+        var nextStopWaiterID: UInt64 = 0
     }
 
     let msgid: UInt32
@@ -218,33 +244,86 @@ final class MMResponseSinkState: Sendable {
         }
     }
 
-    /// Client STOP (kind 5) for the response direction: mark sticky and resume
-    /// any parked sender with `.stopped`. Idempotent.
+    /// Client STOP (kind 5) for the response direction: mark sticky, resume
+    /// any parked sender with `.stopped`, and release every `stopRequested()`
+    /// watcher. Idempotent.
     func peerStop() {
-        let continuation = self.state.withLockedValue {
-            state -> CheckedContinuation<ParkResolution, Never>? in
+        let (sender, watchers) = self.state.withLockedValue {
+            state -> (
+                CheckedContinuation<ParkResolution, Never>?,
+                [CheckedContinuation<Void, Never>]
+            ) in
             state.peerStopped = true
             let parked = state.parked
             state.parked = nil
-            return parked
+            let waiters = Array(state.stopWaiters.values)
+            state.stopWaiters.removeAll()
+            return (parked, waiters)
         }
-        continuation?.resume(returning: .stopped)
+        sender?.resume(returning: .stopped)
+        for watcher in watchers {
+            watcher.resume()
+        }
     }
 
-    /// Terminal / CANCEL / connection death: mark ended and resume any parked
-    /// sender with `.ended`. Idempotent.
+    /// Terminal / CANCEL / connection death: mark ended, resume any parked
+    /// sender with `.ended`, and release every `stopRequested()` watcher (a
+    /// call that is over can never be stopped — waiting on would park
+    /// forever). Idempotent.
     func end() {
         self.markEnded()
     }
 
+    /// The `stopRequested()` park: register-or-immediate under the state lock,
+    /// with a synchronous cancel hand-off (the same single-resume discipline as
+    /// the sender park — exactly one of register / STOP-or-end / cancel touches
+    /// the continuation).
+    func stopRequested() async {
+        let id = self.state.withLockedValue { state -> UInt64 in
+            defer { state.nextStopWaiterID &+= 1 }
+            return state.nextStopWaiterID
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let immediate: Bool = self.state.withLockedValue { state in
+                    if state.peerStopped || state.ended { return true }
+                    if state.cancelledStopWaiters.remove(id) != nil { return true }
+                    state.stopWaiters[id] = continuation
+                    return false
+                }
+                if immediate {
+                    continuation.resume()
+                }
+            }
+        } onCancel: {
+            let continuation = self.state.withLockedValue {
+                state -> CheckedContinuation<Void, Never>? in
+                if let parked = state.stopWaiters.removeValue(forKey: id) {
+                    return parked
+                }
+                state.cancelledStopWaiters.insert(id)
+                return nil
+            }
+            continuation?.resume()
+        }
+    }
+
     private func markEnded() {
-        let continuation = self.state.withLockedValue {
-            state -> CheckedContinuation<ParkResolution, Never>? in
+        let (sender, watchers) = self.state.withLockedValue {
+            state -> (
+                CheckedContinuation<ParkResolution, Never>?,
+                [CheckedContinuation<Void, Never>]
+            ) in
             state.ended = true
             let parked = state.parked
             state.parked = nil
-            return parked
+            let waiters = Array(state.stopWaiters.values)
+            state.stopWaiters.removeAll()
+            return (parked, waiters)
         }
-        continuation?.resume(returning: .ended)
+        sender?.resume(returning: .ended)
+        for watcher in watchers {
+            watcher.resume()
+        }
     }
 }

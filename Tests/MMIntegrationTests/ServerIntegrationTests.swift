@@ -387,7 +387,7 @@ struct ServerIntegrationTests {
                     #expect(
                         schema.methods.map(\.name) == [
                             "box.follow", "box.followEndPark", "box.followFail",
-                            "box.followGated", "box.followStoppable", "box.import",
+                            "box.followGated", "box.followQuiet", "box.followStoppable", "box.import",
                             "box.importGated", "box.importStop", "box.pipe",
                             "echo.run", "pub.ping",
                         ]

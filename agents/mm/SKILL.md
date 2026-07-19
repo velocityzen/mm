@@ -130,6 +130,9 @@ struct JournalHandlers: RouteGroup {
                 case .peerStopped, .callEnded: break loop    // graceful outcomes, not errors
                 }
             }
+            // Quiet sources: a relay parked between events observes STOP only
+            // on its next send — watch `sink.stopRequested()` from a structured
+            // sibling to terminal promptly (see the example daemon).
             return .success(Journal.FollowSummary(delivered: delivered))
         }
         On(Journal.import) { auth, request, elements in      // client-stream: + MMRequestStream
@@ -156,28 +159,43 @@ Server facts to design around:
 
 ## Step 3 — the client
 
-`connect` returns a `Result`; the host runs the inbound loop as a structured child — no hidden tasks:
+For simple call-and-return clients, use the bracket — one scope owns connect/run/close/join. `with` is sugar over `MMClientConnection.open`, the live connection as an FPBracket resource (acquire = connect + start the loop, dispose = close + join); compose `open` with other brackets via `flatMap`/`BracketAsyncDo`:
+
+```swift
+let reply = await MMClientConnection.with(.unix(path: socketPath)) { connection in
+    await connection.call(Journal.append, on: notes, Journal.AppendRequest(line: "hi"))
+}
+// Result<Result<AppendResponse, MMCallError>, MMClientError> — connection vs call
+// failure. Dispose returns the loop's outcome: bracket .failure = connect failed OR
+// the connection died mid-scope (transport error / protocol violation); clean EOF
+// or the bracket's own close is .success.
+```
+
+One connection multiplexes many calls (msgids, concurrent callers, `maxInFlightCalls` bound) — one connection per unit of work, never per call. A closed connection stays closed; retry policy is the application's.
+
+Custom choreography (streams in sibling tasks, staged teardown) lives *inside* the bracket body as structured children — the bracket still owns the lifecycle:
 
 ```swift
 import MMClient
 
-let connection = try await MMClientConnection.connect(to: .unix(path: socketPath)).get()
-await withTaskGroup(of: Void.self) { tasks in
-    tasks.addTask { _ = await connection.run() }             // the inbound loop
-
+let outcome = await MMClientConnection.with(.unix(path: socketPath)) { connection in
     let notes = try! EntityName.parse("journal.notes").get() // validated dotted path
 
     // Unary: Result<Journal.AppendResponse, MMCallError>
     let reply = await connection.call(Journal.append, on: notes, Journal.AppendRequest(line: "hi"))
 
-    // Server-stream: iterate (iterating grants credit), then read the terminal.
+    // Server-stream: withStream consumes in a structured sibling (iterating
+    // grants credit) while the body drives the connection; the join is built
+    // in — it returns once the sequence ends.
     let follow = await connection.call(Journal.follow, on: notes, Journal.FollowRequest())
-    tasks.addTask {
-        for await change in follow { print(change.line) }
-        _ = await follow.result()      // Result<Journal.FollowSummary, MMCallError>
+    await withStream(follow, each: { change in
+        print(change.line)
+        if change.line == "more" { await follow.stop() }  // graceful; terminal still arrives
+        // follow.cancel() aborts the whole call instead.
+    }) {
+        _ = await connection.call(Journal.append, on: notes, Journal.AppendRequest(line: "more"))
     }
-    await follow.stop()                // graceful: ask the server to wrap up; terminal still arrives
-    // follow.cancel() aborts the whole call instead.
+    _ = await follow.result()          // Result<Journal.FollowSummary, MMCallError>
 
     // Client-stream: send through the credit-gated writer, END, await terminal.
     let imp = await connection.call(Journal.import, on: notes, Journal.ImportRequest())
@@ -185,11 +203,11 @@ await withTaskGroup(of: Void.self) { tasks in
     await imp.finish()
     _ = await imp.result()
 
-    await connection.close()
+    return reply
 }
 ```
 
-In a daemon-style client, skip the task group and add `MMClientConnectionService(connection: connection)` to the `ServiceGroup` instead of calling `run()` by hand.
+In a daemon-style client, use `MMClientConnection.connect` and add `MMClientConnectionService(connection: connection)` to the `ServiceGroup` instead of the bracket.
 
 Verify the schema like the server does:
 

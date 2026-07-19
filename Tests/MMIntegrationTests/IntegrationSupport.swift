@@ -221,6 +221,12 @@ enum TestMethods {
     static let followEndPark = ServerStreamMethod<FollowRequest, StreamItem, StreamSummary>(
         name: "box.followEndPark", access: .read
     )
+    /// A follow whose handler never sends: it parks on `sink.stopRequested()`
+    /// and returns its terminal only when the client STOPs — the fixture for
+    /// observing STOP on a quiet source without a wake-up send.
+    static let followQuiet = ServerStreamMethod<FollowRequest, StreamItem, StreamSummary>(
+        name: "box.followQuiet", access: .read
+    )
     /// A follow that streams `count` items in order and then returns a fixed
     /// **application error** terminal (``applicationErrorObject``, code >= 64,
     /// payload intact) — the S4 client fixture for an error terminal arriving
@@ -528,6 +534,15 @@ func makeTestServer(
                 }
             }
             return .success(StreamSummary(count: produced))
+        }
+
+        Handle(TestMethods.followQuiet) { _, sink, _ in
+            // A relay over a source that never produces: no send ever
+            // happens, so the client's STOP can only be observed through
+            // `stopRequested()` — the quiet-source pattern the
+            // wake-on-next-send outcome cannot serve.
+            await sink.stopRequested()
+            return .success(StreamSummary(count: 0))
         }
 
         Handle(TestMethods.followEndPark) { request, sink, _ in

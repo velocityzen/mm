@@ -473,7 +473,11 @@ struct JournalReadHandlers: RouteGroup {
                 .map(ReadResponse.init(lines:))
                 .mapError { _ in MMError(code: 65, message: "store failure") }
         }
-        // Server-streaming: (auth, request, sink). See §5.
+        // Server-streaming: (auth, request, sink). See §5. A journal can go
+        // quiet, and a relay parked on a quiet source observes STOP only on
+        // its next send — production handlers pair this loop with a
+        // `sink.stopRequested()` watcher (the example daemon shows the full
+        // shape).
         On(Journal.follow) { auth, request, sink in
             let (token, changes) = await store.follow(auth.entity)
             var delivered = 0
@@ -628,13 +632,15 @@ Semantics to design around:
 - **Cross-connection fan-out is host logic.** Each `follow` call gets one correlated response stream; wiring appends on *any* connection to every interested follower is the store's job (the registry the handler above registers with). The library gives you the per-call stream, not pub/sub.
 - **Flow control is automatic and bounded.** The window starts at 8 items per direction; a lagging consumer parks the producer at zero credit rather than growing memory, and a stalled stream never blocks sibling calls (no head-of-line blocking).
 - **Streaming methods *are* fingerprinted and discoverable.** Unlike the removed notification mechanism, a response stream is a normal part of the method signature (`server.schema` reports its element shape), so a client detects a reshape through the hello fingerprint and discovery like any other contract change. Stream element payloads still evolve append-only (new fields optional).
-- **Termination is graceful by default.** END finishes a direction, STOP asks the peer to (surfaced as `.peerStopped`), and the terminal is always the last frame; CANCEL and connection death arrive as `.callEnded` / task cancellation. The full matrix is in the [wire protocol specification](https://swiftpackageindex.com/velocityzen/mm/documentation/mmwire/wireprotocol) §4.2.
+- **Termination is graceful by default.** END finishes a direction, STOP asks the peer to (surfaced as `.peerStopped`), and the terminal is always the last frame; CANCEL and connection death arrive as `.callEnded` / task cancellation. A handler relaying a **quiet** source would otherwise observe STOP only on its next send — arbitrarily far away — so pair the relay with `sink.stopRequested()` watched from a structured sibling: it parks until the STOP (or the end of the call) and lets the handler return its terminal promptly. The full matrix is in the [wire protocol specification](https://swiftpackageindex.com/velocityzen/mm/documentation/mmwire/wireprotocol) §4.2.
 
 ## 6. The client side: a companion process
 
 The client (say `eyectl`, or a sibling daemon) imports the same namespace module and `MMClient`.
 
-**Connect, then own `run()`.** `connect` performs the bootstrap and hello exchange only — it spawns nothing (no free `Task { }`). The returned connection is inert until the host runs the inbound loop as a structured child, in one of two sanctioned shapes:
+**One connection, many calls.** A connection is a multiplexer — every call gets its own msgid, concurrent callers interleave freely (bounded by `maxInFlightCalls`), and streams share the connection with per-stream credit windows. Open one connection per *unit of work* (a daemon's lifetime, a tool invocation), never per call.
+
+**Own the lifecycle in one of two sanctioned shapes:**
 
 ```swift
 import MMClient
@@ -654,18 +660,22 @@ let group = ServiceGroup(configuration: .init(
 ))
 try await group.run()
 
-// Shape 2 — tools and tests: a plain task group.
-await withTaskGroup(of: Void.self) { tasks in
-    tasks.addTask { _ = await connection.run() }
-    let reply = await connection.call(
+// Shape 2 — tools and tests: the bracket. Acquire connects AND starts the
+// inbound loop; dispose closes, joins it, and returns the loop's outcome as
+// the release verdict — the bracket fails if the connection did not survive
+// the scope (`with` is sugar over `MMClientConnection.open`, an FPBracket
+// resource).
+let reply = await MMClientConnection.with(.unix(path: socketPath)) { connection in
+    await connection.call(
         Journal.append,
         AppendRequest(entity: journalMain, line: "hello", tag: nil)
     )
-    await connection.close()
 }
 ```
 
-Every connected connection must eventually see `run()` or `close()`. Calls issued before `run()` starts park until the loop produces the writer — start it promptly. When the connection dies (EOF, transport error, `close()`, cancellation), pending calls fail with `MMCallError.connectionClosed`, `state` becomes `.closed(reason:)`, and `run()` returns. Reconnection is deliberately out of scope for v1: a closed connection stays closed; retry policy is application logic, driven by `stateUpdates()`.
+Custom choreography — stream drainers in sibling tasks, staged teardown — lives *inside* the bracket body as structured children (`async let`, a local group); the bracket still owns the lifecycle around it.
+
+`connect` performs the bootstrap and hello exchange only — it spawns nothing; the connection is inert until its loop runs. Every connected connection must eventually see `run()` or `close()`. Calls issued before `run()` starts park until the loop produces the writer — start it promptly. When the connection dies (EOF, transport error, `close()`, cancellation), pending calls fail with `MMCallError.connectionClosed`, `state` becomes `.closed(reason:)`, and `run()` returns. Reconnection is deliberately out of scope for v1: a closed connection stays closed; retry policy is application logic, driven by `stateUpdates()`.
 
 **Typed calls** return `Result<Response, MMCallError>` — no throws on the data path:
 

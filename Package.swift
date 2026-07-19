@@ -30,6 +30,8 @@ let package = Package(
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0"..<"700.0.0"),
         // Functional Result/Optional utilities (async map/match/tap).
         .package(url: "https://github.com/velocityzen/fp-swift.git", from: "3.0.0"),
+        // Monadic acquire/use/release for resources with a lifecycle.
+        .package(url: "https://github.com/velocityzen/fp-swift-bracket.git", from: "1.1.0"),
     ],
     targets: [
         .target(
@@ -69,6 +71,7 @@ let package = Package(
                 "MMWire",
                 "MMSchema",
                 .product(name: "FP", package: "fp-swift"),
+                .product(name: "FPBracket", package: "fp-swift-bracket"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
