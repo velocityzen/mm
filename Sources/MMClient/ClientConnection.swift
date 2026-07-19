@@ -1118,6 +1118,19 @@ public actor MMClientConnection {
         self.verification.failure(
             self.configuration.schema == nil ? .noExpectation : .failed(callFailure)
         )
+        // The state transitions to `.closed` BEFORE any continuation resumes:
+        // a caller whose call just failed with the close reason can be
+        // scheduled on another executor immediately, and it must observe
+        // `.closed`, never a still-`.connected` state (this ordering lost a
+        // race on loaded CI runners when it was the other way around).
+        let subscribers = self.states.withLockedValue {
+            hub -> [AsyncStream<ClientState>.Continuation] in
+            guard case .connected = hub.current else { return [] }
+            hub.current = .closed(reason: reason)
+            let drained = Array(hub.subscribers.values)
+            hub.subscribers.removeAll()
+            return drained
+        }
         let (pending, writerWaiters, streams) = self.calls.withLockedValue {
             $0.close(reason: callFailure)
         }
@@ -1132,14 +1145,6 @@ public actor MMClientConnection {
         // like a unary call, resolved exactly once.
         for control in streams {
             control.failTerminal(callFailure)
-        }
-        let subscribers = self.states.withLockedValue {
-            hub -> [AsyncStream<ClientState>.Continuation] in
-            guard case .connected = hub.current else { return [] }
-            hub.current = .closed(reason: reason)
-            let drained = Array(hub.subscribers.values)
-            hub.subscribers.removeAll()
-            return drained
         }
         for subscriber in subscribers {
             subscriber.yield(.closed(reason: reason))
