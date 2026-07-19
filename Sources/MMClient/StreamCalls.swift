@@ -22,7 +22,7 @@ extension MMClientConnection {
         _ method: ServerStreamMethod<Request, Element, Response>,
         on entity: EntityName,
         _ request: Request
-    ) async -> InboundStreamHandle<Element, Response> {
+    ) async -> InboundStreamHandle<Element, Never, Response> {
         let state = await self.openStream(
             methodName: method.name,
             entity: entity,
@@ -30,7 +30,7 @@ extension MMClientConnection {
             hasResponseStream: true,
             hasRequestStream: false,
             inbound: Element.self,
-            outbound: NoStreamElement.self,
+            outbound: Never.self,
             response: Response.self
         )
         return InboundStreamHandle(state: state)
@@ -48,14 +48,14 @@ extension MMClientConnection {
         _ method: ClientStreamMethod<Request, Element, Response>,
         on entity: EntityName,
         _ request: Request
-    ) async -> OutboundStreamHandle<Element, Response> {
+    ) async -> OutboundStreamHandle<Element, Never, Response> {
         let state = await self.openStream(
             methodName: method.name,
             entity: entity,
             request: request,
             hasResponseStream: false,
             hasRequestStream: true,
-            inbound: NoStreamElement.self,
+            inbound: Never.self,
             outbound: Element.self,
             response: Response.self
         )

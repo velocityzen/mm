@@ -96,7 +96,10 @@ public struct SchemaDeclaration: Sendable, Hashable {
         self.verify(against: namespace.all).map { methodMismatches in
             methodMismatches
                 + verifyTypeTable(
-                    declared: self.types, defined: namespace.types, probes: namespace.probedTypes)
+                    declared: self.types,
+                    defined: namespace.types,
+                    probes: namespace.probedTypes
+                )
         }
     }
 
@@ -112,76 +115,102 @@ public struct SchemaDeclaration: Sendable, Hashable {
     public func verify(
         against methods: [AnyMethod]
     ) -> Result<[String], SchemaError> {
-        var implemented: [String: (probed: MethodSignature, described: MethodSignature)] = [:]
-        for method in methods {
-            switch method.probedSignature() {
-                case .failure(let error):
-                    return .failure(error)
-                case .success(let probed):
-                    switch method.signature() {
-                        case .failure(let error):
-                            return .failure(error)
-                        case .success(let described):
-                            implemented[probed.name] = (
+        // Traverse: probe every implemented method (behavior + description),
+        // short-circuiting on the first probe failure; then the diff is pure.
+        methods
+            .reduce(
+                Result<[String: Implementation], SchemaError>.success([:])
+            ) { collected, method in
+                collected.flatMap { implemented in
+                    method.probedSignature().flatMap { probed in
+                        method.signature().map { described in
+                            var implemented = implemented
+                            implemented[probed.name] = Implementation(
                                 probed: probed.strippingDescriptions,
                                 described: described.strippingDescriptions
                             )
+                            return implemented
+                        }
                     }
+                }
             }
+            .map { implemented in
+                let definitions = Dictionary(
+                    self.types.map { ($0.name, $0.strippingDescriptions.schema) },
+                    uniquingKeysWith: { first, _ in first }
+                )
+                let declaredNames = Set(self.signatures.map(\.name))
+                return self.signatures.flatMap { signature in
+                    self.mismatches(
+                        for: signature,
+                        implemented: implemented,
+                        definitions: definitions
+                    )
+                }
+                    + implemented.keys
+                    .filter { !declaredNames.contains($0) }
+                    .sorted()
+                    .map { "\($0): implemented but not in the contract" }
+            }
+    }
+
+    /// One implemented method's two signatures: decoder behavior (probed) and
+    /// described schema, both description-stripped.
+    private struct Implementation {
+        var probed: MethodSignature
+        var described: MethodSignature
+    }
+
+    /// Every mismatch between one declared method and its implementation:
+    /// presence, then access, then the four payload slots.
+    private func mismatches(
+        for declaredSignature: MethodSignature,
+        implemented: [String: Implementation],
+        definitions: [String: TypeSchema]
+    ) -> [String] {
+        let declared = declaredSignature.strippingDescriptions
+        guard let actual = implemented[declared.name] else {
+            return ["\(declared.name): declared but not implemented"]
         }
-        let definitions = Dictionary(
-            self.types.map { ($0.name, $0.strippingDescriptions.schema) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        var mismatches: [String] = []
-        for declaredSignature in self.signatures {
-            let declared = declaredSignature.strippingDescriptions
-            guard let actual = implemented.removeValue(forKey: declared.name) else {
-                mismatches.append("\(declared.name): declared but not implemented")
-                continue
-            }
-            if actual.probed.access != declared.access {
-                mismatches.append(
-                    "\(declared.name): access is \(actual.probed.access.rawValue), contract says \(declared.access.rawValue)"
-                )
-            }
-            mismatches.append(
-                contentsOf: slotMismatches(
-                    name: declared.name, slot: "request",
-                    declared: declared.request,
-                    probed: actual.probed.request, described: actual.described.request,
-                    definitions: definitions))
-            mismatches.append(
-                contentsOf: slotMismatches(
-                    name: declared.name, slot: "response",
-                    declared: declared.response,
-                    probed: actual.probed.response, described: actual.described.response,
-                    definitions: definitions))
-            mismatches.append(
-                contentsOf: streamMismatches(
-                    name: declared.name,
-                    slot: "request stream",
-                    declared: declared.requestStream,
-                    probed: actual.probed.requestStream,
-                    described: actual.described.requestStream,
-                    definitions: definitions
-                )
+        let access: [String] =
+            actual.probed.access == declared.access
+            ? []
+            : [
+                "\(declared.name): access is \(actual.probed.access.rawValue), contract says \(declared.access.rawValue)"
+            ]
+        return access
+            + slotMismatches(
+                name: declared.name,
+                slot: "request",
+                declared: declared.request,
+                probed: actual.probed.request,
+                described: actual.described.request,
+                definitions: definitions
             )
-            mismatches.append(
-                contentsOf: streamMismatches(
-                    name: declared.name,
-                    slot: "response stream",
-                    declared: declared.responseStream,
-                    probed: actual.probed.responseStream,
-                    described: actual.described.responseStream,
-                    definitions: definitions
-                )
+            + slotMismatches(
+                name: declared.name,
+                slot: "response",
+                declared: declared.response,
+                probed: actual.probed.response,
+                described: actual.described.response,
+                definitions: definitions
             )
-        }
-        for extra in implemented.keys.sorted() {
-            mismatches.append("\(extra): implemented but not in the contract")
-        }
-        return .success(mismatches)
+            + streamMismatches(
+                name: declared.name,
+                slot: "request stream",
+                declared: declared.requestStream,
+                probed: actual.probed.requestStream,
+                described: actual.described.requestStream,
+                definitions: definitions
+            )
+            + streamMismatches(
+                name: declared.name,
+                slot: "response stream",
+                declared: declared.responseStream,
+                probed: actual.probed.responseStream,
+                described: actual.described.responseStream,
+                definitions: definitions
+            )
     }
 
     /// Whether decoder behavior honors a declared slot. Equality is the
@@ -215,23 +244,26 @@ public struct SchemaDeclaration: Sendable, Hashable {
     private func slotMismatches(
         name: String,
         slot: String,
+        shapeNoun: String = "shape",
+        describedNoun: String = "described schema",
         declared: TypeSchema,
         probed: TypeSchema,
-        described: TypeSchema,
+        described: TypeSchema?,
         definitions: [String: TypeSchema]
     ) -> [String] {
-        let behavior = probed == .unknown ? described : probed
+        let behavior = probed == .unknown ? (described ?? probed) : probed
         if !behaviorMatches(declared: declared, behavior: behavior, definitions: definitions) {
-            return ["\(name): \(slot) shape diverges from the contract"]
+            return ["\(name): \(slot) \(shapeNoun) diverges from the contract"]
         }
-        if described != declared {
-            return ["\(name): \(slot) described schema diverges from the contract"]
+        if let described, described != declared {
+            return ["\(name): \(slot) \(describedNoun) diverges from the contract"]
         }
         return []
     }
 
     /// Compares one stream slot of a declared and an implemented signature:
-    /// presence must agree in both directions, and present elements must match.
+    /// presence must agree in both directions; present elements share the
+    /// unary slot comparison (with element-flavored wording).
     private func streamMismatches(
         name: String,
         slot: String,
@@ -248,18 +280,16 @@ public struct SchemaDeclaration: Sendable, Hashable {
             case (nil, .some):
                 return ["\(name): \(slot) implemented but not in the contract"]
             case (.some(let declaredElement), .some(let probedElement)):
-                // .unknown probe → described carries the check (see slotMismatches).
-                let behavior =
-                    probedElement == .unknown ? (described ?? probedElement) : probedElement
-                if !behaviorMatches(
-                    declared: declaredElement, behavior: behavior, definitions: definitions)
-                {
-                    return ["\(name): \(slot) element shape diverges from the contract"]
-                }
-                if let describedElement = described, describedElement != declaredElement {
-                    return ["\(name): \(slot) element described schema diverges from the contract"]
-                }
-                return []
+                return self.slotMismatches(
+                    name: name,
+                    slot: slot,
+                    shapeNoun: "element shape",
+                    describedNoun: "element described schema",
+                    declared: declaredElement,
+                    probed: probedElement,
+                    described: described,
+                    definitions: definitions
+                )
         }
     }
 
@@ -277,44 +307,63 @@ func verifyTypeTable(
     defined: [TypeDefinition],
     probes: [String: Result<TypeSchema, SchemaError>]
 ) -> [String] {
-    var definedByName: [String: TypeDefinition] = [:]
-    for definition in defined {
-        definedByName[definition.name] = definition
+    let definedByName = Dictionary(
+        defined.map { ($0.name, $0) },
+        uniquingKeysWith: { _, latest in latest }
+    )
+    let declaredNames = Set(declaredTypes.map(\.name))
+    return declaredTypes.flatMap { declaredDefinition in
+        typeMismatches(
+            for: declaredDefinition,
+            definedByName: definedByName,
+            probes: probes
+        )
     }
-    var mismatches: [String] = []
-    for declaredDefinition in declaredTypes {
-        let declared = declaredDefinition.strippingDescriptions
-        guard let actual = definedByName.removeValue(forKey: declared.name) else {
-            mismatches.append("\(declared.name): type declared but not defined by the namespace")
-            continue
-        }
-        if actual.strippingDescriptions.schema != declared.schema {
-            mismatches.append("\(declared.name): type definition diverges from the contract")
-        }
-        switch probes[declared.name] {
-            case nil:
-                break
-            case .failure:
-                mismatches.append("\(declared.name): type probe failed")
-            case .success(let probed):
-                let expected: TypeSchema
-                if case .enumeration = declared.schema {
-                    expected = .string
-                } else {
-                    expected = declared.schema
-                }
-                // .unknown = unknowable behavior (empty structs); the
-                // definition-vs-contract check above still holds.
-                if probed != .unknown, probed.strippingDescriptions != expected {
-                    mismatches.append(
-                        "\(declared.name): decoder behavior diverges from the type definition")
-                }
-        }
+        + definedByName.keys
+        .filter { !declaredNames.contains($0) }
+        .sorted()
+        .map { "\($0): type defined by the namespace but not in the contract" }
+}
+
+/// Every mismatch between one declared type and the namespace's definition:
+/// presence, then the definition against the contract, then decoder behavior
+/// against the definition.
+private func typeMismatches(
+    for declaredDefinition: TypeDefinition,
+    definedByName: [String: TypeDefinition],
+    probes: [String: Result<TypeSchema, SchemaError>]
+) -> [String] {
+    let declared = declaredDefinition.strippingDescriptions
+    guard let actual = definedByName[declared.name] else {
+        return ["\(declared.name): type declared but not defined by the namespace"]
     }
-    for extra in definedByName.keys.sorted() {
-        mismatches.append("\(extra): type defined by the namespace but not in the contract")
+    let definition: [String] =
+        actual.strippingDescriptions.schema == declared.schema
+        ? []
+        : ["\(declared.name): type definition diverges from the contract"]
+    return definition + probeMismatch(for: declared, probe: probes[declared.name])
+}
+
+/// The decoder-behavior check for one declared type; empty when no probe
+/// exists for the name.
+private func probeMismatch(
+    for declared: TypeDefinition,
+    probe: Result<TypeSchema, SchemaError>?
+) -> [String] {
+    switch probe {
+        case nil:
+            return []
+        case .failure:
+            return ["\(declared.name): type probe failed"]
+        case .success(let probed):
+            let expected: TypeSchema =
+                if case .enumeration = declared.schema { .string } else { declared.schema }
+            // .unknown = unknowable behavior (empty structs); the
+            // definition-vs-contract check still holds.
+            return probed != .unknown && probed.strippingDescriptions != expected
+                ? ["\(declared.name): decoder behavior diverges from the type definition"]
+                : []
     }
-    return mismatches
 }
 
 /// One declared method, before the namespace prefix is applied. Produced by
@@ -371,26 +420,11 @@ public func Case(_ name: String, description: String? = nil) -> EnumCaseDeclarat
 }
 
 @resultBuilder
-public enum EnumCasesBuilder {
+public enum EnumCasesBuilder: MMListBuilding {
+    public typealias Element = EnumCaseDeclaration
+
     public static func buildExpression(_ enumCase: EnumCaseDeclaration) -> [EnumCaseDeclaration] {
         [enumCase]
-    }
-    public static func buildBlock(_ components: [EnumCaseDeclaration]...) -> [EnumCaseDeclaration] {
-        components.flatMap { $0 }
-    }
-    public static func buildOptional(_ component: [EnumCaseDeclaration]?) -> [EnumCaseDeclaration] {
-        component ?? []
-    }
-    public static func buildEither(first component: [EnumCaseDeclaration]) -> [EnumCaseDeclaration]
-    {
-        component
-    }
-    public static func buildEither(second component: [EnumCaseDeclaration]) -> [EnumCaseDeclaration]
-    {
-        component
-    }
-    public static func buildArray(_ components: [[EnumCaseDeclaration]]) -> [EnumCaseDeclaration] {
-        components.flatMap { $0 }
     }
 }
 
@@ -413,14 +447,14 @@ public func Enum(
 ) -> TypeDeclaration {
     let caseList = cases()
     precondition(!caseList.isEmpty, "Enum(\"\(name)\") declares no cases")
-    var seen: Set<String> = []
-    for enumCase in caseList {
-        precondition(
-            seen.insert(enumCase.name).inserted,
-            "Enum(\"\(name)\") declares case \"\(enumCase.name)\" twice")
+    if let duplicate = firstDuplicate(caseList.map(\.name)) {
+        preconditionFailure("Enum(\"\(name)\") declares case \"\(duplicate)\" twice")
     }
     return TypeDeclaration(
-        name: validTypeName(name), description: description, payload: .enumeration(caseList))
+        name: validTypeName(name),
+        description: description,
+        payload: .enumeration(caseList)
+    )
 }
 
 /// Declares a named structure type, referenceable from fields by name:
@@ -454,7 +488,10 @@ public func Type(
     @SchemaFieldsBuilder _ fields: () -> [Field]
 ) -> TypeDeclaration {
     TypeDeclaration(
-        name: validTypeName(name), description: description, payload: .structure(fields()))
+        name: validTypeName(name),
+        description: description,
+        payload: .structure(fields())
+    )
 }
 
 private func validTypeName(_ name: String) -> String {
@@ -483,7 +520,10 @@ public struct Field: Sendable, Hashable {
     /// An auto-keyed field of any wire shape: `Field("line", .string)`,
     /// `Field("note", .optional(.string))`, `Field("tags", .array(.string))`.
     public init(
-        _ name: String, _ type: TypeSchema, description: String? = nil, cli: CLIArgument? = nil
+        _ name: String,
+        _ type: TypeSchema,
+        description: String? = nil,
+        cli: CLIArgument? = nil
     ) {
         self.pinnedKey = nil
         self.name = name
@@ -494,7 +534,10 @@ public struct Field: Sendable, Hashable {
 
     /// A key-pinned field — the evolution-safe form.
     public init(
-        _ key: Int, _ name: String, _ type: TypeSchema, description: String? = nil,
+        _ key: Int,
+        _ name: String,
+        _ type: TypeSchema,
+        description: String? = nil,
         cli: CLIArgument? = nil
     ) {
         precondition(key >= 0, "field keys are non-negative integers (\(name) pinned \(key))")
@@ -511,14 +554,20 @@ public struct Field: Sendable, Hashable {
     /// `Field("meta", "common.LineMeta")` for a dotted, already-qualified
     /// cross-schema reference (validated at server startup).
     public init(
-        _ name: String, _ typeName: String, description: String? = nil, cli: CLIArgument? = nil
+        _ name: String,
+        _ typeName: String,
+        description: String? = nil,
+        cli: CLIArgument? = nil
     ) {
         self.init(name, .reference(typeName), description: description, cli: cli)
     }
 
     /// A key-pinned named-type reference.
     public init(
-        _ key: Int, _ name: String, _ typeName: String, description: String? = nil,
+        _ key: Int,
+        _ name: String,
+        _ typeName: String,
+        description: String? = nil,
         cli: CLIArgument? = nil
     ) {
         self.init(key, name, .reference(typeName), description: description, cli: cli)
@@ -529,7 +578,9 @@ public struct Field: Sendable, Hashable {
     /// type's described schema (a qualified `.reference`) lands in the wire
     /// contract, and `#schema` emits the Swift type as the property type.
     public init(
-        _ name: String, _ type: (some SchemaDescribable).Type, description: String? = nil,
+        _ name: String,
+        _ type: (some SchemaDescribable).Type,
+        description: String? = nil,
         cli: CLIArgument? = nil
     ) {
         self.init(name, type.schema, description: description, cli: cli)
@@ -537,15 +588,20 @@ public struct Field: Sendable, Hashable {
 
     /// A key-pinned Swift-type reference.
     public init(
-        _ key: Int, _ name: String, _ type: (some SchemaDescribable).Type,
-        description: String? = nil, cli: CLIArgument? = nil
+        _ key: Int,
+        _ name: String,
+        _ type: (some SchemaDescribable).Type,
+        description: String? = nil,
+        cli: CLIArgument? = nil
     ) {
         self.init(key, name, type.schema, description: description, cli: cli)
     }
 
     /// An auto-keyed nested structure: `Field("owner") { Field("uid", .uint) }`.
     public init(
-        _ name: String, description: String? = nil, cli: CLIArgument? = nil,
+        _ name: String,
+        description: String? = nil,
+        cli: CLIArgument? = nil,
         @SchemaFieldsBuilder _ fields: () -> [Field]
     ) {
         self.init(name, Fields(fields), description: description, cli: cli)
@@ -553,7 +609,10 @@ public struct Field: Sendable, Hashable {
 
     /// A key-pinned nested structure.
     public init(
-        _ key: Int, _ name: String, description: String? = nil, cli: CLIArgument? = nil,
+        _ key: Int,
+        _ name: String,
+        description: String? = nil,
+        cli: CLIArgument? = nil,
         @SchemaFieldsBuilder _ fields: () -> [Field]
     ) {
         self.init(key, name, Fields(fields), description: description, cli: cli)
@@ -569,14 +628,11 @@ public func Fields(@SchemaFieldsBuilder _ content: () -> [Field]) -> TypeSchema 
 }
 
 @resultBuilder
-public enum SchemaFieldsBuilder {
+public enum SchemaFieldsBuilder: MMListBuilding {
+    public typealias Element = Field
+
     public static func buildExpression(_ field: Field) -> [Field] { [field] }
     public static func buildExpression(_ fields: [Field]) -> [Field] { fields }
-    public static func buildBlock(_ components: [Field]...) -> [Field] { components.flatMap { $0 } }
-    public static func buildOptional(_ component: [Field]?) -> [Field] { component ?? [] }
-    public static func buildEither(first component: [Field]) -> [Field] { component }
-    public static func buildEither(second component: [Field]) -> [Field] { component }
-    public static func buildArray(_ components: [[Field]]) -> [Field] { components.flatMap { $0 } }
 }
 
 /// One element inside a ``Call(_:description:_:)`` block: `Access`,
@@ -618,7 +674,8 @@ public func Access(_ mode: () -> AccessMode) -> MethodPart {
 /// omit the block for an empty request. Every part form takes an optional
 /// `description:`, served by discovery.
 public func Request(
-    description: String? = nil, @SchemaFieldsBuilder _ fields: () -> [Field]
+    description: String? = nil,
+    @SchemaFieldsBuilder _ fields: () -> [Field]
 ) -> MethodPart {
     MethodPart(kind: .request(Fields(fields), description: description))
 }
@@ -632,7 +689,8 @@ public func Request(_ payload: TypeSchema, description: String? = nil) -> Method
 
 /// Cross-schema form: `Request(Other.LineMeta.self)`.
 public func Request(
-    _ type: (some SchemaDescribable).Type, description: String? = nil
+    _ type: (some SchemaDescribable).Type,
+    description: String? = nil
 ) -> MethodPart {
     MethodPart(kind: .request(type.schema, description: description))
 }
@@ -640,7 +698,8 @@ public func Request(
 /// The response payload's declared fields. Optional — omit the block for an
 /// empty (acknowledgement-only) response.
 public func Response(
-    description: String? = nil, @SchemaFieldsBuilder _ fields: () -> [Field]
+    description: String? = nil,
+    @SchemaFieldsBuilder _ fields: () -> [Field]
 ) -> MethodPart {
     MethodPart(kind: .response(Fields(fields), description: description))
 }
@@ -655,7 +714,8 @@ public func Response(_ payload: TypeSchema, description: String? = nil) -> Metho
 /// A response that is another container's Swift type — the cross-schema form
 /// (`Response(CommonTypes.Stamp.self)`).
 public func Response(
-    _ type: (some SchemaDescribable).Type, description: String? = nil
+    _ type: (some SchemaDescribable).Type,
+    description: String? = nil
 ) -> MethodPart {
     MethodPart(kind: .response(type.schema, description: description))
 }
@@ -665,13 +725,17 @@ public func Response(
 /// declaration describes wire shapes, not Swift types — so these overloads
 /// simply forward.
 public func Request(
-    _ typeName: String, description: String? = nil, @SchemaFieldsBuilder _ fields: () -> [Field]
+    _ typeName: String,
+    description: String? = nil,
+    @SchemaFieldsBuilder _ fields: () -> [Field]
 ) -> MethodPart {
     MethodPart(kind: .request(Fields(fields), description: description))
 }
 
 public func Response(
-    _ typeName: String, description: String? = nil, @SchemaFieldsBuilder _ fields: () -> [Field]
+    _ typeName: String,
+    description: String? = nil,
+    @SchemaFieldsBuilder _ fields: () -> [Field]
 ) -> MethodPart {
     MethodPart(kind: .response(Fields(fields), description: description))
 }
@@ -725,7 +789,8 @@ public func RequestStream(_ payload: TypeSchema, description: String? = nil) -> 
 
 /// Cross-schema form: `RequestStream(CommonTypes.Stamp.self)`.
 public func RequestStream(
-    _ type: (some SchemaDescribable).Type, description: String? = nil
+    _ type: (some SchemaDescribable).Type,
+    description: String? = nil
 ) -> MethodPart {
     MethodPart(kind: .requestStream(type.schema, description: description))
 }
@@ -759,20 +824,17 @@ public func ResponseStream(_ payload: TypeSchema, description: String? = nil) ->
 
 /// Cross-schema form: `ResponseStream(CommonTypes.Stamp.self)`.
 public func ResponseStream(
-    _ type: (some SchemaDescribable).Type, description: String? = nil
+    _ type: (some SchemaDescribable).Type,
+    description: String? = nil
 ) -> MethodPart {
     MethodPart(kind: .responseStream(type.schema, description: description))
 }
 
 @resultBuilder
-public enum MethodDeclarationBuilder {
+public enum MethodDeclarationBuilder: MMListBuilding {
+    public typealias Element = MethodPart
+
     public static func buildExpression(_ part: MethodPart) -> [MethodPart] { [part] }
-    public static func buildBlock(_ components: [MethodPart]...) -> [MethodPart] {
-        components.flatMap { $0 }
-    }
-    public static func buildOptional(_ component: [MethodPart]?) -> [MethodPart] { component ?? [] }
-    public static func buildEither(first component: [MethodPart]) -> [MethodPart] { component }
-    public static func buildEither(second component: [MethodPart]) -> [MethodPart] { component }
 }
 
 /// Declares one method of a ``Schema(_:_:)`` contract by its local name; the
@@ -795,28 +857,26 @@ public func Call(
     var response: (payload: TypeSchema, description: String?)?
     var responseStream: (element: TypeSchema, description: String?)?
     var cli: CLIOverlay?
+    // The one duplicate-part rule, stated once: each part kind may appear at
+    // most once per Call.
+    func setOnce<Value>(_ slot: inout Value?, _ value: Value, _ part: String) {
+        precondition(slot == nil, "Call(\"\(name)\"): \(part) declared twice")
+        slot = value
+    }
     for part in parts() {
         switch part.kind {
             case .access(let mode):
-                precondition(access == nil, "Call(\"\(name)\"): Access declared twice")
-                access = mode
+                setOnce(&access, mode, "Access")
             case .request(let payload, let partDescription):
-                precondition(request == nil, "Call(\"\(name)\"): Request declared twice")
-                request = (payload, partDescription)
+                setOnce(&request, (payload, partDescription), "Request")
             case .requestStream(let element, let partDescription):
-                precondition(
-                    requestStream == nil, "Call(\"\(name)\"): RequestStream declared twice")
-                requestStream = (element, partDescription)
+                setOnce(&requestStream, (element, partDescription), "RequestStream")
             case .response(let payload, let partDescription):
-                precondition(response == nil, "Call(\"\(name)\"): Response declared twice")
-                response = (payload, partDescription)
+                setOnce(&response, (payload, partDescription), "Response")
             case .responseStream(let element, let partDescription):
-                precondition(
-                    responseStream == nil, "Call(\"\(name)\"): ResponseStream declared twice")
-                responseStream = (element, partDescription)
+                setOnce(&responseStream, (element, partDescription), "ResponseStream")
             case .cli(let overlay):
-                precondition(cli == nil, "Call(\"\(name)\"): CLI declared twice")
-                cli = overlay
+                setOnce(&cli, overlay, "CLI")
         }
     }
     guard let access else {
@@ -852,27 +912,14 @@ public struct SchemaEntry: Sendable {
 }
 
 @resultBuilder
-public enum SchemaDeclarationBuilder {
+public enum SchemaDeclarationBuilder: MMListBuilding {
+    public typealias Element = SchemaEntry
+
     public static func buildExpression(_ method: MethodDeclaration) -> [SchemaEntry] {
         [SchemaEntry(kind: .method(method))]
     }
     public static func buildExpression(_ type: TypeDeclaration) -> [SchemaEntry] {
         [SchemaEntry(kind: .type(type))]
-    }
-    public static func buildBlock(_ components: [SchemaEntry]...) -> [SchemaEntry] {
-        components.flatMap { $0 }
-    }
-    public static func buildOptional(_ component: [SchemaEntry]?) -> [SchemaEntry] {
-        component ?? []
-    }
-    public static func buildEither(first component: [SchemaEntry]) -> [SchemaEntry] {
-        component
-    }
-    public static func buildEither(second component: [SchemaEntry]) -> [SchemaEntry] {
-        component
-    }
-    public static func buildArray(_ components: [[SchemaEntry]]) -> [SchemaEntry] {
-        components.flatMap { $0 }
     }
 }
 
@@ -897,41 +944,43 @@ public func Schema(
             "Schema namespace \"\(namespace)\" is not a valid non-root entity path — discovery filters methods by their prefix entity"
         )
     }
-    var methods: [MethodDeclaration] = []
-    var typeDeclarations: [TypeDeclaration] = []
-    for entry in content() {
-        switch entry.kind {
-            case .method(let method): methods.append(method)
-            case .type(let type): typeDeclarations.append(type)
-        }
+    let entries = content()
+    let methods = entries.compactMap { entry -> MethodDeclaration? in
+        if case .method(let method) = entry.kind { method } else { nil }
+    }
+    let typeDeclarations = entries.compactMap { entry -> TypeDeclaration? in
+        if case .type(let type) = entry.kind { type } else { nil }
     }
     let types = assembleTypes(typeDeclarations, namespace: prefix.rawValue)
     let localNames = Set(typeDeclarations.map(\.name))
-    var seen: Set<String> = []
-    var signatures: [MethodSignature] = []
-    for method in methods {
-        let full = "\(prefix.rawValue).\(method.name)"
-        precondition(seen.insert(full).inserted, "Schema declares \"\(full)\" twice")
-        signatures.append(
-            MethodSignature(
-                name: full,
-                access: method.access,
-                request: qualifyReferences(
-                    in: method.request, namespace: prefix.rawValue, localTypes: localNames),
-                response: qualifyReferences(
-                    in: method.response, namespace: prefix.rawValue, localTypes: localNames),
-                requestStream: method.requestStream.map {
-                    qualifyReferences(in: $0, namespace: prefix.rawValue, localTypes: localNames)
-                },
-                responseStream: method.responseStream.map {
-                    qualifyReferences(in: $0, namespace: prefix.rawValue, localTypes: localNames)
-                },
-                description: method.description,
-                requestDescription: method.requestDescription,
-                responseDescription: method.responseDescription,
-                requestStreamDescription: method.requestStreamDescription,
-                responseStreamDescription: method.responseStreamDescription
-            )
+    if let duplicate = firstDuplicate(methods.map { "\(prefix.rawValue).\($0.name)" }) {
+        preconditionFailure("Schema declares \"\(duplicate)\" twice")
+    }
+    let signatures = methods.map { method in
+        MethodSignature(
+            name: "\(prefix.rawValue).\(method.name)",
+            access: method.access,
+            request: qualifyReferences(
+                in: method.request,
+                namespace: prefix.rawValue,
+                localTypes: localNames
+            ),
+            response: qualifyReferences(
+                in: method.response,
+                namespace: prefix.rawValue,
+                localTypes: localNames
+            ),
+            requestStream: method.requestStream.map {
+                qualifyReferences(in: $0, namespace: prefix.rawValue, localTypes: localNames)
+            },
+            responseStream: method.responseStream.map {
+                qualifyReferences(in: $0, namespace: prefix.rawValue, localTypes: localNames)
+            },
+            description: method.description,
+            requestDescription: method.requestDescription,
+            responseDescription: method.responseDescription,
+            requestStreamDescription: method.requestStreamDescription,
+            responseStreamDescription: method.responseStreamDescription
         )
     }
     return SchemaDeclaration(
@@ -985,29 +1034,19 @@ public struct TypeNamespaceDeclaration: Sendable, Hashable {
     /// empty means the container honors the declaration.
     public func verify(against namespace: any TypeNamespace.Type) -> [String] {
         verifyTypeTable(
-            declared: self.types, defined: namespace.types, probes: namespace.probedTypes)
+            declared: self.types,
+            defined: namespace.types,
+            probes: namespace.probedTypes
+        )
     }
 }
 
 @resultBuilder
-public enum SchemaTypesBuilder {
+public enum SchemaTypesBuilder: MMListBuilding {
+    public typealias Element = TypeDeclaration
+
     public static func buildExpression(_ type: TypeDeclaration) -> [TypeDeclaration] {
         [type]
-    }
-    public static func buildBlock(_ components: [TypeDeclaration]...) -> [TypeDeclaration] {
-        components.flatMap { $0 }
-    }
-    public static func buildOptional(_ component: [TypeDeclaration]?) -> [TypeDeclaration] {
-        component ?? []
-    }
-    public static func buildEither(first component: [TypeDeclaration]) -> [TypeDeclaration] {
-        component
-    }
-    public static func buildEither(second component: [TypeDeclaration]) -> [TypeDeclaration] {
-        component
-    }
-    public static func buildArray(_ components: [[TypeDeclaration]]) -> [TypeDeclaration] {
-        components.flatMap { $0 }
     }
 }
 
@@ -1018,11 +1057,8 @@ private func assembleTypes(
     _ declarations: [TypeDeclaration],
     namespace: String
 ) -> [TypeDefinition] {
-    var seen: Set<String> = []
-    for declaration in declarations {
-        precondition(
-            seen.insert(declaration.name).inserted,
-            "\"\(namespace)\" declares type \"\(declaration.name)\" twice")
+    if let duplicate = firstDuplicate(declarations.map(\.name)) {
+        preconditionFailure("\"\(namespace)\" declares type \"\(duplicate)\" twice")
     }
     let localNames = Set(declarations.map(\.name))
     return declarations.map { declaration in
@@ -1038,7 +1074,8 @@ private func assembleTypes(
                 schema = .enumeration(
                     cases: cases.map {
                         TypeSchema.EnumCase(name: $0.name, description: $0.description)
-                    })
+                    }
+                )
         }
         return TypeDefinition(
             name: "\(namespace).\(declaration.name)",
@@ -1048,6 +1085,17 @@ private func assembleTypes(
     }
 }
 
+/// The first name that appears more than once, or nil — the shared
+/// duplicate-name guard (enum cases, method names, type names, dynamic-value
+/// object members).
+package func firstDuplicate(_ names: some Sequence<String>) -> String? {
+    var seen: Set<String> = []
+    for name in names where !seen.insert(name).inserted {
+        return name
+    }
+    return nil
+}
+
 /// Rewrites undotted references to their block-qualified form, validating
 /// they resolve locally; dotted (cross-schema) references pass through.
 private func qualifyReferences(
@@ -1055,42 +1103,18 @@ private func qualifyReferences(
     namespace: String,
     localTypes: Set<String>
 ) -> TypeSchema {
-    switch schema {
-        case .bool, .int, .uint, .float, .double, .string, .bytes, .unknown, .enumeration:
-            return schema
-        case .reference(let name):
-            if name.contains(".") {
-                return schema
-            }
-            precondition(
-                localTypes.contains(name),
-                "reference to \"\(name)\" does not resolve to an Enum/Type declared in \"\(namespace)\" — qualify cross-schema references (\"other.\(name)\")"
-            )
-            return .reference("\(namespace).\(name)")
-        case .optional(let wrapped):
-            return .optional(
-                qualifyReferences(in: wrapped, namespace: namespace, localTypes: localTypes))
-        case .array(let element):
-            return .array(
-                qualifyReferences(in: element, namespace: namespace, localTypes: localTypes))
-        case .map(let key, let value):
-            return .map(
-                key: qualifyReferences(in: key, namespace: namespace, localTypes: localTypes),
-                value: qualifyReferences(in: value, namespace: namespace, localTypes: localTypes)
-            )
-        case .structure(let fields):
-            return .structure(
-                fields: fields.map { field in
-                    TypeSchema.Field(
-                        key: field.key,
-                        name: field.name,
-                        type: qualifyReferences(
-                            in: field.type, namespace: namespace, localTypes: localTypes),
-                        description: field.description
-                    )
-                }
-            )
-    }
+    // One rewrite rule on the shared structure-preserving walk: unqualified
+    // local references gain the namespace; dotted references pass through.
+    schema.rewritten(node: { rebuilt in
+        guard case .reference(let name) = rebuilt, !name.contains(".") else {
+            return rebuilt
+        }
+        precondition(
+            localTypes.contains(name),
+            "reference to \"\(name)\" does not resolve to an Enum/Type declared in \"\(namespace)\" — qualify cross-schema references (\"other.\(name)\")"
+        )
+        return .reference("\(namespace).\(name)")
+    })
 }
 
 /// Assigns declaration-order keys to unpinned fields, skipping pinned and
@@ -1117,6 +1141,10 @@ private func assignKeys(
             used.insert(next)
         }
         return TypeSchema.Field(
-            key: key, name: field.name, type: field.type, description: field.description)
+            key: key,
+            name: field.name,
+            type: field.type,
+            description: field.description
+        )
     }
 }

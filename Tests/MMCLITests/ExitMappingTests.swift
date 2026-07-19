@@ -1,6 +1,7 @@
 import ArgumentParser
 import MMClient
 import MMSchema
+import MMTestSupport
 import MMWire
 import Testing
 
@@ -14,9 +15,9 @@ struct ExitMappingTests {
             (MMCallError.denied, Int32(77)),
             (MMCallError.unknownMethod, Int32(64)),
             (MMCallError.malformedParams, Int32(65)),
-            (MMCallError.remote(MMErrorObject(code: 64, message: "nope")), Int32(1)),
+            (MMCallError.remote(MMError(code: 64, message: "nope")), Int32(1)),
             (MMCallError.remoteInternal, Int32(70)),
-            (MMCallError.streamViolation(MMErrorObject(code: 6, message: "gap")), Int32(70)),
+            (MMCallError.streamViolation(MMError(code: 6, message: "gap")), Int32(70)),
             (MMCallError.encode(.encodingFailed(description: "x")), Int32(70)),
             (MMCallError.decode(.truncated), Int32(70)),
             (MMCallError.tooManyInFlight, Int32(70)),
@@ -40,7 +41,7 @@ struct ExitMappingTests {
     @Test("remote errors render code and message")
     func remoteMessage() {
         let message = MMCLIFailure.message(
-            for: .remote(MMErrorObject(code: 70, message: "boom")),
+            for: .remote(MMError(code: 70, message: "boom")),
             method: "journal.append", entity: "journal.notes")
         #expect(message == "error 70: boom")
     }

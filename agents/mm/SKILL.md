@@ -147,8 +147,8 @@ struct JournalHandlers: RouteGroup {
 
 Server facts to design around:
 
-- Handlers return `Result<Response, MMErrorObject>`; error codes 1–63 are reserved for the protocol — application errors start at 64.
-- Every server auto-registers the builtins `rpc.schema` (discovery, filtered by the caller's traversal rights) and `entity.stat`.
+- Handlers return `Result<Response, MMError>`; error codes 1–63 are reserved for the protocol — application errors start at 64.
+- Every server auto-registers the builtins `server.schema` (discovery, filtered by the caller's traversal rights) and `server.entity`.
 - Cross-connection fan-out (broadcasting one connection's append to another's `follow` stream) is application infrastructure — see `Examples/Daemon/FollowerHub.swift` for the safe registry pattern (synchronous `onTermination`, idempotent removal, never finish under the lock).
 - Root-targeted requests (empty entity) are denied unless the route opts in with `acceptsRoot: true` on `Handle`/`On`.
 - Dynamic authorization (SQLite etc.): implement `EntityACLProvider` and pass the instance — `ACLProvider(provider)`. The builder tree is sugar over `InMemoryACLProvider`.
@@ -215,8 +215,8 @@ A hello fingerprint mismatch is a signal to run discovery and degrade deliberate
 - The entity positional (`journal.notes`) is NOT from the schema and never will be: the schema declares verbs and payload shapes; entities are the daemon's runtime tree, declared server-side with ACLs. Syscall table vs. file paths — don't try to enumerate entities in a contract, and don't drop the entity argument from a command.
 - Server-stream commands print elements as JSON lines (SIGINT = graceful STOP, second = CANCEL); client-stream commands read stdin lines (single-string-field elements take plain lines, others JSON; EOF = END); bidirectional does both.
 - `MMCLI` also ships `MMCLIDiscover` ("discover") and `MMCLIRawCall` ("call" — any method by wire name, `--params` JSON, schema-driven) to mount alongside generated groups.
-- Schema verification is automatic: every generated command diffs its own namespace against the server before dispatch (drift → exit 76; `--no-verify` opts out per invocation; denied discovery skips with a note — call rights don't imply read on the namespace entity). A companion CLI should install `MMCLIServerContract.install(.complete([journalContract]))` in its custom `main()` — the whole-server hello fingerprint folds at build time (builtins included via `SchemaFingerprint.expected(serving:)`), making verification free when it matches and a fallback diff when it doesn't. Client daemons get the same slice-check as `connection.verifyContracts([...])`.
-- Every generated group also includes explicit `verify` (exit 1 on drift, like diff). `--expect-fingerprint` stays as an *operator* deployment pin (exit 76 on mismatch) — runtime knowledge, not build knowledge; don't confuse the two scopes.
+- Schema verification is automatic: every generated command diffs its own namespace against the server before dispatch (drift → exit 76; `--no-verify` opts out per invocation; denied discovery skips with a note — call rights don't imply read on the namespace entity). A companion CLI should install `MMCLIServerContract.install(.complete([journalContract]))` in its custom `main()` — the whole-server hello fingerprint folds at build time (builtins included via `SchemaFingerprint.expected(serving:)`), making verification free when it matches and a fallback diff when it doesn't. Client daemons get the same automation via `configuration.schema = .complete([...])` / `.partial([...])` — the connection verifies itself after connect and `await connection.verify()` yields `Result` of `.ok` / `.partial` / `.difference` (soft verdict, never a disconnect; `.noExpectation`/`.denied`/`.failed` on the error side); `connection.verifyContracts([...])` remains the manual slice-check underneath.
+- Every generated group also includes explicit `verify` (exit 1 on drift, like diff). There is no manual fingerprint option: the fingerprint is build knowledge (folded from the compiled contracts), never something an operator supplies at runtime.
 - Assemble the tool with a root `AsyncParsableCommand` (async dispatch requires the root to be async) listing `Journal.Command.self` and friends — see `Examples/CLI/CLI.swift`.
 
 ## Authorization model (why calls get denied)
@@ -229,7 +229,7 @@ A hello fingerprint mismatch is a signal to run discovery and degrade deliberate
 
 ## House rules that apply to any code you write here
 
-Swift 6 strict concurrency, macOS 15+/Linux. No Dispatch/GCD, no free-floating `Task {}`, no `.wait()`, no `print()`, no `Date()`, no `@unchecked Sendable`. Public APIs surface failures as typed `Result`s (`MMCallError`, `MMWireError`, `MMErrorObject`), not thrown errors. Tests use Swift Testing (`@Test`/`#expect`), in the repo's three tiers: `EmbeddedChannel` for handlers, plain value tests for domain logic, real temp-dir Unix sockets for integration. Read `CLAUDE.md` before deviating from anything.
+Swift 6 strict concurrency, macOS 15+/Linux. No Dispatch/GCD, no free-floating `Task {}`, no `.wait()`, no `print()`, no `Date()`, no `@unchecked Sendable`. Public APIs surface failures as typed `Result`s (`MMCallError`, `MMWireError`, `MMError`), not thrown errors. Tests use Swift Testing (`@Test`/`#expect`), in the repo's three tiers: `EmbeddedChannel` for handlers, plain value tests for domain logic, real temp-dir Unix sockets for integration. Read `CLAUDE.md` before deviating from anything.
 
 ## Verify your work
 

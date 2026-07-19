@@ -33,9 +33,15 @@ struct ExampleClient {
         // Connect: transport bootstrap + hello exchange. The connection is
         // inert until run() consumes the inbound stream, so the host owns the
         // loop as a structured child — never a free-floating Task.
+        // The schema expectation is contracts, never a typed-in fingerprint:
+        // this client ships with the daemon, so it declares the complete
+        // composition and the connection verifies itself automatically.
         let connection: MMClientConnection
         switch await MMClientConnection.connect(
             to: .unix(path: socketPath),
+            configuration: MMClientConfiguration(
+                schema: .complete([Journal.contract])
+            ),
             logger: logger
         ) {
             case .failure(let error):
@@ -46,13 +52,28 @@ struct ExampleClient {
                 connection = connected
         }
 
-        let hello = connection.helloInfo
+        let hello = connection.server
         print("connected to \(socketPath)")
-        print("  protocol version: \(hello.negotiatedVersion)")
-        print("  server schema fingerprint: 0x\(String(hello.serverFingerprint, radix: 16))")
+        print("  protocol version: \(hello.protocolVersion)")
+        print("  server schema fingerprint: 0x\(String(hello.fingerprint, radix: 16))")
 
         try await withThrowingTaskGroup(of: Void.self) { tasks in
             tasks.addTask { _ = await connection.run() }
+
+            // 0. Automatic schema verification: resolved by the connection
+            // itself — .ok straight from the hello when the complete
+            // expectation matches, a scoped diff otherwise. Informational,
+            // never a disconnect.
+            switch await connection.verify() {
+                case .success(.ok):
+                    print("  schema: ok — the hello proves this build's exact composition")
+                case .success(.partial):
+                    print("  schema: composition changed, but every contract we use is in sync")
+                case .success(.difference(let differences)):
+                    print("  schema: DIFFERS — \(differences.count) namespace(s) drifted")
+                case .failure(let reason):
+                    print("  schema: verification unavailable (\(reason))")
+            }
 
             // 1. Discovery: what can THIS peer (this uid, over this socket)
             // actually reach? The list is filtered by traversal rights; the
@@ -64,7 +85,7 @@ struct ExampleClient {
                     print("\ndiscovered \(schema.methods.count) reachable methods:")
                     for method in schema.methods {
                         var line =
-                            "  \(method.name)  (needs \(describe(method.access)) on its target)"
+                            "  \(method.name)  (needs \(method.access) on its target)"
                         // Descriptions ride the discovery response — the contract
                         // documents itself to peers.
                         if let text = method.description { line += " — \(text)" }
@@ -109,14 +130,19 @@ struct ExampleClient {
             print("\nfollow journal.notes (server -> client stream):")
             let follow = await connection.call(Journal.follow, on: notes, FollowRequest())
 
-            let firstChange = OneShot<ChangeEvent>()
+            // A buffered stream stands in for a hand-rolled latch: the
+            // drainer yields every change; the main flow takes the first
+            // (`.bufferingOldest(1)` = first value wins), and `finish()`
+            // tells a parked waiter no value is coming.
+            let (changes, changesContinuation) = AsyncStream<ChangeEvent>.makeStream(
+                bufferingPolicy: .bufferingOldest(1)
+            )
+            
             tasks.addTask {
                 for await event in follow {
-                    firstChange.set(event)
+                    changesContinuation.yield(event)
                 }
-                // The stream ended (STOP acknowledged, call over, or denied):
-                // tell a parked waiter no value is coming.
-                firstChange.finish()
+                changesContinuation.finish()
             }
 
             print("append to journal.notes (drives a change into the follow stream):")
@@ -142,7 +168,7 @@ struct ExampleClient {
             // the server — lose that race and this event was broadcast to
             // nobody. The deadline turns a rare lost race (or a failed
             // append) into an honest message instead of a hung process.
-            if let event = await firstChange.wait(upTo: .seconds(2)) {
+            if let event = await firstValue(of: changes, upTo: .seconds(2)) {
                 print(
                     "  follow delivered a change: \(event.entity) -> \"\(event.line)\" (count \(event.count))"
                 )
@@ -232,123 +258,24 @@ struct ExampleClient {
     }
 }
 
-/// A one-shot value latch: the follow-draining task deposits the first change
-/// event with ``set(_:)`` (first value wins), the main flow suspends in
-/// ``wait(upTo:)`` until it arrives. Continuation-based — no polling — and it
-/// survives every ordering a production latch must:
-///
-/// - **set before wait**: the waiter resumes immediately with the stored
-///   value;
-/// - **wait before set**: the continuation parks under the lock and `set`
-///   resumes it (resume always happens *outside* the lock);
-/// - **finish**: the producer signals "no value is coming" (its stream ended
-///   empty) and a parked waiter resumes promptly with `nil` instead of
-///   hanging;
-/// - **cancellation**: a cancelled waiter resumes promptly with `nil` —
-///   checked before parking, and translated after by
-///   `withTaskCancellationHandler`, whose handler runs synchronously on
-///   whatever thread cancels: that is why the continuation lives behind a
-///   `Mutex`, not in actor state.
-///
-/// `set`, `finish`, and cancellation race safely: whichever takes the parked
-/// continuation out under the lock resumes it, exactly once. Single-waiter by
-/// contract (this program has exactly one); a second wait traps.
-final class OneShot<Value: Sendable>: Sendable {
-    private struct State {
-        var value: Value?
-        var waiter: CheckedContinuation<Value?, Never>?
-        var waited = false
-        var done = false  // finished or cancelled: a parked nil-resume happened
-    }
-
-    private enum Disposition {
-        case parked
-        case resume(Value?)
-    }
-
-    private let state = Mutex(State())
-
-    /// Deposits the value; the first call wins and wakes a parked waiter.
-    func set(_ value: Value) {
-        let waiter = self.state.withLock { state -> CheckedContinuation<Value?, Never>? in
-            guard state.value == nil, !state.done else { return nil }
-            state.value = value
-            let waiter = state.waiter
-            state.waiter = nil
-            return waiter
+/// The first element of a stream, bounded by a deadline — `nil` when the
+/// stream ends empty, the deadline passes, or the surrounding task is
+/// cancelled. The deadline matters here for the same reason it always does in
+/// production: the value may *silently never come* (see the call site), and a
+/// bounded wait with an honest miss beats an unbounded park.
+private func firstValue<Value: Sendable>(
+    of stream: AsyncStream<Value>, upTo duration: Duration
+) async -> Value? {
+    await withTaskGroup(of: Value?.self) { group in
+        group.addTask { await stream.first(where: { _ in true }) }
+        group.addTask {
+            try? await Task.sleep(for: duration)
+            return nil
         }
-        waiter?.resume(returning: value)
+        // Whichever finishes first wins; cancelling the group promptly ends
+        // the other (AsyncStream iteration finishes on cancellation).
+        let first = await group.next() ?? nil
+        group.cancelAll()
+        return first
     }
-
-    /// The producer signals that no value will ever arrive (its stream ended
-    /// empty): a parked waiter resumes with `nil`, a later waiter returns
-    /// `nil` immediately. A value already set wins over a late finish.
-    func finish() {
-        let waiter = self.state.withLock { state -> CheckedContinuation<Value?, Never>? in
-            guard state.value == nil else { return nil }
-            state.done = true
-            let waiter = state.waiter
-            state.waiter = nil
-            return waiter
-        }
-        waiter?.resume(returning: nil)
-    }
-
-    /// Suspends until ``set(_:)`` delivers the value, ``finish()`` rules one
-    /// out, the deadline passes, or the waiting task is cancelled — `nil` for
-    /// the last three. The deadline exists because the value may *silently
-    /// never come* (see the call site): a bounded wait with an honest miss is
-    /// production behavior; an unbounded park is a hang.
-    func wait(upTo duration: Duration) async -> Value? {
-        await withTaskGroup(of: Value?.self) { group in
-            group.addTask { await self.parkedWait() }
-            group.addTask {
-                try? await Task.sleep(for: duration)
-                return nil
-            }
-            // Whichever finishes first wins; cancelling the group resumes the
-            // parked waiter through the latch's cancellation path.
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
-        }
-    }
-
-    private func parkedWait() async -> Value? {
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Value?, Never>) in
-                let disposition = self.state.withLock { state -> Disposition in
-                    precondition(!state.waited, "OneShot supports a single waiter")
-                    state.waited = true
-                    if let value = state.value {
-                        return .resume(value)  // set before wait
-                    }
-                    if state.done {
-                        return .resume(nil)  // finished/cancelled before parking
-                    }
-                    state.waiter = continuation
-                    return .parked
-                }
-                if case .resume(let value) = disposition {
-                    continuation.resume(returning: value)
-                }
-            }
-        } onCancel: {
-            let waiter = self.state.withLock { state -> CheckedContinuation<Value?, Never>? in
-                state.done = true
-                let waiter = state.waiter
-                state.waiter = nil
-                return waiter
-            }
-            waiter?.resume(returning: nil)
-        }
-    }
-}
-
-private func describe(_ access: AccessMode) -> String {
-    var flags = ""
-    flags += access.contains(.read) ? "r" : "-"
-    flags += access.contains(.write) ? "w" : "-"
-    flags += access.contains(.execute) ? "x" : "-"
-    return flags
 }

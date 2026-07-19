@@ -1,5 +1,6 @@
 import MMSchema
 import MMServer
+import MMTestSupport
 import MMWire
 import NIOCore
 import Testing
@@ -31,7 +32,7 @@ struct ErrorModelTests {
             reply
                 == .response(
                     msgid: 42,
-                    error: MMErrorObject(code: 1, message: "unknown method"),
+                    error: MMError(code: 1, message: "unknown method"),
                     result: nil
                 )
         )
@@ -50,7 +51,7 @@ struct ErrorModelTests {
             reply
                 == .response(
                     msgid: 7,
-                    error: MMErrorObject(code: 3, message: "malformed params"),
+                    error: MMError(code: 3, message: "malformed params"),
                     result: nil
                 )
         )
@@ -127,7 +128,7 @@ struct ErrorModelTests {
     func handlerErrorVerbatim() async {
         var payload = ByteBuffer()
         payload.writeMessagePackInt(99)
-        let domainError = MMErrorObject(code: 64, message: "domain says no", payload: payload)
+        let domainError = MMError(code: 64, message: "domain says no", payload: payload)
         let router = Router(aclProvider: InMemoryACLProvider([entity("solo"): acl(0o444)])) {
             Handle(Method<EchoRequest, EchoResponse>(name: "test.fail", access: .read)) { _, _ in
                 .failure(domainError)

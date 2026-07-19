@@ -314,7 +314,7 @@ private struct DynamicRequestNode: Encodable {
             EncodingError.Context(
                 codingPath: encoder.codingPath,
                 debugDescription:
-                    "dynamic request value does not match its validated schema (expected \(expected), got \(self.value.kindDescription))"
+                    "dynamic request value does not match its validated schema (expected \(expected), got \(self.value.kind))"
             )
         )
     }

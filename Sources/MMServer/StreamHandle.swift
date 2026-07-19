@@ -24,7 +24,7 @@ struct StreamWireSeams: Sendable {
 /// The result of constructing one stream at open: the ``StreamControl`` the
 /// connection registers in its ``StreamTable``, and the `run` body it launches
 /// as a child of the connection's task group. `run` returns the terminal the
-/// runtime must send (nil-error graceful, or the handler's error object); the
+/// runtime must send (nil-error graceful, or the handler's `MMError`); the
 /// connection wraps that into the `[0, msgid, error, result]` frame, retiring
 /// the msgid.
 struct StreamStartup: Sendable {
@@ -36,11 +36,11 @@ struct StreamStartup: Sendable {
 }
 
 /// The terminal a stream handler produced: either a graceful response value
-/// (already encoded) or a wire error object. The connection turns it into the
+/// (already encoded) or a wire `MMError`. The connection turns it into the
 /// terminal envelope.
 enum StreamTerminal: Sendable {
     case success(ByteBuffer)
-    case failure(MMErrorObject)
+    case failure(MMError)
 }
 
 /// The erased stream handler stored on a ``Route``: given the raw params slice,

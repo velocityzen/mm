@@ -1,5 +1,6 @@
 import Foundation  // Tests only: mkstemp template under NSTemporaryDirectory().
 import MMSchema
+import MMTestSupport
 import Testing
 
 @testable import MMServer

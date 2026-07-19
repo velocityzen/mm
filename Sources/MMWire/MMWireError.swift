@@ -25,7 +25,7 @@ public enum MMWireError: Error, Equatable, Hashable, Sendable {
     /// other tag — including tags wider than `Int64` — counts as unknown.
     case unknownEnvelope
     /// A wire array had the wrong number of elements. `expected` is exact for the
-    /// envelope (4/4/3) and a minimum for evolution-tolerant arrays (`MMErrorObject`).
+    /// envelope (4/4/3) and a minimum for evolution-tolerant arrays (`MMError`).
     case invalidArity(expected: Int, got: Int)
     /// The hello preamble did not begin with the `MM` magic bytes.
     case badMagic

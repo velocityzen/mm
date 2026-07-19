@@ -10,19 +10,13 @@ import NIOCore
 /// ``MMStreamFlowControl/initialWindow`` request items outstanding (unconsumed
 /// by the handler) at once, and the server grants more credit as the handler
 /// drains — watermark-batched, never per item (see ``MMRequestStreamSource``).
-enum MMStreamFlowControl {
-    /// Initial per-direction credit — a spec constant, known on both sides and
-    /// never sent as a frame. A fresh direction starts with this many credits.
-    static let initialWindow: UInt32 = 8
-    /// Consumer-side grant policy: the source accrues consumed items and emits
-    /// one additive grant once at least this many have been consumed since the
-    /// last grant, so a steady consumer sends one grant per half-window rather
-    /// than one per item. (`initialWindow / 2`, pinned here as the single
-    /// source of the batching policy.)
+extension MMStreamFlowControl {
+    /// This server's consumer-side grant policy (local, not a wire constant —
+    /// the shared constants live in MMWire): the source accrues consumed
+    /// items and emits one additive grant once at least this many have been
+    /// consumed since the last grant, so a steady consumer sends one grant
+    /// per half-window rather than one per item.
     static let grantWatermark: UInt32 = 4
-    /// Low watermark for the inbound producer: the consumer's drain below this
-    /// resumes production. Kept at 1 so a nearly-empty buffer keeps flowing.
-    static let lowWatermark = 1
 }
 
 /// The typed, backpressured sequence of request-stream elements handed to a
@@ -280,15 +274,26 @@ final class MMRequestStreamSource<Element: Codable & Sendable>: Sendable {
                 return false
             }
             state.consumedSinceGrant = 0
-            let deficit = MMStreamFlowControl.initialWindow - state.clientCredit
+            let deficit = Self.windowDeficit(state)
             guard deficit > 0 else { return false }
-            state.clientCredit &+= deficit
-            state.pendingGrant &+= deficit
+            Self.applyDeficitGrant(&state, deficit)
             return true
         }
         if due {
             self.grantNudge.yield(())
         }
+    }
+
+    /// How far the window is from full — the top-up amount both triggers use.
+    private static func windowDeficit(_ state: State) -> UInt32 {
+        MMStreamFlowControl.initialWindow - state.clientCredit
+    }
+
+    /// The one over-grant-proof top-up: refill the window and accrue the
+    /// pending additive grant, always by the same deficit.
+    private static func applyDeficitGrant(_ state: inout State, _ deficit: UInt32) {
+        state.clientCredit &+= deficit
+        state.pendingGrant &+= deficit
     }
 
     // MARK: - Grant pump
@@ -341,10 +346,9 @@ extension MMRequestStreamSource: NIOAsyncSequenceProducerDelegate {
     func produceMore() {
         let due = self.state.withLockedValue { state -> Bool in
             guard !state.terminated else { return false }
-            let deficit = MMStreamFlowControl.initialWindow - state.clientCredit
+            let deficit = Self.windowDeficit(state)
             guard deficit >= MMStreamFlowControl.grantWatermark else { return false }
-            state.clientCredit &+= deficit
-            state.pendingGrant &+= deficit
+            Self.applyDeficitGrant(&state, deficit)
             // Reset the consume-edge accumulator: the window is now full, so the
             // consume trigger should re-arm from zero rather than double-grant.
             state.consumedSinceGrant = 0

@@ -3,16 +3,9 @@ import MMWire
 import NIOConcurrencyHelpers
 import NIOCore
 
-/// The initial per-direction credit window, a spec constant (matter-in-motion
-/// streaming plan): 8 items. Each side may send 8 items before the first
-/// credit grant. Correctness never depends on the value — it only bounds the
-/// pre-grant burst — but it must match the server's constant so the outbound
-/// gate does not over- or under-send before the first grant.
-enum StreamCredit {
-    /// Items each direction may send before the first credit grant, and the
-    /// batch size the inbound consumer grants back as it drains.
-    static let initialWindow: UInt32 = 8
-}
+// The shared credit window is MMWire's `MMStreamFlowControl.initialWindow`;
+// this client grants back one full window per batch as its consumer drains
+// (a local policy, unlike the window itself, which is a wire constant).
 
 /// The inbound response-element producer's buffer bounds. Fixed, not
 /// configurable: it is a smoothing window, and the real limit is the credit
@@ -21,18 +14,13 @@ enum StreamCredit {
 /// unprompted burst without the producer parking mid-window.
 enum StreamBackpressure {
     static let lowWatermark = 1
-    static let highWatermark = Int(StreamCredit.initialWindow)
+    static let highWatermark = Int(MMStreamFlowControl.initialWindow)
 }
 
-/// The placeholder element type for a stream direction that does not exist — a
-/// server-streaming call has no request element, a client-streaming call has no
-/// response element. It never appears on the wire (the state gates every
-/// send/deliver on `hasRequestStream`/`hasResponseStream`), so its `Codable`
-/// conformance is a formality that keeps `ClientStreamState`'s two element
-/// generics uniformly `Codable & Sendable`.
-public struct NoStreamElement: Codable, Sendable {
-    public init() {}
-}
+// A stream direction that does not exist is typed as the stdlib's `Never`
+// (Codable since SE-0396): uninhabited, so the type system itself proves no
+// element can cross the missing direction — the state still gates every
+// send/deliver on `hasRequestStream`/`hasResponseStream`.
 
 /// The result of one ``OutboundStreamHandle/send(_:)`` on a client request
 /// stream. All four cases are graceful — none is an error: they encode the four

@@ -38,6 +38,17 @@ struct SchemaMacroError: Error, CustomStringConvertible {
 /// no runtime conditionals. It never executes the DSL — it pattern-matches the
 /// syntax tree and generates source.
 public struct SchemaContractMacro: DeclarationMacro {
+    /// Option names every generated command claims: the shared
+    /// `MMCLIOptions` surface plus swift-argument-parser's own flags. The
+    /// macro cannot import MMCLI, so this literal restates
+    /// `MMCLIOptions.declaredLongOptionNames` — ReservedOptionsPinTests
+    /// (MMCLITests) asserts the two lists agree, so drift fails a test
+    /// instead of surfacing as a runtime option collision.
+    public static let reservedLongOptionNames: Set<String> = [
+        "socket", "tcp", "connect-timeout", "hello-timeout",
+        "output", "no-verify", "help", "version",
+    ]
+
     public static func expansion(
         of node: some FreestandingMacroExpansionSyntax,
         in context: some MacroExpansionContext
@@ -108,7 +119,7 @@ public struct SchemaTypesMacro: DeclarationMacro {
         guard isValidLowerIdentifierPath(namespace) else {
             throw SchemaMacroError(
                 description:
-                    "#schemaTypes namespace \"\(namespace)\" must be a dotted path of [a-z0-9_] segments"
+                    "#schemaTypes namespace \"\(namespace)\" must be a dotted path of [a-z0-9_-] segments (the entity-name grammar)"
             )
         }
         var types: [ParsedTypeDecl] = []
@@ -135,12 +146,9 @@ public struct SchemaTypesMacro: DeclarationMacro {
         declarations.append(try generateTypesTable(types, namespace: namespace))
         declarations.append(generateProbedTypes(types, namespace: namespace))
         declarations.append(
-            """
-            public static let contract: TypeNamespaceDeclaration = Types("\(namespace)") {
-            \(closure.statements.trimmedDescription)
-            }
-            """
-        )
+            generateContract(
+                namespace: namespace, closure: closure,
+                declarationType: "TypeNamespaceDeclaration", builder: "Types"))
         return declarations.map { DeclSyntax("\(raw: $0)") }
     }
 }
@@ -151,37 +159,54 @@ private func parsedCLIMode(
     _ node: some FreestandingMacroExpansionSyntax
 ) throws -> ParsedCLIMode {
     for argument in node.arguments where argument.label?.text == "cli" {
-        let expression = argument.expression
-        if let member = expression.as(MemberAccessExprSyntax.self), member.base == nil {
-            switch member.declName.baseName.text {
-                case "disabled": return .disabled
-                case "enabled": return ParsedCLIMode(enabled: true, commandName: nil)
-                default: break
-            }
-        }
-        if let call = expression.as(FunctionCallExprSyntax.self),
-            let member = call.calledExpression.as(MemberAccessExprSyntax.self),
-            member.base == nil,
-            member.declName.baseName.text == "enabled",
-            call.arguments.count == 1,
-            let commandArgument = call.arguments.first,
-            commandArgument.label?.text == "command",
-            let name = stringLiteral(commandArgument.expression)
-        {
-            guard isValidCommandName(name) else {
+        switch baseSpec(argument.expression) {
+            case ("disabled", nil)?:
+                return .disabled
+            case ("enabled", nil)?:
+                return ParsedCLIMode(enabled: true, commandName: nil)
+            case ("enabled", .some(let call))?
+            where call.arguments.count == 1 && call.arguments.first?.label?.text == "command":
+                let name = try requireCommandNameLiteral(
+                    call.arguments.first?.expression ?? argument.expression,
+                    context: "#schema cli command name")
+                return ParsedCLIMode(enabled: true, commandName: name)
+            default:
                 throw SchemaMacroError(
                     description:
-                        "#schema cli command name \"\(name)\" must be lowercase kebab-case ([a-z0-9][a-z0-9-]*)"
+                        "#schema cli: must be .disabled, .enabled, or .enabled(command: \"name\") (static subset)"
                 )
-            }
-            return ParsedCLIMode(enabled: true, commandName: name)
         }
-        throw SchemaMacroError(
-            description:
-                "#schema cli: must be .disabled, .enabled, or .enabled(command: \"name\") (static subset)"
-        )
     }
     return .disabled
+}
+
+/// Splits a `.name` / `.name(...)` spec expression — the shape every
+/// static-subset spec argument takes (`cli:` modes, `CLI(...)` specs, field
+/// hints). `nil` when the expression is neither form.
+private func baseSpec(_ expression: ExprSyntax) -> (name: String, call: FunctionCallExprSyntax?)? {
+    if let member = expression.as(MemberAccessExprSyntax.self), member.base == nil {
+        return (member.declName.baseName.text, nil)
+    }
+    if let call = expression.as(FunctionCallExprSyntax.self),
+        let member = call.calledExpression.as(MemberAccessExprSyntax.self),
+        member.base == nil
+    {
+        return (member.declName.baseName.text, call)
+    }
+    return nil
+}
+
+/// The one kebab-case literal guard behind every CLI name site (command
+/// names, aliases, option renames).
+private func requireCommandNameLiteral(
+    _ expression: ExprSyntax, context: String
+) throws -> String {
+    guard let literal = stringLiteral(expression), isValidCommandName(literal) else {
+        throw SchemaMacroError(
+            description:
+                "\(context) must be a lowercase kebab-case literal ([a-z0-9][a-z0-9-]*)")
+    }
+    return literal
 }
 
 /// `[a-z0-9][a-z0-9-]*` — the shape of a generated command or option name.
@@ -289,7 +314,7 @@ private struct ParsedCall {
     var cliOverlay: ParsedCLIOverlay?
 
     var capitalized: String {
-        name.prefix(1).uppercased() + name.dropFirst()
+        capitalizedFirst(name)
     }
 
     /// The generated subcommand's name: the `CLI(.command(...))` override, or
@@ -325,7 +350,21 @@ private struct ParsedField {
     var cliHint: ParsedCLIArgument?
 }
 
+/// `append` → `Append` — one spelling for generated-type name derivation.
+func capitalizedFirst(_ name: String) -> String {
+    name.prefix(1).uppercased() + name.dropFirst()
+}
+
 /// `importAll` → `import-all`; already-lower names pass through unchanged.
+///
+/// Deliberately simpler than swift-argument-parser's own long-name
+/// derivation, which splits acronym RUNS (`useHTTPProxy` → `use-http-proxy`);
+/// this splits at every uppercase letter (`useHTTPProxy` →
+/// `use-h-t-t-p-proxy`). Call names are single lowercase-leaning identifiers
+/// in practice, and whatever this produces is emitted explicitly via
+/// `.customLong`, so the two derivations never have to agree — but a call
+/// name with an acronym run will read better with a `CLI(.command(...))`
+/// override.
 private func kebabCased(_ name: String) -> String {
     var result = ""
     for character in name {
@@ -361,7 +400,7 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
     guard isValidLowerIdentifierPath(namespace) else {
         throw SchemaMacroError(
             description:
-                "#schema namespace \"\(namespace)\" must be a dotted path of [a-z0-9_] segments")
+                "#schema namespace \"\(namespace)\" must be a dotted path of [a-z0-9_-] segments (the entity-name grammar)")
     }
     var types: [ParsedTypeDecl] = []
     var calls: [ParsedCall] = []
@@ -406,10 +445,7 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
 private func validateCLI(calls: [ParsedCall]) throws {
     // Option names claimed by every generated command: the shared connection
     // OptionGroup plus swift-argument-parser's own flags.
-    let reservedOptions: Set<String> = [
-        "socket", "tcp", "connect-timeout", "hello-timeout", "expect-fingerprint",
-        "output", "help", "version",
-    ]
+    let reservedOptions = SchemaContractMacro.reservedLongOptionNames
     var commandNames: Set<String> = []
     for call in calls where !call.cliOmitted {
         for candidate in [call.cliCommandName] + (call.cliOverlay?.aliases ?? []) {
@@ -676,46 +712,31 @@ private func parseCall(_ call: FunctionCallExprSyntax) throws -> ParsedCall {
                 sawAccess = true
                 result.accessSource = try parseAccess(part, callName: name)
             case "Request":
-                guard !sawRequest else {
-                    throw SchemaMacroError(description: "Call(\"\(name)\"): Request declared twice")
-                }
+                try applyFieldsPart(
+                    part, partName: partName, callName: name, into: &result,
+                    alreadyDeclared: sawRequest,
+                    typeName: \.requestName, description: \.requestDescription,
+                    payload: \.requestPayload, unaryFields: \.request)
                 sawRequest = true
-                let parsed = try parseFieldsPart(part, partName: partName, callName: name)
-                result.requestName = parsed.typeName
-                result.requestDescription = parsed.description
-                result.request = parsed.fields
-                result.requestPayload = parsed.payload
             case "Response":
-                guard !sawResponse else {
-                    throw SchemaMacroError(
-                        description: "Call(\"\(name)\"): Response declared twice")
-                }
+                try applyFieldsPart(
+                    part, partName: partName, callName: name, into: &result,
+                    alreadyDeclared: sawResponse,
+                    typeName: \.responseName, description: \.responseDescription,
+                    payload: \.responsePayload, unaryFields: \.response)
                 sawResponse = true
-                let parsed = try parseFieldsPart(part, partName: partName, callName: name)
-                result.responseName = parsed.typeName
-                result.responseDescription = parsed.description
-                result.response = parsed.fields
-                result.responsePayload = parsed.payload
             case "RequestStream":
-                guard !result.hasRequestStream else {
-                    throw SchemaMacroError(
-                        description: "Call(\"\(name)\"): RequestStream declared twice")
-                }
-                let parsed = try parseFieldsPart(part, partName: partName, callName: name)
-                result.requestStreamName = parsed.typeName
-                result.requestStreamDescription = parsed.description
-                result.requestStreamPayload = parsed.payload
-                result.requestStream = parsed.payload == nil ? parsed.fields : nil
+                try applyFieldsPart(
+                    part, partName: partName, callName: name, into: &result,
+                    alreadyDeclared: result.hasRequestStream,
+                    typeName: \.requestStreamName, description: \.requestStreamDescription,
+                    payload: \.requestStreamPayload, streamFields: \.requestStream)
             case "ResponseStream":
-                guard !result.hasResponseStream else {
-                    throw SchemaMacroError(
-                        description: "Call(\"\(name)\"): ResponseStream declared twice")
-                }
-                let parsed = try parseFieldsPart(part, partName: partName, callName: name)
-                result.responseStreamName = parsed.typeName
-                result.responseStreamDescription = parsed.description
-                result.responseStreamPayload = parsed.payload
-                result.responseStream = parsed.payload == nil ? parsed.fields : nil
+                try applyFieldsPart(
+                    part, partName: partName, callName: name, into: &result,
+                    alreadyDeclared: result.hasResponseStream,
+                    typeName: \.responseStreamName, description: \.responseStreamDescription,
+                    payload: \.responseStreamPayload, streamFields: \.responseStream)
             case "CLI":
                 guard result.cliOverlay == nil else {
                     throw SchemaMacroError(description: "Call(\"\(name)\"): CLI declared twice")
@@ -748,64 +769,48 @@ private func parseCLIPart(
                 "Call(\"\(callName)\"): CLI takes exactly one spec — .omitted or .command(\"name\", aliases: [...])"
         )
     }
-    if let member = expression.as(MemberAccessExprSyntax.self), member.base == nil,
-        member.declName.baseName.text == "omitted"
-    {
-        return ParsedCLIOverlay(omitted: true, commandName: nil, aliases: [])
-    }
-    if let call = expression.as(FunctionCallExprSyntax.self),
-        let member = call.calledExpression.as(MemberAccessExprSyntax.self),
-        member.base == nil,
-        member.declName.baseName.text == "command"
-    {
-        var commandName: String?
-        var aliases: [String] = []
-        for argument in call.arguments {
-            if argument.label == nil {
-                guard let literal = stringLiteral(argument.expression),
-                    isValidCommandName(literal)
-                else {
-                    throw SchemaMacroError(
-                        description:
-                            "Call(\"\(callName)\"): CLI command name must be a lowercase kebab-case literal ([a-z0-9][a-z0-9-]*)"
-                    )
-                }
-                commandName = literal
-            } else if argument.label?.text == "aliases" {
-                guard let array = argument.expression.as(ArrayExprSyntax.self) else {
-                    throw SchemaMacroError(
-                        description:
-                            "Call(\"\(callName)\"): CLI aliases must be a literal string array (static subset)"
-                    )
-                }
-                for element in array.elements {
-                    guard let literal = stringLiteral(element.expression),
-                        isValidCommandName(literal)
-                    else {
+    switch baseSpec(expression) {
+        case ("omitted", nil)?:
+            return ParsedCLIOverlay(omitted: true, commandName: nil, aliases: [])
+        case ("command", .some(let call))?:
+            var commandName: String?
+            var aliases: [String] = []
+            for argument in call.arguments {
+                if argument.label == nil {
+                    commandName = try requireCommandNameLiteral(
+                        argument.expression,
+                        context: "Call(\"\(callName)\"): CLI command name")
+                } else if argument.label?.text == "aliases" {
+                    guard let array = argument.expression.as(ArrayExprSyntax.self) else {
                         throw SchemaMacroError(
                             description:
-                                "Call(\"\(callName)\"): CLI alias must be a lowercase kebab-case literal"
+                                "Call(\"\(callName)\"): CLI aliases must be a literal string array (static subset)"
                         )
                     }
-                    aliases.append(literal)
+                    for element in array.elements {
+                        aliases.append(
+                            try requireCommandNameLiteral(
+                                element.expression,
+                                context: "Call(\"\(callName)\"): CLI alias"))
+                    }
+                } else {
+                    throw SchemaMacroError(
+                        description:
+                            "Call(\"\(callName)\"): unsupported CLI .command argument \(argument.trimmedDescription)"
+                    )
                 }
-            } else {
-                throw SchemaMacroError(
-                    description:
-                        "Call(\"\(callName)\"): unsupported CLI .command argument \(argument.trimmedDescription)"
-                )
             }
-        }
-        guard let commandName else {
+            guard let commandName else {
+                throw SchemaMacroError(
+                    description: "Call(\"\(callName)\"): CLI .command requires a name literal")
+            }
+            return ParsedCLIOverlay(omitted: false, commandName: commandName, aliases: aliases)
+        default:
             throw SchemaMacroError(
-                description: "Call(\"\(callName)\"): CLI .command requires a name literal")
-        }
-        return ParsedCLIOverlay(omitted: false, commandName: commandName, aliases: aliases)
+                description:
+                    "Call(\"\(callName)\"): CLI spec must be .omitted or .command(\"name\", aliases: [...]) (static subset)"
+            )
     }
-    throw SchemaMacroError(
-        description:
-            "Call(\"\(callName)\"): CLI spec must be .omitted or .command(\"name\", aliases: [...]) (static subset)"
-    )
 }
 
 /// Parses a field's `cli:` hint (static subset: `.argument`, `.flag`,
@@ -813,51 +818,70 @@ private func parseCLIPart(
 private func parseCLIArgument(
     _ expression: ExprSyntax, context: String
 ) throws -> ParsedCLIArgument {
-    if let member = expression.as(MemberAccessExprSyntax.self), member.base == nil {
-        switch member.declName.baseName.text {
-            case "argument": return .argument
-            case "flag": return .flag
-            case "omitted": return .omitted
-            default: break
-        }
-    }
-    if let call = expression.as(FunctionCallExprSyntax.self),
-        let member = call.calledExpression.as(MemberAccessExprSyntax.self),
-        member.base == nil,
-        member.declName.baseName.text == "option"
-    {
-        var name: String?
-        var short: String?
-        for argument in call.arguments {
-            if argument.label == nil {
-                guard let literal = stringLiteral(argument.expression),
-                    isValidCommandName(literal)
-                else {
+    switch baseSpec(expression) {
+        case ("argument", nil)?: return .argument
+        case ("flag", nil)?: return .flag
+        case ("omitted", nil)?: return .omitted
+        case ("option", .some(let call))?:
+            var name: String?
+            var short: String?
+            for argument in call.arguments {
+                if argument.label == nil {
+                    name = try requireCommandNameLiteral(
+                        argument.expression, context: "\(context): cli option name")
+                } else if argument.label?.text == "short" {
+                    guard let literal = stringLiteral(argument.expression), literal.count == 1
+                    else {
+                        throw SchemaMacroError(
+                            description: "\(context): cli short flag must be a single character")
+                    }
+                    short = literal
+                } else {
                     throw SchemaMacroError(
                         description:
-                            "\(context): cli option name must be a lowercase kebab-case literal"
+                            "\(context): unsupported cli .option argument \(argument.trimmedDescription)"
                     )
                 }
-                name = literal
-            } else if argument.label?.text == "short" {
-                guard let literal = stringLiteral(argument.expression), literal.count == 1 else {
-                    throw SchemaMacroError(
-                        description: "\(context): cli short flag must be a single character")
-                }
-                short = literal
-            } else {
-                throw SchemaMacroError(
-                    description:
-                        "\(context): unsupported cli .option argument \(argument.trimmedDescription)"
-                )
             }
-        }
-        return .option(name: name, short: short)
+            return .option(name: name, short: short)
+        default:
+            throw SchemaMacroError(
+                description:
+                    "\(context): cli must be .argument, .flag, .omitted, or .option(\"name\", short: \"c\") (static subset)"
+            )
     }
-    throw SchemaMacroError(
-        description:
-            "\(context): cli must be .argument, .flag, .omitted, or .option(\"name\", short: \"c\") (static subset)"
-    )
+}
+
+/// The one application of a parsed Request/Response/RequestStream/ResponseStream
+/// part to its slot cluster: the four `parseCall` branches differ only in
+/// destination keypaths (a stream part stores its fields only when no payload
+/// reference is given; a unary part stores them unconditionally).
+private func applyFieldsPart(
+    _ part: FunctionCallExprSyntax,
+    partName: String,
+    callName: String,
+    into result: inout ParsedCall,
+    alreadyDeclared: Bool,
+    typeName: WritableKeyPath<ParsedCall, String?>,
+    description: WritableKeyPath<ParsedCall, String?>,
+    payload: WritableKeyPath<ParsedCall, ParsedType?>,
+    unaryFields: WritableKeyPath<ParsedCall, [ParsedField]>? = nil,
+    streamFields: WritableKeyPath<ParsedCall, [ParsedField]?>? = nil
+) throws {
+    guard !alreadyDeclared else {
+        throw SchemaMacroError(
+            description: "Call(\"\(callName)\"): \(partName) declared twice")
+    }
+    let parsed = try parseFieldsPart(part, partName: partName, callName: callName)
+    result[keyPath: typeName] = parsed.typeName
+    result[keyPath: description] = parsed.description
+    result[keyPath: payload] = parsed.payload
+    if let unaryFields {
+        result[keyPath: unaryFields] = parsed.fields
+    }
+    if let streamFields {
+        result[keyPath: streamFields] = parsed.payload == nil ? parsed.fields : nil
+    }
 }
 
 private func parseAccess(_ part: FunctionCallExprSyntax, callName: String) throws -> String {
@@ -892,14 +916,21 @@ private func labeledDescription(
     context: String
 ) throws -> String? {
     for argument in arguments where argument.label?.text == "description" {
-        guard let literal = stringLiteral(argument.expression) else {
-            throw SchemaMacroError(
-                description:
-                    "\(context): description must be a literal string (static subset)")
-        }
-        return literal
+        return try requireDescriptionLiteral(argument.expression, context: context)
     }
     return nil
+}
+
+/// The one guard behind every `description:` argument (static subset:
+/// literals only — interpolations cannot be evaluated at expansion).
+private func requireDescriptionLiteral(
+    _ expression: ExprSyntax, context: String
+) throws -> String {
+    guard let literal = stringLiteral(expression) else {
+        throw SchemaMacroError(
+            description: "\(context): description must be a literal string (static subset)")
+    }
+    return literal
 }
 
 /// Parses Request/Response/RequestStream/ResponseStream: an optional leading
@@ -923,12 +954,8 @@ private func parseFieldsPart(
             )
         }
         if argument.label?.text == "description" {
-            guard let literal = stringLiteral(argument.expression) else {
-                throw SchemaMacroError(
-                    description:
-                        "Call(\"\(callName)\"): \(partName) description must be a literal string")
-            }
-            description = literal
+            description = try requireDescriptionLiteral(
+                argument.expression, context: "Call(\"\(callName)\"): \(partName)")
         } else if let literal = stringLiteral(argument.expression) {
             guard isValidTypeIdentifier(literal) else {
                 throw SchemaMacroError(
@@ -1025,11 +1052,8 @@ private func parseField(_ call: FunctionCallExprSyntax, context: String) throws 
                 throw SchemaMacroError(
                     description: "\(context): Field declares description twice")
             }
-            guard let literal = stringLiteral(last.expression) else {
-                throw SchemaMacroError(
-                    description: "\(context): Field description must be a literal string")
-            }
-            description = literal
+            description = try requireDescriptionLiteral(
+                last.expression, context: "\(context): Field")
         } else {
             guard cliHint == nil else {
                 throw SchemaMacroError(description: "\(context): Field declares cli twice")
@@ -1066,7 +1090,7 @@ private func parseField(_ call: FunctionCallExprSyntax, context: String) throws 
                     "\(context): Field(\"\(name)\") mixes a type argument with a nested block"
             )
         }
-        let nestedName = name.prefix(1).uppercased() + name.dropFirst()
+        let nestedName = capitalizedFirst(name)
         let nestedFields = try parseFields(nested, context: "\(context).\(name)")
         return ParsedField(
             pinnedKey: pinnedKey, name: name,
@@ -1426,33 +1450,19 @@ private func generateProbedTypes(_ types: [ParsedTypeDecl], namespace: String) -
 }
 
 private func generateStructs(for call: ParsedCall, namespace: String) throws -> [String] {
-    var declarations: [String] = []
-    // A part with a payload reference IS a named type — no struct to generate.
-    if call.requestPayload == nil {
-        declarations.append(
-            try generateStruct(
-                name: call.requestTypeName, fields: call.request,
-                namespace: namespace, describedAs: .structure))
+    // A part with a payload reference IS a named type — no struct to
+    // generate; stream parts generate only when declared inline.
+    let parts: [(fields: [ParsedField]?, name: String)] = [
+        (call.requestPayload == nil ? call.request : nil, call.requestTypeName),
+        (call.responsePayload == nil ? call.response : nil, call.responseTypeName),
+        (call.requestStream, call.requestItemTypeName),
+        (call.responseStream, call.responseItemTypeName),
+    ]
+    return try parts.compactMap { part in
+        guard let fields = part.fields else { return nil }
+        return try generateStruct(
+            name: part.name, fields: fields, namespace: namespace, describedAs: .structure)
     }
-    if call.responsePayload == nil {
-        declarations.append(
-            try generateStruct(
-                name: call.responseTypeName, fields: call.response,
-                namespace: namespace, describedAs: .structure))
-    }
-    if let stream = call.requestStream {
-        declarations.append(
-            try generateStruct(
-                name: call.requestItemTypeName, fields: stream,
-                namespace: namespace, describedAs: .structure))
-    }
-    if let stream = call.responseStream {
-        declarations.append(
-            try generateStruct(
-                name: call.responseItemTypeName, fields: stream,
-                namespace: namespace, describedAs: .structure))
-    }
-    return declarations
 }
 
 /// The `documentation:` argument for a descriptor, or nil when the call
@@ -1472,30 +1482,37 @@ private func documentationArgument(for call: ParsedCall) -> String? {
     return "MethodDocumentation(\(arguments.joined(separator: ", ")))"
 }
 
+/// The four method shapes' descriptor type and generic arguments, rendered
+/// once — shared by descriptor emission and the generated commands' inline
+/// descriptor reconstruction.
+private func descriptorShape(for call: ParsedCall) -> (type: String, generics: String) {
+    switch (call.hasRequestStream, call.hasResponseStream) {
+        case (false, false):
+            return ("Method", "\(call.requestSwiftType), \(call.responseSwiftType)")
+        case (false, true):
+            return (
+                "ServerStreamMethod",
+                "\(call.requestSwiftType), \(call.responseElementSwiftType), \(call.responseSwiftType)"
+            )
+        case (true, false):
+            return (
+                "ClientStreamMethod",
+                "\(call.requestSwiftType), \(call.requestElementSwiftType), \(call.responseSwiftType)"
+            )
+        case (true, true):
+            return (
+                "BidirectionalStreamMethod",
+                "\(call.requestSwiftType), \(call.requestElementSwiftType), \(call.responseElementSwiftType), \(call.responseSwiftType)"
+            )
+    }
+}
+
 private func descriptor(for call: ParsedCall, namespace: String) -> String {
     let wireName = "\(namespace).\(call.name)"
     let documentation = documentationArgument(for: call).map { ",\n    documentation: \($0)" } ?? ""
-    let generics: String
-    let descriptorType: String
-    switch (call.hasRequestStream, call.hasResponseStream) {
-        case (false, false):
-            descriptorType = "Method"
-            generics = "\(call.requestSwiftType), \(call.responseSwiftType)"
-        case (false, true):
-            descriptorType = "ServerStreamMethod"
-            generics =
-                "\(call.requestSwiftType), \(call.responseElementSwiftType), \(call.responseSwiftType)"
-        case (true, false):
-            descriptorType = "ClientStreamMethod"
-            generics =
-                "\(call.requestSwiftType), \(call.requestElementSwiftType), \(call.responseSwiftType)"
-        case (true, true):
-            descriptorType = "BidirectionalStreamMethod"
-            generics =
-                "\(call.requestSwiftType), \(call.requestElementSwiftType), \(call.responseElementSwiftType), \(call.responseSwiftType)"
-    }
+    let shape = descriptorShape(for: call)
     return """
-        public static let `\(call.name)` = \(descriptorType)<\(generics)>(
+        public static let `\(call.name)` = \(shape.type)<\(shape.generics)>(
             name: "\(wireName)", access: \(call.accessSource)\(documentation))
         """
 }
@@ -1725,6 +1742,14 @@ private func commandDeclaration(
         lines.append("        let request = \(requestType)(\(requestArguments.joined(separator: ", ")))")
     }
     lines.append("        let format = connection.output")
+    // The stdin line→element mapper, shared by the client-stream and
+    // bidirectional cases (computed once; unary/server-stream ignore it).
+    let shape = descriptorShape(for: call)
+    let requestElementMapper = lineMapper(
+        elementFields: streamElementFields(
+            call.requestStream, payload: call.requestStreamPayload,
+            structsByName: structsByName),
+        elementSwiftType: call.requestElementSwiftType)
     // `verifying:` hands the runner this namespace's compiled contract for
     // the automatic pre-dispatch schema check.
     lines.append(
@@ -1735,42 +1760,34 @@ private func commandDeclaration(
             lines.append("            try MMCLIFailure.unwrap(")
             lines.append("                await client.call(")
             lines.append(
-                "                    Method<\(call.requestSwiftType), \(call.responseSwiftType)>(name: \"\(wireName)\", access: \(call.accessSource)),"
+                "                    \(shape.type)<\(shape.generics)>(name: \"\(wireName)\", access: \(call.accessSource)),"
             )
             lines.append("                    on: target, request),")
             lines.append("                method: \"\(wireName)\", entity: entityArgument)")
         case (false, true):
             lines.append("            let handle = await client.call(")
             lines.append(
-                "                ServerStreamMethod<\(call.requestSwiftType), \(call.responseElementSwiftType), \(call.responseSwiftType)>(name: \"\(wireName)\", access: \(call.accessSource)),"
+                "                \(shape.type)<\(shape.generics)>(name: \"\(wireName)\", access: \(call.accessSource)),"
             )
             lines.append("                on: target, request)")
             lines.append(
                 "            return try await MMCLIStreamDriver.follow(handle, format: format, method: \"\(wireName)\", entity: entityArgument)"
             )
         case (true, false):
-            let mapper = lineMapper(
-                elementFields: streamElementFields(
-                    call.requestStream, payload: call.requestStreamPayload,
-                    structsByName: structsByName),
-                elementSwiftType: call.requestElementSwiftType)
+            let mapper = requestElementMapper
             lines.append("            let handle = await client.call(")
             lines.append(
-                "                ClientStreamMethod<\(call.requestSwiftType), \(call.requestElementSwiftType), \(call.responseSwiftType)>(name: \"\(wireName)\", access: \(call.accessSource)),"
+                "                \(shape.type)<\(shape.generics)>(name: \"\(wireName)\", access: \(call.accessSource)),"
             )
             lines.append("                on: target, request)")
             lines.append(
                 "            return try await MMCLIStreamDriver.feed(handle, makeElement: \(mapper), method: \"\(wireName)\", entity: entityArgument)"
             )
         case (true, true):
-            let mapper = lineMapper(
-                elementFields: streamElementFields(
-                    call.requestStream, payload: call.requestStreamPayload,
-                    structsByName: structsByName),
-                elementSwiftType: call.requestElementSwiftType)
+            let mapper = requestElementMapper
             lines.append("            let handle = await client.call(")
             lines.append(
-                "                BidirectionalStreamMethod<\(call.requestSwiftType), \(call.requestElementSwiftType), \(call.responseElementSwiftType), \(call.responseSwiftType)>(name: \"\(wireName)\", access: \(call.accessSource)),"
+                "                \(shape.type)<\(shape.generics)>(name: \"\(wireName)\", access: \(call.accessSource)),"
             )
             lines.append("                on: target, request)")
             lines.append(
@@ -1869,13 +1886,19 @@ private func emitField(
     }
 }
 
-private func generateContract(namespace: String, closure: ClosureExprSyntax) -> String {
+private func generateContract(
+    namespace: String,
+    closure: ClosureExprSyntax,
+    declarationType: String = "SchemaDeclaration",
+    builder: String = "Schema"
+) -> String {
     // Re-emit the DSL verbatim as the runtime declaration: the generated types
     // above and this value share one source, so `contract.verify(against:)`
-    // becomes a macro-fidelity check rather than a drift check.
+    // becomes a macro-fidelity check rather than a drift check. `#schemaTypes`
+    // shares this emission with its own declaration type and builder.
     let body = closure.statements.trimmedDescription
     return """
-        public static let contract: SchemaDeclaration = Schema("\(namespace)") {
+        public static let contract: \(declarationType) = \(builder)("\(namespace)") {
         \(body)
         }
         """
@@ -1888,11 +1911,10 @@ private func calleeName(_ call: FunctionCallExprSyntax) -> String? {
 }
 
 private func stringLiteral(_ expr: ExprSyntax) -> String? {
-    guard let literal = expr.as(StringLiteralExprSyntax.self),
-        literal.segments.count == 1,
-        let segment = literal.segments.first?.as(StringSegmentSyntax.self)
-    else { return nil }
-    return segment.content.text
+    // SwiftSyntax's own literal evaluation: nil for interpolations, decoded
+    // escape sequences for plain literals (a `\n` in a description reaches
+    // the generated code as a real newline, re-escaped by `quoted`).
+    expr.as(StringLiteralExprSyntax.self)?.representedLiteralValue
 }
 
 /// Flattens free text onto one line so it is safe inside a generated `///`
@@ -1901,21 +1923,10 @@ private func docCommentText(_ text: String) -> String {
     text.split(whereSeparator: \.isNewline).joined(separator: " ")
 }
 
-/// Renders free text as a Swift string literal — descriptions may contain
-/// quotes, backslashes, or newlines.
+/// Renders free text as a Swift string literal — SwiftSyntax owns the
+/// escaping (quotes, backslashes, newlines, and everything rarer).
 private func quoted(_ text: String) -> String {
-    var out = "\""
-    for scalar in text.unicodeScalars {
-        switch scalar {
-            case "\"": out += "\\\""
-            case "\\": out += "\\\\"
-            case "\n": out += "\\n"
-            case "\r": out += "\\r"
-            case "\t": out += "\\t"
-            default: out.unicodeScalars.append(scalar)
-        }
-    }
-    return out + "\""
+    StringLiteralExprSyntax(content: text).trimmedDescription
 }
 
 private func isValidSwiftIdentifierish(_ name: String) -> Bool {
@@ -1928,11 +1939,35 @@ private func isValidTypeIdentifier(_ name: String) -> Bool {
     return name.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
 }
 
-private func isValidLowerIdentifierPath(_ path: String) -> Bool {
-    let segments = path.split(separator: ".", omittingEmptySubsequences: false)
-    guard !segments.isEmpty else { return false }
-    return segments.allSatisfy { segment in
-        guard let first = segment.first, first.isLowercase || first == "_" else { return false }
-        return segment.allSatisfy { ($0.isLetter && $0.isLowercase) || $0.isNumber || $0 == "_" }
+/// Mirrors `EntityName.parse`'s grammar exactly (Sources/MMSchema/EntityName.swift:
+/// dotted segments of ASCII `[a-z0-9_-]`, no empty segments), additionally
+/// rejecting the empty (root) path — `Schema(...)` requires a non-root
+/// namespace. The macro cannot call the runtime, so the rules are restated
+/// here and pinned by NamespaceGrammarTests against the same case table.
+func isValidLowerIdentifierPath(_ path: String) -> Bool {
+    guard !path.isEmpty else { return false }
+    var previousWasDot = true  // a leading dot is an empty segment
+    for byte in path.utf8 {
+        if byte == UInt8(ascii: ".") {
+            if previousWasDot { return false }
+            previousWasDot = true
+        } else if isEntityNameByte(byte) {
+            previousWasDot = false
+        } else {
+            return false
+        }
+    }
+    return !previousWasDot  // a trailing dot is an empty segment
+}
+
+private func isEntityNameByte(_ byte: UInt8) -> Bool {
+    switch byte {
+        case UInt8(ascii: "a")...UInt8(ascii: "z"),
+            UInt8(ascii: "0")...UInt8(ascii: "9"),
+            UInt8(ascii: "_"),
+            UInt8(ascii: "-"):
+            return true
+        default:
+            return false
     }
 }

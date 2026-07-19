@@ -53,42 +53,51 @@ public enum SchemaFingerprint {
         _ signatures: [MethodSignature],
         types: [TypeDefinition] = []
     ) -> UInt64 {
-        // Sort by name, tie-breaking on the full canonical encoding: a total
-        // order, so identical *sets* hash identically regardless of input order
-        // even when names collide. (Name first, not encoding first: the encoding
-        // starts with the name's u32 length prefix, which would order "b" before
-        // "aa" and change every existing fingerprint.)
-        let encoded = signatures.map { signature in
-            var bytes: [UInt8] = []
-            append(signature, into: &bytes)
-            return (name: Array(signature.name.utf8), bytes: bytes)
-        }
-        let sorted = encoded.sorted { left, right in
-            if left.name != right.name {
-                return left.name.lexicographicallyPrecedes(right.name)
-            }
-            return left.bytes.lexicographicallyPrecedes(right.bytes)
-        }
-        var stream: [UInt8] = []
-        for entry in sorted {
-            stream.append(contentsOf: entry.bytes)
+        // Each list is canonically encoded, sorted (name first, not encoding
+        // first: the encoding starts with the name's u32 length prefix, which
+        // would order "b" before "aa" and change every existing fingerprint),
+        // and concatenated — signatures, then type definitions — into the one
+        // hashed stream.
+        let encodedSignatures = signatures.map { signature in
+            (name: Array(signature.name.utf8), bytes: canonical(signature))
         }
         let encodedTypes = types.map { definition in
-            var bytes: [UInt8] = [3]
-            append(definition.name, into: &bytes)
-            append(definition.schema, into: &bytes)
-            return (name: Array(definition.name.utf8), bytes: bytes)
+            (name: Array(definition.name.utf8), bytes: canonical(definition))
         }
-        let sortedTypes = encodedTypes.sorted { left, right in
+        return fnv1a64(
+            Self.sortedCanonically(encodedSignatures).flatMap(\.bytes)
+                + Self.sortedCanonically(encodedTypes).flatMap(\.bytes)
+        )
+    }
+
+    /// The canonical byte encoding of one signature.
+    private static func canonical(_ signature: MethodSignature) -> [UInt8] {
+        var bytes: [UInt8] = []
+        append(signature, into: &bytes)
+        return bytes
+    }
+
+    /// The canonical byte encoding of one type definition (tag 3 + name +
+    /// schema).
+    private static func canonical(_ definition: TypeDefinition) -> [UInt8] {
+        var bytes: [UInt8] = [3]
+        append(definition.name, into: &bytes)
+        append(definition.schema, into: &bytes)
+        return bytes
+    }
+
+    /// The canonical total order (§9.2), shared by the signature and
+    /// type-definition streams: byte-wise by name, tie-break on the full
+    /// canonical encoding.
+    private static func sortedCanonically(
+        _ entries: [(name: [UInt8], bytes: [UInt8])]
+    ) -> [(name: [UInt8], bytes: [UInt8])] {
+        entries.sorted { left, right in
             if left.name != right.name {
                 return left.name.lexicographicallyPrecedes(right.name)
             }
             return left.bytes.lexicographicallyPrecedes(right.bytes)
         }
-        for entry in sortedTypes {
-            stream.append(contentsOf: entry.bytes)
-        }
-        return fnv1a64(stream)
     }
 
     private static func append(_ signature: MethodSignature, into bytes: inout [UInt8]) {
@@ -121,26 +130,20 @@ public enum SchemaFingerprint {
     }
 
     private static func append(_ schema: TypeSchema, into bytes: inout [UInt8]) {
+        // One tag table: the canonical stream reuses the wire coder's
+        // `TypeSchema.tag` numbers rather than restating them.
+        bytes.append(schema.tag)
         switch schema {
-            case .bool: bytes.append(0)
-            case .int: bytes.append(1)
-            case .uint: bytes.append(2)
-            case .float: bytes.append(3)
-            case .double: bytes.append(4)
-            case .string: bytes.append(5)
-            case .bytes: bytes.append(6)
+            case .bool, .int, .uint, .float, .double, .string, .bytes, .unknown:
+                break
             case .optional(let wrapped):
-                bytes.append(7)
                 append(wrapped, into: &bytes)
             case .array(let element):
-                bytes.append(8)
                 append(element, into: &bytes)
             case .map(let key, let value):
-                bytes.append(9)
                 append(key, into: &bytes)
                 append(value, into: &bytes)
             case .structure(let fields):
-                bytes.append(10)
                 appendUInt32(UInt32(fields.count), into: &bytes)
                 for field in fields {
                     if let key = field.key {
@@ -153,26 +156,21 @@ public enum SchemaFingerprint {
                     append(field.type, into: &bytes)
                 }
             case .enumeration(let cases):
-                bytes.append(11)
                 appendUInt32(UInt32(cases.count), into: &bytes)
                 for enumCase in cases {
                     append(enumCase.name, into: &bytes)
                 }
             case .reference(let name):
-                bytes.append(12)
                 append(name, into: &bytes)
-            case .unknown:
-                bytes.append(255)
         }
     }
 
-    /// Stable 64-bit FNV-1a; implemented in-repo because it is a wire contract.
+    /// Stable 64-bit FNV-1a; implemented in-repo because it is a wire
+    /// contract. A fold from the offset basis: xor the byte, multiply by the
+    /// prime.
     static func fnv1a64(_ bytes: [UInt8]) -> UInt64 {
-        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in bytes {
-            hash ^= UInt64(byte)
-            hash = hash &* 0x0000_0100_0000_01b3
+        bytes.reduce(0xcbf2_9ce4_8422_2325) { hash, byte in
+            (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3
         }
-        return hash
     }
 }

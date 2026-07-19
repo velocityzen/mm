@@ -96,7 +96,7 @@ final class StreamRuntime: Sendable {
         guard underCap else {
             self.metrics.overCap.increment()
             _ = await self.writer.send(
-                .response(msgid: msgid, error: Router.errorObject(.tooManyInFlight), result: nil)
+                .response(msgid: msgid, error: Router.error(.tooManyInFlight), result: nil)
             )
             return nil
         }
@@ -113,7 +113,7 @@ final class StreamRuntime: Sendable {
         guard let startup = streamHandler(params, context, msgid, seams, self.metrics) else {
             // Params failed to decode as the method's request type.
             _ = await self.writer.send(
-                .response(msgid: msgid, error: Router.errorObject(.malformedParams), result: nil)
+                .response(msgid: msgid, error: Router.error(.malformedParams), result: nil)
             )
             return nil
         }
@@ -168,8 +168,8 @@ final class StreamRuntime: Sendable {
         switch terminal {
             case .success(let result):
                 envelope = .response(msgid: msgid, error: nil, result: result)
-            case .failure(let errorObject):
-                envelope = .response(msgid: msgid, error: errorObject, result: nil)
+            case .failure(let error):
+                envelope = .response(msgid: msgid, error: error, result: nil)
         }
         _ = await self.writer.send(envelope)
     }
@@ -268,7 +268,7 @@ final class StreamRuntime: Sendable {
         control.cancelHandler()
         control.endStreams()
         _ = await self.writer.send(
-            .response(msgid: msgid, error: Router.errorObject(.cancelled), result: nil)
+            .response(msgid: msgid, error: Router.error(.cancelled), result: nil)
         )
     }
 
@@ -279,7 +279,7 @@ final class StreamRuntime: Sendable {
         control.cancelHandler()
         control.endStreams()
         _ = await self.writer.send(
-            .response(msgid: msgid, error: Router.errorObject(.streamViolation), result: nil)
+            .response(msgid: msgid, error: Router.error(.streamViolation), result: nil)
         )
     }
 
@@ -289,7 +289,7 @@ final class StreamRuntime: Sendable {
     private func unaryViolation(msgid: UInt32) async {
         self.metrics.violations.increment()
         _ = await self.writer.send(
-            .response(msgid: msgid, error: Router.errorObject(.streamViolation), result: nil)
+            .response(msgid: msgid, error: Router.error(.streamViolation), result: nil)
         )
     }
 

@@ -1,6 +1,7 @@
 import ArgumentParser
 import MMCLI
 import MMSchema
+import MMTestSupport
 import Testing
 
 /// A fixture contract exercising every CLI-generation path: command rename +

@@ -1,6 +1,7 @@
 import Logging
 import MMSchema
 import MMServer
+import MMTestSupport
 import MMWire
 import NIOCore
 import ServiceLifecycle
@@ -131,9 +132,9 @@ struct ServerIntegrationTests {
                     )
                     let denied = try await session.response(msgid: 4)
                     #expect(denied.error?.code == 2)
-                    // rpc.schema opts in: root-scoped discovery still works.
+                    // server.schema opts in: root-scoped discovery still works.
                     try await session.send(
-                        request(msgid: 5, method: "rpc.schema", SchemaRequest())
+                        request(msgid: 5, method: "server.schema", SchemaRequest())
                     )
                     let discovery = try await session.response(msgid: 5)
                     #expect(discovery.error == nil)
@@ -364,7 +365,7 @@ struct ServerIntegrationTests {
         }
     }
 
-    @Test("rpc.schema filters by traversal rights of the unix peer")
+    @Test("server.schema filters by traversal rights of the unix peer")
     func rpcSchemaOverTheWire() async throws {
         try await withTempSocketPath { path in
             let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
@@ -372,7 +373,7 @@ struct ServerIntegrationTests {
                 try await withWireSession(unixPath: path) { session in
                     _ = try await session.handshake()
                     try await session.send(
-                        request(msgid: 6, method: "rpc.schema", SchemaRequest())
+                        request(msgid: 6, method: "server.schema", SchemaRequest())
                     )
                     let reply = try await session.response(msgid: 6)
                     #expect(reply.error == nil)
@@ -407,7 +408,7 @@ struct ServerIntegrationTests {
             try await withWireSession(host: "127.0.0.1", port: port) { session in
                 _ = try await session.handshake()
                 try await session.send(
-                    request(msgid: 1, method: "rpc.schema", SchemaRequest())
+                    request(msgid: 1, method: "server.schema", SchemaRequest())
                 )
                 let schemaReply = try await session.response(msgid: 1)
                 let schema = try decodeResult(SchemaResponse.self, from: schemaReply.result)
@@ -437,7 +438,7 @@ struct ServerIntegrationTests {
         }
     }
 
-    @Test("entity.stat returns the ten-byte ACL over the wire")
+    @Test("server.entity returns the ten-byte ACL over the wire")
     func entityStatOverTheWire() async throws {
         try await withTempSocketPath { path in
             let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
@@ -446,7 +447,7 @@ struct ServerIntegrationTests {
                     _ = try await session.handshake()
                     try await session.send(
                         request(
-                            msgid: 8, method: "entity.stat", entity: entity("box"),
+                            msgid: 8, method: "server.entity", entity: entity("box"),
                             StatRequest())
                     )
                     let reply = try await session.response(msgid: 8)

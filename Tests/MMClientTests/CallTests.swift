@@ -1,4 +1,5 @@
 import MMSchema
+import MMTestSupport
 import MMWire
 import NIOConcurrencyHelpers
 import NIOCore
@@ -16,15 +17,15 @@ struct CallTests {
             let frame = try await withDeadline {
                 try await client.channel.waitForOutboundWrite(as: ByteBuffer.self)
             }
-            // Frame: u32 LE length 19, then [1, 1, "box.get", {0: "box", 1: 7}]:
-            // fixarray(4), tag 0x01, msgid 1, fixstr "box.get",
-            // [1, 1, "box.get", "box", {0: 7}] — the entity rides the
-            // envelope; params are fixmap(1), key 0, positive fixint 7.
+            // Frame: u32 LE length 18, then fixarray(5), tag 0x01,
+            // msgid 0 (the first id handed out), fixstr "box.get",
+            // fixstr "box" — the entity rides the envelope — and params
+            // fixmap(1), key 0, positive fixint 7.
             let expected: [UInt8] = [
                 0x12, 0x00, 0x00, 0x00,
                 0x95,
                 0x01,
-                0x01,
+                0x00,
                 0xa7, 0x62, 0x6f, 0x78, 0x2e, 0x67, 0x65, 0x74,
                 0xa3, 0x62, 0x6f, 0x78,
                 0x81,
@@ -32,7 +33,7 @@ struct CallTests {
             ]
             #expect(allBytes(frame) == expected)
             try await client.channel.writeInbound(
-                responseFrame(msgid: 1, result: BoxResponse(value: 42))
+                responseFrame(msgid: 0, result: BoxResponse(value: 42))
             )
             return await reply
         }
@@ -82,28 +83,28 @@ struct CallTests {
     }
 
     @Test("protocol error codes map to dedicated cases; others arrive as .remote")
-    func errorObjectMapping() async throws {
-        let custom = MMErrorObject(code: 64, message: "boom", payload: encodedParams(UInt8(9)))
-        let cases: [(MMErrorObject, MMCallError)] = [
-            (MMErrorObject(code: 1, message: "nope"), .unknownMethod),
-            (MMErrorObject(code: 2, message: "denied"), .denied),
-            (MMErrorObject(code: 3, message: "bad"), .malformedParams),
-            (MMErrorObject(code: 4, message: "busy"), .tooManyInFlight),
-            (MMErrorObject(code: 5, message: "oops"), .remoteInternal),
+    func errorMapping() async throws {
+        let custom = MMError(code: 64, message: "boom", payload: encodedParams(UInt8(9)))
+        let cases: [(MMError, MMCallError)] = [
+            (MMError(code: 1, message: "nope"), .unknownMethod),
+            (MMError(code: 2, message: "denied"), .denied),
+            (MMError(code: 3, message: "bad"), .malformedParams),
+            (MMError(code: 4, message: "busy"), .tooManyInFlight),
+            (MMError(code: 5, message: "oops"), .remoteInternal),
             // Application code with payload: preserved verbatim.
             (custom, .remote(custom)),
             // Reserved-but-unassigned protocol code: open world, not a crash.
             (
-                MMErrorObject(code: 63, message: "future"),
-                .remote(MMErrorObject(code: 63, message: "future"))
+                MMError(code: 63, message: "future"),
+                .remote(MMError(code: 63, message: "future"))
             ),
         ]
-        for (errorObject, expected) in cases {
+        for (error, expected) in cases {
             let (outcome, _) = try await withRunningConnection { client in
                 async let reply = client.connection.call(
                     ClientTestMethods.boxGet, on: entity("box"), boxRequest(1))
                 let (msgid, _, _) = try await client.readRequestFrame()
-                try await client.channel.writeInbound(errorFrame(msgid: msgid, errorObject))
+                try await client.channel.writeInbound(errorFrame(msgid: msgid, error))
                 return await reply
             }
             #expect(outcome == .failure(expected))
@@ -198,7 +199,7 @@ struct CallTests {
                 return (result, msgid)
             }
             #expect(cancelled == .failure(.cancelled))
-            #expect(abandonedMsgid == 1)
+            #expect(abandonedMsgid == 0)
             // Late response for the abandoned msgid: dropped, no crash, no
             // misdelivery to the follow-up call.
             try await client.channel.writeInbound(

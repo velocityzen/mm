@@ -19,11 +19,13 @@ extension MMCLIDynamicTree {
     /// not the input syntax, decides every kind downstream. Two properties
     /// still matter here:
     ///
-    /// - Booleans must not collapse into numbers. `JSONSerialization` yields
-    ///   `NSNumber` for both, so booleans are detected via
-    ///   `CFGetTypeID(number) == CFBooleanGetTypeID()` — the toll-free-bridged
-    ///   `CFBoolean` check that works on both Darwin and corelibs-foundation
-    ///   (where `objCType`-based sniffing is unreliable).
+    /// - Booleans must not collapse into numbers. On Darwin
+    ///   `JSONSerialization` yields `NSNumber` for both, so booleans are
+    ///   detected via `CFGetTypeID(number) == CFBooleanGetTypeID()` (the
+    ///   toll-free-bridged `CFBoolean` check). corelibs-foundation does not
+    ///   expose CoreFoundation; there a boolean `NSNumber` is the one whose
+    ///   `objCType` is `"c"` (its JSON parser never produces another `"c"`
+    ///   number), with a plain `Bool` pattern as the fallback shape.
     /// - Number kinds are best-effort exact: `Int64(exactly:)` first, then
     ///   `UInt64(exactly:)` for the positive overflow band, else double.
     ///   A whole-valued float literal (`1e3`) therefore parses as an integer;
@@ -39,7 +41,9 @@ extension MMCLIDynamicTree {
         let object: Any
         do {
             object = try JSONSerialization.jsonObject(
-                with: Data(jsonText.utf8), options: [.fragmentsAllowed])
+                with: Data(jsonText.utf8),
+                options: [.fragmentsAllowed]
+            )
         } catch {
             let detail =
                 ((error as NSError).userInfo[NSDebugDescriptionErrorKey] as? String)
@@ -49,17 +53,30 @@ extension MMCLIDynamicTree {
         return try Self.fromFoundation(object)
     }
 
+    /// Whether this `NSNumber` is JSON `true`/`false` rather than a number.
+    private static func isJSONBoolean(_ number: NSNumber) -> Bool {
+        #if canImport(Darwin)
+        return CFGetTypeID(number as CFTypeRef) == CFBooleanGetTypeID()
+        #else
+        return String(cString: number.objCType) == "c"
+        #endif
+    }
+
     private static func fromFoundation(_ object: Any) throws -> MMCLIDynamicTree {
         switch object {
             case is NSNull:
                 return .null
             case let number as NSNumber:
-                if CFGetTypeID(number as CFTypeRef) == CFBooleanGetTypeID() {
+                if Self.isJSONBoolean(number) {
                     return .bool(number.boolValue)
                 }
                 if let value = Int64(exactly: number) { return .int(value) }
                 if let value = UInt64(exactly: number) { return .uint(value) }
                 return .double(number.doubleValue)
+            case let flag as Bool:
+                // corelibs-foundation may surface JSON booleans as plain
+                // `Bool`; on Darwin the NSNumber case above always wins.
+                return .bool(flag)
             case let text as String:
                 return .string(text)
             case let items as [Any]:
@@ -73,20 +90,6 @@ extension MMCLIDynamicTree {
         }
     }
 
-    /// The one-word kind used in encoder diagnostics (the validation-side
-    /// twin lives inside MMSchema's `SchemaValueError` messages).
-    var kindDescription: String {
-        switch self {
-            case .null: return "null"
-            case .bool: return "bool"
-            case .int, .uint: return "integer"
-            case .double: return "number"
-            case .string: return "string"
-            case .bytes: return "bytes"
-            case .array: return "array"
-            case .object: return "object"
-        }
-    }
 }
 
 // MARK: - JSON text rendering
@@ -120,7 +123,7 @@ private func appendJSON(
         case .string(let value):
             appendJSONString(value, into: &out)
         case .bytes(let bytes):
-            appendJSONString(Data(bytes).base64EncodedString(), into: &out)
+            appendJSONString(SchemaValue.encodeBase64(bytes), into: &out)
         case .array(let items):
             guard !items.isEmpty else {
                 out += "[]"

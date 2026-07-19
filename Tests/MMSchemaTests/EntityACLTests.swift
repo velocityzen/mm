@@ -21,6 +21,18 @@ struct AccessModeTests {
         let decoded = try JSONDecoder().decode(AccessMode.self, from: data)
         #expect(decoded == mode)
     }
+
+    @Test("description is the POSIX triple; unknown high bits stay visible")
+    func descriptionTriple() {
+        #expect(AccessMode.all.description == "rwx")
+        #expect(AccessMode.read.description == "r--")
+        #expect(AccessMode.write.description == "-w-")
+        #expect(AccessMode.execute.description == "--x")
+        #expect(AccessMode([.read, .write]).description == "rw-")
+        #expect(AccessMode([]).description == "---")
+        #expect(AccessMode(rawValue: 0b0000_1100).description == "r--+0x8")
+        #expect("\(AccessMode.all)" == "rwx")
+    }
 }
 
 @Suite("EntityACL")

@@ -6,8 +6,25 @@ import NIOCore
 /// *call* task, so a result that fails to decode fails exactly that call and
 /// nothing else.
 struct ResponseSlots: Sendable, Equatable {
-    var error: MMErrorObject?
+    var error: MMError?
     var result: ByteBuffer?
+
+    /// The one decode rule for a unary result or a stream terminal (spec §4):
+    /// an `MMError` maps through `MMCallError.from`; a response with nil in
+    /// both slots is a valid void success — on the wire a nil result slot and
+    /// an encoded top-level `Optional.none` are the same byte (0xc0), so the
+    /// nil slot decodes as the MessagePack nil value: an Optional `Response`
+    /// succeeds with nil, a non-optional fails with a truthful decode error
+    /// for this call only.
+    func decodeResponse<Response: Codable>(
+        _ type: Response.Type
+    ) -> Result<Response, MMCallError> {
+        if let error = self.error {
+            return .failure(.from(error: error))
+        }
+        let result = self.result ?? ByteBuffer(bytes: [0xc0])
+        return MMPackDecoder().decode(Response.self, from: result).mapError { .decode($0) }
+    }
 }
 
 /// The connection's whole multiplexing state machine: msgid allocation, the
@@ -87,9 +104,10 @@ struct CallTable: Sendable {
 
     var phase: Phase = .starting
     var entries: [UInt32: Entry] = [:]
-    /// Next msgid to hand out. Starts at 1 and wraps through the full `u32`
-    /// range (0 is produced after wrap; msgid values carry no semantics).
-    var nextMsgid: UInt32 = 1
+    /// Next msgid to hand out. Starts at 0 and wraps through the full `u32`
+    /// range; msgid values carry no semantics — the id exists only to match
+    /// a response to its request.
+    var nextMsgid: UInt32 = 0
     var writerWaiters: [UInt64: WriterContinuation] = [:]
     /// Waiter ids whose cancellation handler ran before the waiter registered
     /// its continuation (cancellation can race registration).

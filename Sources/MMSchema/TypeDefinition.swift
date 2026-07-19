@@ -51,23 +51,26 @@ extension TypeSchema {
     /// this to validate resolvability at startup and to filter discovery to
     /// the types a peer's visible methods actually reach.
     public func collectReferencedTypeNames(into names: inout Set<String>) {
-        switch self {
-            case .bool, .int, .uint, .float, .double, .string, .bytes, .enumeration, .unknown:
-                return
-            case .reference(let name):
-                names.insert(name)
-            case .optional(let wrapped):
-                wrapped.collectReferencedTypeNames(into: &names)
-            case .array(let element):
-                element.collectReferencedTypeNames(into: &names)
-            case .map(let key, let value):
-                key.collectReferencedTypeNames(into: &names)
-                value.collectReferencedTypeNames(into: &names)
-            case .structure(let fields):
-                for field in fields {
-                    field.type.collectReferencedTypeNames(into: &names)
-                }
+        // A fold with an empty resolver surfaces every reference as
+        // unresolved — exactly the collect-without-chasing semantics this
+        // API documents.
+        let collected: Set<String> = self.fold(resolver: TypeResolver([])) { step in
+            switch step {
+                case .unresolvedReference(.unresolved(let name)),
+                    .unresolvedReference(.cycle(let name)):
+                    return [name]
+                case .optional(let child), .array(let child):
+                    return child
+                case .map(let key, let value):
+                    return key.union(value)
+                case .structure(let fields):
+                    return fields.reduce(into: Set<String>()) { $0.formUnion($1.value) }
+                case .bool, .int, .uint, .float, .double, .string, .bytes,
+                    .enumeration, .unknown:
+                    return []
+            }
         }
+        names.formUnion(collected)
     }
 }
 

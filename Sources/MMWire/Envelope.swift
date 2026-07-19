@@ -9,11 +9,34 @@ extension ByteBuffer {
     public mutating func readMessagePackRawValueSlice(
         maxDepth: Int = 128
     ) -> Result<ByteBuffer, MMWireError> {
-        var probe = self
-        return probe.skipMessagePackValue(maxDepth: maxDepth).map { _ in
-            // Force-unwrap is safe: the skip walked exactly this many readable bytes.
-            self.readSlice(length: probe.readerIndex - self.readerIndex)!
-        }
+        self.sliceMessagePackValue(currentDepth: 0, cap: maxDepth)
+    }
+}
+
+/// Decodes one optional raw slot per the spec rule stated once in §4: an
+/// explicit nil in the slot decodes as absent; anything else goes through
+/// `read`. Shared by the envelope's error/result slots and the `MMError`
+/// payload slot.
+private func readOptionalSlot<Value>(
+    from reader: inout ByteBuffer,
+    _ read: (inout ByteBuffer) -> Result<Value, MMWireError>
+) -> Result<Value?, MMWireError> {
+    if reader.peekMessagePackFormat() == MPFormat.nilByte {
+        return reader.readMessagePackNil().map { _ in nil }
+    }
+    return read(&reader).map { $0 }
+}
+
+/// Structurally skips `count` reserved/tolerated trailing elements — a fold:
+/// any skip failure short-circuits. Shared by the envelope's
+/// evolution-tolerant kinds and the `MMError` trailing-element rule.
+private func mpSkipElements(
+    from reader: inout ByteBuffer,
+    count: Int,
+    maxDepth: Int
+) -> Result<Void, MMWireError> {
+    (0..<count).reduce(.success(())) { skipped, _ in
+        skipped.flatMap { reader.skipMessagePackValue(maxDepth: maxDepth) }
     }
 }
 
@@ -43,13 +66,13 @@ private func mpValidateRawSlot(
     return .success(())
 }
 
-/// RPC error object carried in the error slot of a response envelope.
+/// The RPC error (`MMError`) carried in the error slot of a response envelope.
 ///
 /// Wire form is a MessagePack array: `[code, message]` or `[code, message, payload]`.
 /// For evolution, decoding tolerates and structurally skips any extra trailing
 /// elements, and an explicit `nil` in the payload slot decodes as an absent payload.
 /// `payload` is a raw pre-encoded MessagePack value slice; this layer never decodes it.
-public struct MMErrorObject: Equatable, Sendable {
+public struct MMError: Equatable, Sendable {
     public var code: Int
     public var message: String
     /// A single pre-encoded MessagePack value, passed through opaquely.
@@ -92,12 +115,12 @@ public struct MMErrorObject: Equatable, Sendable {
         self.validateForEncoding(maxDepth: maxDepth).map { self.write(into: &buffer) }
     }
 
-    /// Decodes one error object, consuming it from `buffer`.
+    /// Decodes one error, consuming it from `buffer`.
     /// On failure the reader index is restored.
     public static func decode(
         from buffer: inout ByteBuffer,
         maxDepth: Int = 128
-    ) -> Result<MMErrorObject, MMWireError> {
+    ) -> Result<MMError, MMWireError> {
         let start = buffer.readerIndex
         let result = Self.decodeBody(from: &buffer, maxDepth: maxDepth)
         if case .failure = result { buffer.moveReaderIndex(to: start) }
@@ -107,7 +130,7 @@ public struct MMErrorObject: Equatable, Sendable {
     private static func decodeBody(
         from buffer: inout ByteBuffer,
         maxDepth: Int
-    ) -> Result<MMErrorObject, MMWireError> {
+    ) -> Result<MMError, MMWireError> {
         let count: Int
         switch buffer.readMessagePackArrayHeader() {
             case .failure(let error): return .failure(error)
@@ -133,24 +156,27 @@ public struct MMErrorObject: Equatable, Sendable {
         }
         var payload: ByteBuffer?
         if count >= 3 {
-            if buffer.peekMessagePackFormat() == MPFormat.nilByte {
-                if case .failure(let error) = buffer.readMessagePackNil() {
-                    return .failure(error)
-                }
-            } else {
-                switch buffer.readMessagePackRawValueSlice(maxDepth: maxDepth) {
-                    case .failure(let error): return .failure(error)
-                    case .success(let slice): payload = slice
-                }
+            switch readOptionalSlot(from: &buffer, { $0.readMessagePackRawValueSlice(maxDepth: maxDepth) }) {
+                case .failure(let error): return .failure(error)
+                case .success(let slice): payload = slice
             }
             // Evolution tolerance: skip any extra trailing elements structurally.
-            for _ in 3..<count {
-                if case .failure(let error) = buffer.skipMessagePackValue(maxDepth: maxDepth) {
-                    return .failure(error)
-                }
+            if case .failure(let error) = mpSkipElements(
+                from: &buffer, count: count - 3, maxDepth: maxDepth)
+            {
+                return .failure(error)
             }
         }
-        return .success(MMErrorObject(code: code, message: message, payload: payload))
+        return .success(MMError(code: code, message: message, payload: payload))
+    }
+}
+
+extension MMError: CustomStringConvertible {
+    /// Log-ready one-liner: `code 64: journal is read-only`, with an opaque
+    /// payload noted by size only (this layer never decodes it).
+    public var description: String {
+        let suffix = self.payload.map { " (payload: \($0.readableBytes) bytes)" } ?? ""
+        return "code \(self.code): \(self.message)\(suffix)"
     }
 }
 
@@ -179,7 +205,7 @@ public struct MMErrorObject: Equatable, Sendable {
 ///
 /// Decoding requires exact arity except where the table above mandates tolerance
 /// (kind 1 arity 6; kinds 4 and 6 extra elements, structurally skipped); evolution
-/// otherwise happens inside payloads and the error object. An unknown (or negative)
+/// otherwise happens inside payloads and `MMError`. An unknown (or negative)
 /// leading type integer fails with `.unknownEnvelope`; malformed input always yields
 /// a typed failure, never a crash.
 public enum MMEnvelope: Equatable, Sendable {
@@ -191,7 +217,7 @@ public enum MMEnvelope: Equatable, Sendable {
     case request(msgid: UInt32, method: String, entity: String, params: ByteBuffer)
     /// Kind 0 — the terminal response, server→client, always the call's last frame.
     /// `error` nil = graceful outcome.
-    case response(msgid: UInt32, error: MMErrorObject?, result: ByteBuffer?)
+    case response(msgid: UInt32, error: MMError?, result: ByteBuffer?)
     /// Kind 2 — additive credit grant for one stream direction (flow control).
     case credit(msgid: UInt32, credits: UInt32)
     /// Kind 3 — one stream item. `seq` counts from 0 per direction; `item` is a raw
@@ -218,46 +244,37 @@ public enum MMEnvelope: Equatable, Sendable {
     ) -> Result<Void, MMWireError> {
         switch self {
             case .request(let msgid, let method, let entity, let params):
-                if case .failure(let error) = mpValidateRawSlot(
-                    params, name: "params", maxDepth: maxDepth
-                ) {
-                    return .failure(error)
+                return mpValidateRawSlot(params, name: "params", maxDepth: maxDepth).map {
+                    buffer.writeMessagePackArrayHeader(count: 5)
+                    buffer.writeMessagePackUInt(1)
+                    buffer.writeMessagePackUInt(UInt64(msgid))
+                    buffer.writeMessagePackString(method)
+                    buffer.writeMessagePackString(entity)
+                    buffer.writeImmutableBuffer(params)
                 }
-                buffer.writeMessagePackArrayHeader(count: 5)
-                buffer.writeMessagePackUInt(1)
-                buffer.writeMessagePackUInt(UInt64(msgid))
-                buffer.writeMessagePackString(method)
-                buffer.writeMessagePackString(entity)
-                buffer.writeImmutableBuffer(params)
-                return .success(())
 
-            case .response(let msgid, let errorObject, let result):
-                if let errorObject,
-                    case .failure(let error) = errorObject.validateForEncoding(maxDepth: maxDepth)
-                {
-                    return .failure(error)
-                }
-                if let result,
-                    case .failure(let error) = mpValidateRawSlot(
-                        result, name: "result", maxDepth: maxDepth
-                    )
-                {
-                    return .failure(error)
-                }
-                buffer.writeMessagePackArrayHeader(count: 4)
-                buffer.writeMessagePackUInt(0)
-                buffer.writeMessagePackUInt(UInt64(msgid))
-                if let errorObject {
-                    errorObject.write(into: &buffer)
-                } else {
-                    buffer.writeMessagePackNil()
-                }
-                if let result {
-                    buffer.writeImmutableBuffer(result)
-                } else {
-                    buffer.writeMessagePackNil()
-                }
-                return .success(())
+            case .response(let msgid, let responseError, let result):
+                return (responseError.map { $0.validateForEncoding(maxDepth: maxDepth) }
+                    ?? .success(()))
+                    .flatMap {
+                        result.map { mpValidateRawSlot($0, name: "result", maxDepth: maxDepth) }
+                            ?? .success(())
+                    }
+                    .map {
+                        buffer.writeMessagePackArrayHeader(count: 4)
+                        buffer.writeMessagePackUInt(0)
+                        buffer.writeMessagePackUInt(UInt64(msgid))
+                        if let responseError {
+                            responseError.write(into: &buffer)
+                        } else {
+                            buffer.writeMessagePackNil()
+                        }
+                        if let result {
+                            buffer.writeImmutableBuffer(result)
+                        } else {
+                            buffer.writeMessagePackNil()
+                        }
+                    }
 
             case .credit(let msgid, let credits):
                 buffer.writeMessagePackArrayHeader(count: 3)
@@ -267,17 +284,13 @@ public enum MMEnvelope: Equatable, Sendable {
                 return .success(())
 
             case .item(let msgid, let seq, let item):
-                if case .failure(let error) = mpValidateRawSlot(
-                    item, name: "item", maxDepth: maxDepth
-                ) {
-                    return .failure(error)
+                return mpValidateRawSlot(item, name: "item", maxDepth: maxDepth).map {
+                    buffer.writeMessagePackArrayHeader(count: 4)
+                    buffer.writeMessagePackUInt(3)
+                    buffer.writeMessagePackUInt(UInt64(msgid))
+                    buffer.writeMessagePackUInt(UInt64(seq))
+                    buffer.writeImmutableBuffer(item)
                 }
-                buffer.writeMessagePackArrayHeader(count: 4)
-                buffer.writeMessagePackUInt(3)
-                buffer.writeMessagePackUInt(UInt64(msgid))
-                buffer.writeMessagePackUInt(UInt64(seq))
-                buffer.writeImmutableBuffer(item)
-                return .success(())
 
             case .end(let msgid):
                 buffer.writeMessagePackArrayHeader(count: 3)
@@ -322,32 +335,45 @@ public enum MMEnvelope: Equatable, Sendable {
         maxDepth: Int = 128
     ) -> Result<MMEnvelope, MMWireError> {
         var reader = buffer
-        let count: Int
-        switch reader.readMessagePackArrayHeader() {
-            case .failure(let error): return .failure(error)
-            case .success(let value): count = value
-        }
-        guard count >= 1 else { return .failure(.unknownEnvelope) }
-        let tag: Int64
-        switch reader.readMessagePackInt() {
-            case .failure(.numberOutOfRange):
-                // A tag wider than Int64 is simply a kind this decoder does not
-                // know: the spec maps every tag outside 0...6 to unknownEnvelope.
-                return .failure(.unknownEnvelope)
-            case .failure(let error): return .failure(error)
-            case .success(let value): tag = value
-        }
+        return reader.readMessagePackArrayHeader()
+            .flatMap { count -> Result<MMEnvelope, MMWireError> in
+                guard count >= 1 else { return .failure(.unknownEnvelope) }
+                return reader.readMessagePackInt()
+                    .mapError { error in
+                        // A tag wider than Int64 is simply a kind this decoder
+                        // does not know: the spec maps every tag outside 0...6
+                        // to unknownEnvelope.
+                        if case .numberOutOfRange = error { .unknownEnvelope } else { error }
+                    }
+                    .flatMap { tag in
+                        Self.decodeKind(
+                            tag: tag, count: count, from: &reader, maxDepth: maxDepth)
+                    }
+            }
+            .flatMap { envelope in
+                reader.readableBytes == 0
+                    ? .success(envelope)
+                    : .failure(.decodingFailed(description: Self.trailingBytesDescription))
+            }
+    }
 
-        let decoded: Result<MMEnvelope, MMWireError>
+    /// Decodes the tagged body of one envelope kind (the elements after the
+    /// leading tag; `count` is the whole array's arity).
+    private static func decodeKind(
+        tag: Int64,
+        count: Int,
+        from reader: inout ByteBuffer,
+        maxDepth: Int
+    ) -> Result<MMEnvelope, MMWireError> {
         switch tag {
             case 0:
                 guard count == 4 else {
                     return .failure(.invalidArity(expected: 4, got: count))
                 }
-                decoded = Self.decodeU32(from: &reader).flatMap { msgid in
-                    Self.decodeErrorSlot(from: &reader, maxDepth: maxDepth).flatMap { errorObject in
+                return Self.decodeU32(from: &reader).flatMap { msgid in
+                    Self.decodeErrorSlot(from: &reader, maxDepth: maxDepth).flatMap { responseError in
                         Self.decodeResultSlot(from: &reader, maxDepth: maxDepth).map { result in
-                            MMEnvelope.response(msgid: msgid, error: errorObject, result: result)
+                            MMEnvelope.response(msgid: msgid, error: responseError, result: result)
                         }
                     }
                 }
@@ -357,12 +383,12 @@ public enum MMEnvelope: Equatable, Sendable {
                 guard count == 5 || count == 6 else {
                     return .failure(.invalidArity(expected: 5, got: count))
                 }
-                decoded = Self.decodeU32(from: &reader).flatMap { msgid in
+                return Self.decodeU32(from: &reader).flatMap { msgid in
                     reader.readMessagePackString().flatMap { method in
                         reader.readMessagePackString().flatMap { entity in
                             reader.readMessagePackRawValueSlice(maxDepth: maxDepth).flatMap {
                                 params in
-                                Self.skipExtraElements(
+                                mpSkipElements(
                                     from: &reader, count: count - 5, maxDepth: maxDepth
                                 ).map { _ in
                                     MMEnvelope.request(
@@ -377,7 +403,7 @@ public enum MMEnvelope: Equatable, Sendable {
                 guard count == 3 else {
                     return .failure(.invalidArity(expected: 3, got: count))
                 }
-                decoded = Self.decodeU32(from: &reader).flatMap { msgid in
+                return Self.decodeU32(from: &reader).flatMap { msgid in
                     Self.decodeU32(from: &reader).map { credits in
                         MMEnvelope.credit(msgid: msgid, credits: credits)
                     }
@@ -386,7 +412,7 @@ public enum MMEnvelope: Equatable, Sendable {
                 guard count == 4 else {
                     return .failure(.invalidArity(expected: 4, got: count))
                 }
-                decoded = Self.decodeU32(from: &reader).flatMap { msgid in
+                return Self.decodeU32(from: &reader).flatMap { msgid in
                     Self.decodeU32(from: &reader).flatMap { seq in
                         reader.readMessagePackRawValueSlice(maxDepth: maxDepth).map { item in
                             MMEnvelope.item(msgid: msgid, seq: seq, item: item)
@@ -399,8 +425,8 @@ public enum MMEnvelope: Equatable, Sendable {
                 guard count >= 3 else {
                     return .failure(.invalidArity(expected: 3, got: count))
                 }
-                decoded = Self.decodeU32(from: &reader).flatMap { msgid in
-                    Self.skipExtraElements(
+                return Self.decodeU32(from: &reader).flatMap { msgid in
+                    mpSkipElements(
                         from: &reader, count: count - 2, maxDepth: maxDepth
                     ).map { _ in
                         MMEnvelope.end(msgid: msgid)
@@ -410,7 +436,7 @@ public enum MMEnvelope: Equatable, Sendable {
                 guard count == 3 else {
                     return .failure(.invalidArity(expected: 3, got: count))
                 }
-                decoded = Self.decodeU32(from: &reader).flatMap { msgid in
+                return Self.decodeU32(from: &reader).flatMap { msgid in
                     Self.decodeU32(from: &reader).map { code in
                         MMEnvelope.stop(msgid: msgid, code: code)
                     }
@@ -420,8 +446,8 @@ public enum MMEnvelope: Equatable, Sendable {
                 guard count >= 2 else {
                     return .failure(.invalidArity(expected: 2, got: count))
                 }
-                decoded = Self.decodeU32(from: &reader).flatMap { msgid in
-                    Self.skipExtraElements(
+                return Self.decodeU32(from: &reader).flatMap { msgid in
+                    mpSkipElements(
                         from: &reader, count: count - 2, maxDepth: maxDepth
                     ).map { _ in
                         MMEnvelope.cancel(msgid: msgid)
@@ -429,13 +455,6 @@ public enum MMEnvelope: Equatable, Sendable {
                 }
             default:
                 return .failure(.unknownEnvelope)
-        }
-
-        return decoded.flatMap { envelope in
-            guard reader.readableBytes == 0 else {
-                return .failure(.decodingFailed(description: Self.trailingBytesDescription))
-            }
-            return .success(envelope)
         }
     }
 
@@ -452,37 +471,17 @@ public enum MMEnvelope: Equatable, Sendable {
         }
     }
 
-    /// Structurally skips `count` reserved/tolerated trailing elements.
-    private static func skipExtraElements(
-        from reader: inout ByteBuffer,
-        count: Int,
-        maxDepth: Int
-    ) -> Result<Void, MMWireError> {
-        for _ in 0..<count {
-            if case .failure(let error) = reader.skipMessagePackValue(maxDepth: maxDepth) {
-                return .failure(error)
-            }
-        }
-        return .success(())
-    }
-
     private static func decodeErrorSlot(
         from reader: inout ByteBuffer,
         maxDepth: Int
-    ) -> Result<MMErrorObject?, MMWireError> {
-        if reader.peekMessagePackFormat() == MPFormat.nilByte {
-            return reader.readMessagePackNil().map { _ in nil }
-        }
-        return MMErrorObject.decode(from: &reader, maxDepth: maxDepth).map { $0 }
+    ) -> Result<MMError?, MMWireError> {
+        readOptionalSlot(from: &reader) { MMError.decode(from: &$0, maxDepth: maxDepth) }
     }
 
     private static func decodeResultSlot(
         from reader: inout ByteBuffer,
         maxDepth: Int
     ) -> Result<ByteBuffer?, MMWireError> {
-        if reader.peekMessagePackFormat() == MPFormat.nilByte {
-            return reader.readMessagePackNil().map { _ in nil }
-        }
-        return reader.readMessagePackRawValueSlice(maxDepth: maxDepth).map { $0 }
+        readOptionalSlot(from: &reader) { $0.readMessagePackRawValueSlice(maxDepth: maxDepth) }
     }
 }

@@ -62,11 +62,13 @@ public func Configuration(_ configuration: MMServerConfiguration) -> ServerPart 
 public func Configuration(
     endpoint: MMEndpoint,
     maxFrameLength: UInt32 = MMWireInfo.defaultMaxFrameLength,
-    maxConnections: Int = 128,
-    maxInFlightRequestsPerConnection: Int = 16,
-    maxConcurrentStreamsPerConnection: Int = 8,
-    idleTimeout: TimeAmount = .seconds(120),
-    unixSocketMode: UInt16 = 0o660,
+    maxConnections: Int = MMServerConfiguration.defaultMaxConnections,
+    maxInFlightRequestsPerConnection: Int =
+        MMServerConfiguration.defaultMaxInFlightRequestsPerConnection,
+    maxConcurrentStreamsPerConnection: Int =
+        MMServerConfiguration.defaultMaxConcurrentStreamsPerConnection,
+    idleTimeout: TimeAmount = MMServerConfiguration.defaultIdleTimeout,
+    unixSocketMode: UInt16 = MMServerConfiguration.defaultUnixSocketMode,
     capabilities: UInt32 = 0
 ) -> ServerPart {
     ServerPart(
@@ -148,7 +150,7 @@ public func Types(_ container: any TypeNamespace.Type) -> ServerPart {
 public func On<Request: Codable & Sendable, Response: Codable & Sendable>(
     _ method: Method<Request, Response>,
     acceptsRoot: Bool = false,
-    _ body: @escaping @Sendable (MMContext, Request) async -> Result<Response, MMErrorObject>
+    _ body: @escaping @Sendable (MMContext, Request) async -> Result<Response, MMError>
 ) -> Route {
     Handle(method, acceptsRoot: acceptsRoot) { request, context in
         await body(context, request)
@@ -165,7 +167,7 @@ public func On<
     acceptsRoot: Bool = false,
     _ body:
         @escaping @Sendable (MMContext, Request, MMResponseSink<Element>) async ->
-        Result<Response, MMErrorObject>
+        Result<Response, MMError>
 ) -> Route {
     Handle(method, acceptsRoot: acceptsRoot) { request, sink, context in
         await body(context, request, sink)
@@ -182,7 +184,7 @@ public func On<
     acceptsRoot: Bool = false,
     _ body:
         @escaping @Sendable (MMContext, Request, MMRequestStream<Element>) async ->
-        Result<Response, MMErrorObject>
+        Result<Response, MMError>
 ) -> Route {
     Handle(method, acceptsRoot: acceptsRoot) { request, elements, context in
         await body(context, request, elements)
@@ -202,7 +204,7 @@ public func On<
         @escaping @Sendable (
             MMContext, Request, MMRequestStream<RequestElement>,
             MMResponseSink<ResponseElement>
-        ) async -> Result<Response, MMErrorObject>
+        ) async -> Result<Response, MMError>
 ) -> Route {
     Handle(method, acceptsRoot: acceptsRoot) { request, elements, sink, context in
         await body(context, request, elements, sink)
@@ -239,7 +241,9 @@ extension RouterBuilder {
 // MARK: - Builder + assembly
 
 @resultBuilder
-public enum ServerBuilder {
+public enum ServerBuilder: MMListBuilding {
+    public typealias Element = ServerPart
+
     public static func buildExpression(_ part: ServerPart) -> [ServerPart] { [part] }
     /// Bare routes (no namespace cross-check) are allowed at the top level.
     public static func buildExpression(_ route: Route) -> [ServerPart] {
@@ -247,17 +251,6 @@ public enum ServerBuilder {
     }
     public static func buildExpression(_ group: any RouteGroup) -> [ServerPart] {
         [ServerPart(kind: .routes(group.routes))]
-    }
-    public static func buildBlock(_ components: [ServerPart]...) -> [ServerPart] {
-        components.flatMap { $0 }
-    }
-    public static func buildOptional(_ component: [ServerPart]?) -> [ServerPart] {
-        component ?? []
-    }
-    public static func buildEither(first component: [ServerPart]) -> [ServerPart] { component }
-    public static func buildEither(second component: [ServerPart]) -> [ServerPart] { component }
-    public static func buildArray(_ components: [[ServerPart]]) -> [ServerPart] {
-        components.flatMap { $0 }
     }
 }
 

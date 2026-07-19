@@ -1,4 +1,5 @@
 import ArgumentParser
+import MMTestSupport
 import MMWire
 import NIOCore
 import Testing
@@ -50,36 +51,10 @@ struct MMCLIOptionsTests {
         }
     }
 
-    @Test("0x-prefixed fingerprint lands in the client configuration")
-    func fingerprintPrefixed() throws {
-        let options = try MMCLIOptions.parse([
-            "--socket", "/tmp/x.sock", "--expect-fingerprint", "0xDEADbeef",
-        ])
-        #expect(options.clientConfiguration.expectedFingerprint == 0xdead_beef)
-    }
-
-    @Test("bare hex fingerprint lands in the client configuration")
-    func fingerprintBare() throws {
-        let options = try MMCLIOptions.parse([
-            "--socket", "/tmp/x.sock", "--expect-fingerprint", "96667b7065cbb8e4",
-        ])
-        #expect(options.clientConfiguration.expectedFingerprint == 0x9666_7b70_65cb_b8e4)
-    }
-
-    @Test(
-        "garbage fingerprints fail validation",
-        arguments: ["zz", "0x", "", "0xzz", "12 34", "-1", "+1", "10000000000000000"]
-    )
-    func fingerprintGarbage(raw: String) {
-        #expect(throws: (any Error).self) {
-            try MMCLIOptions.parse(["--socket", "/tmp/x.sock", "--expect-fingerprint", raw])
-        }
-    }
-
-    @Test("no fingerprint flag means no expectation")
-    func fingerprintAbsent() throws {
+    @Test("the CLI never sets a fingerprint expectation — verification is automatic")
+    func fingerprintNeverExpected() throws {
         let options = try MMCLIOptions.parse(["--socket", "/tmp/x.sock"])
-        #expect(options.clientConfiguration.expectedFingerprint == nil)
+        #expect(options.clientConfiguration.schema == nil)
     }
 
     @Test("timeouts map to TimeAmount, defaults stay put")

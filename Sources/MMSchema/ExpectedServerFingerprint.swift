@@ -9,23 +9,25 @@ extension SchemaFingerprint {
     /// three-namespace server produces a value that will simply never match.
     /// A tool that uses *part* of a server confirms its slice against
     /// discovery instead (`SchemaDifference`), scoped to its namespaces.
+    /// (`compute` sorts canonically, so fold order never affects the value;
+    /// the builtins seed the fold because every server serves them.)
     public static func expected(
         serving contracts: [SchemaDeclaration]
     ) -> Result<UInt64, SchemaError> {
-        var signatures: [MethodSignature] = []
-        var types: [TypeDefinition] = []
-        for contract in contracts {
-            signatures.append(contentsOf: contract.signatures)
-            types.append(contentsOf: contract.types)
-        }
-        for builtin in Builtins.all {
-            switch builtin.signature() {
-                case .success(let signature):
-                    signatures.append(signature)
-                case .failure(let error):
-                    return .failure(error)
+        Builtins.all
+            .reduce(Result<[MethodSignature], SchemaError>.success([])) { collected, builtin in
+                collected.flatMap { signatures in
+                    builtin.signature().map { signatures + [$0] }
+                }
             }
-        }
-        return .success(compute(signatures, types: types))
+            .map { builtins in
+                contracts.reduce(
+                    into: (signatures: builtins, types: [TypeDefinition]())
+                ) { folded, contract in
+                    folded.signatures.append(contentsOf: contract.signatures)
+                    folded.types.append(contentsOf: contract.types)
+                }
+            }
+            .map { folded in compute(folded.signatures, types: folded.types) }
     }
 }

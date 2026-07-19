@@ -51,17 +51,41 @@ public struct ServerStreamMethod<
     private func assemble(
         schemaOf: (any (Decodable & Sendable).Type) -> Result<TypeSchema, SchemaError>
     ) -> Result<MethodSignature, SchemaError> {
-        schemaOf(Request.self).flatMap { request in
-            schemaOf(Element.self).flatMap { element in
-                schemaOf(Response.self).map { response in
-                    MethodSignature(
-                        name: name,
-                        access: access,
-                        request: request,
-                        response: response,
-                        responseStream: element
-                    )
-                }
+        assembleStreamSignature(
+            name: name, access: access,
+            request: Request.self, element: Element.self, response: Response.self,
+            elementSlot: .response, schemaOf: schemaOf)
+    }
+}
+
+/// Which stream slot a single-element descriptor's `Element` occupies.
+private enum StreamElementSlot {
+    case request, response
+}
+
+/// The shared three-probe assembly behind ``ServerStreamMethod`` and
+/// ``ClientStreamMethod`` — identical except for the slot the element lands
+/// in (``BidirectionalStreamMethod`` probes four types and keeps its own).
+private func assembleStreamSignature(
+    name: String,
+    access: AccessMode,
+    request: any (Decodable & Sendable).Type,
+    element: any (Decodable & Sendable).Type,
+    response: any (Decodable & Sendable).Type,
+    elementSlot: StreamElementSlot,
+    schemaOf: (any (Decodable & Sendable).Type) -> Result<TypeSchema, SchemaError>
+) -> Result<MethodSignature, SchemaError> {
+    schemaOf(request).flatMap { requestSchema in
+        schemaOf(element).flatMap { elementSchema in
+            schemaOf(response).map { responseSchema in
+                MethodSignature(
+                    name: name,
+                    access: access,
+                    request: requestSchema,
+                    response: responseSchema,
+                    requestStream: elementSlot == .request ? elementSchema : nil,
+                    responseStream: elementSlot == .response ? elementSchema : nil
+                )
             }
         }
     }
@@ -103,19 +127,10 @@ public struct ClientStreamMethod<
     private func assemble(
         schemaOf: (any (Decodable & Sendable).Type) -> Result<TypeSchema, SchemaError>
     ) -> Result<MethodSignature, SchemaError> {
-        schemaOf(Request.self).flatMap { request in
-            schemaOf(Element.self).flatMap { element in
-                schemaOf(Response.self).map { response in
-                    MethodSignature(
-                        name: name,
-                        access: access,
-                        request: request,
-                        response: response,
-                        requestStream: element
-                    )
-                }
-            }
-        }
+        assembleStreamSignature(
+            name: name, access: access,
+            request: Request.self, element: Element.self, response: Response.self,
+            elementSlot: .request, schemaOf: schemaOf)
     }
 }
 

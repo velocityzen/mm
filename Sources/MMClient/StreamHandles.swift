@@ -1,10 +1,15 @@
 import MMWire
 import NIOCore
 
-/// The client's handle to a **server-streaming** call (`ServerStreamMethod`):
-/// a single-iteration `AsyncSequence` of response `Element`s, plus graceful
-/// ``stop()`` / abnormal ``cancel()`` control and an awaitable ``result()``
-/// terminal.
+/// The client's handle to the inbound (server → client) direction of a
+/// streaming call: a single-iteration `AsyncSequence` of response `Element`s,
+/// plus graceful ``stop()`` / abnormal ``cancel()`` control and an awaitable
+/// ``result()`` terminal.
+///
+/// For a **server-streaming** call (`ServerStreamMethod`) this is the whole
+/// handle, with `OutboundElement == Never`. A **bidirectional** call vends the
+/// same type as ``BidirectionalStreamHandle/inbound``, generalized over the
+/// request direction's element type — one implementation, both shapes.
 ///
 /// ## Consumption drives credit
 ///
@@ -21,7 +26,7 @@ import NIOCore
 ///   `.success(Response)`.
 /// - Terminal with error → the sequence finishes, ``result()`` is
 ///   `.failure(mapped)` (code 7 → `.cancelled`, code 6 → `.streamViolation`,
-///   others per `MMCallError.from(errorObject:)`).
+///   others per `MMCallError.from(error:)`).
 /// - ``stop()`` sends STOP (graceful, advisory); the call still runs to its
 ///   terminal, items in flight still arrive.
 /// - ``cancel()`` (or cancelling the consuming task) sends CANCEL; every surface
@@ -32,10 +37,12 @@ import NIOCore
 /// Single iterator (the underlying producer permits one). ``result()`` may be
 /// awaited after the sequence ends or concurrently, any number of times; it
 /// resolves exactly once.
-public struct InboundStreamHandle<Element: Codable & Sendable, Response: Codable & Sendable>:
-    AsyncSequence, Sendable
-{
-    typealias State = ClientStreamState<Element, NoStreamElement, Response>
+public struct InboundStreamHandle<
+    Element: Codable & Sendable,
+    OutboundElement: Codable & Sendable,
+    Response: Codable & Sendable
+>: AsyncSequence, Sendable {
+    typealias State = ClientStreamState<Element, OutboundElement, Response>
     let state: State
 
     public struct AsyncIterator: AsyncIteratorProtocol {
@@ -69,7 +76,8 @@ public struct InboundStreamHandle<Element: Codable & Sendable, Response: Codable
     }
 
     /// The call's terminal `Result<Response, MMCallError>`. Awaitable after the
-    /// sequence ends or concurrently with iteration; resolves exactly once.
+    /// sequence ends or concurrently with iteration; resolves exactly once
+    /// (shared with the outbound half, when the call has one).
     public func result() async -> Result<Response, MMCallError> {
         await self.state.result()
     }
@@ -93,9 +101,14 @@ public struct InboundStreamHandle<Element: Codable & Sendable, Response: Codable
     var _isInboundParked: Bool { self.state.isInboundParked }
 }
 
-/// The client's handle to a **client-streaming** call (`ClientStreamMethod`):
-/// credit-gated ``send(_:)`` of request `Element`s, a one-shot ``finish()``
-/// (END), and an awaitable ``result()`` terminal.
+/// The client's handle to the outbound (client → server) direction of a
+/// streaming call: credit-gated ``send(_:)`` of request `Element`s, a one-shot
+/// ``finish()`` (END), and an awaitable ``result()`` terminal.
+///
+/// For a **client-streaming** call (`ClientStreamMethod`) this is the whole
+/// handle, with `InboundElement == Never`. A **bidirectional** call vends the
+/// same type as ``BidirectionalStreamHandle/outbound``, generalized over the
+/// response direction's element type — one implementation, both shapes.
 ///
 /// ## Flow control
 ///
@@ -107,10 +120,12 @@ public struct InboundStreamHandle<Element: Codable & Sendable, Response: Codable
 ///
 /// ``finish()`` sends END exactly once; later sends return `.callEnded`. The
 /// call still terminates with exactly one terminal, awaited via ``result()``.
-public struct OutboundStreamHandle<Element: Codable & Sendable, Response: Codable & Sendable>:
-    Sendable
-{
-    typealias State = ClientStreamState<NoStreamElement, Element, Response>
+public struct OutboundStreamHandle<
+    Element: Codable & Sendable,
+    InboundElement: Codable & Sendable,
+    Response: Codable & Sendable
+>: Sendable {
+    typealias State = ClientStreamState<InboundElement, Element, Response>
     let state: State
 
     /// Sends one request element, credit-gated (suspends at zero credit until a
@@ -126,7 +141,8 @@ public struct OutboundStreamHandle<Element: Codable & Sendable, Response: Codabl
         await self.state.finish()
     }
 
-    /// The call's terminal `Result<Response, MMCallError>`. Resolves exactly once.
+    /// The call's terminal `Result<Response, MMCallError>`. Resolves exactly
+    /// once (shared with the inbound half, when the call has one).
     public func result() async -> Result<Response, MMCallError> {
         await self.state.result()
     }
@@ -143,13 +159,16 @@ public struct OutboundStreamHandle<Element: Codable & Sendable, Response: Codabl
 
 /// The client's handle to a **bidirectional** call (`BidirectionalStreamMethod`): an
 /// ``inbound`` response-element sequence and an ``outbound`` request-element
-/// writer over one call, independently usable from different tasks. The two
-/// halves share the one terminal (`result()` on either resolves to the same
-/// value).
+/// writer over one call, independently usable from different tasks. Pure
+/// composition — each half *is* the standalone handle for its direction,
+/// generalized over the other direction's element type, both wrapping the one
+/// shared stream state. The two halves share the one terminal (`result()` on
+/// either resolves to the same value).
 ///
 /// Typical shape: one task drains ``inbound`` (granting credit as it consumes),
-/// another drives ``outbound`` sends and calls ``Outbound/finish()`` when
-/// done. Either half's `cancel()` cancels the whole call.
+/// another drives ``outbound`` sends and calls
+/// ``OutboundStreamHandle/finish()`` when done. Either half's `cancel()`
+/// cancels the whole call.
 public struct BidirectionalStreamHandle<
     RequestElement: Codable & Sendable,
     ResponseElement: Codable & Sendable,
@@ -159,72 +178,13 @@ public struct BidirectionalStreamHandle<
 
     /// The inbound (server → client) response-element sequence plus stop/cancel
     /// and the shared terminal.
-    public let inbound: Inbound
+    public let inbound: InboundStreamHandle<ResponseElement, RequestElement, Response>
     /// The outbound (client → server) request-element writer plus finish/cancel
     /// and the shared terminal.
-    public let outbound: Outbound
+    public let outbound: OutboundStreamHandle<RequestElement, ResponseElement, Response>
 
     init(state: State) {
-        self.inbound = Inbound(state: state)
-        self.outbound = Outbound(state: state)
-    }
-
-    /// The inbound half of a bidirectional call: a single-iteration response-element
-    /// sequence whose consumption grants credit, plus ``stop()``/``cancel()``
-    /// and the shared ``result()``.
-    public struct Inbound: AsyncSequence, Sendable {
-        let state: State
-        public typealias Element = ResponseElement
-
-        public struct AsyncIterator: AsyncIteratorProtocol {
-            let state: State
-            var base: State.Producer.AsyncIterator
-
-            public mutating func next() async -> ResponseElement? {
-                let element = await self.base.next()
-                if element != nil, let credits = self.state.creditToGrantAfterConsume() {
-                    await self.state.grantConsumed(credits)
-                }
-                return element
-            }
-        }
-
-        public func makeAsyncIterator() -> AsyncIterator {
-            AsyncIterator(state: self.state, base: self.state.makeInboundIterator())
-        }
-
-        /// The call's terminal `Result<Response, MMCallError>`. Resolves exactly once
-        /// (shared with the outbound half).
-        public func result() async -> Result<Response, MMCallError> {
-            await self.state.result()
-        }
-
-        /// Sends STOP (kind 5): asks the server to finish its response stream.
-        public func stop() async { await self.state.stop() }
-        /// Sends CANCEL (kind 6): abandons the whole call.
-        public func cancel() async { await self.state.cancel() }
-    }
-
-    /// The outbound half of a bidirectional call: credit-gated ``send(_:)``, one-shot
-    /// ``finish()``, and the shared ``result()``.
-    public struct Outbound: Sendable {
-        let state: State
-
-        /// Sends one request element, credit-gated.
-        public func send(_ element: RequestElement) async -> StreamSendOutcome {
-            await self.state.send(element)
-        }
-
-        /// Sends END (kind 4): finishes the client's request direction.
-        public func finish() async { await self.state.finish() }
-
-        /// The call's terminal `Result<Response, MMCallError>`. Resolves exactly once
-        /// (shared with the inbound half).
-        public func result() async -> Result<Response, MMCallError> {
-            await self.state.result()
-        }
-
-        /// Sends CANCEL (kind 6): abandons the whole call.
-        public func cancel() async { await self.state.cancel() }
+        self.inbound = InboundStreamHandle(state: state)
+        self.outbound = OutboundStreamHandle(state: state)
     }
 }

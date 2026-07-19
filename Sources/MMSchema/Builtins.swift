@@ -2,7 +2,7 @@
 /// in MMServer (Phase 3); the descriptors live here so client-only processes
 /// can call the builtins with full typing.
 
-/// Request for `rpc.schema` — an empty payload: the discovery **scope** is
+/// Request for `server.schema` — an empty payload: the discovery **scope** is
 /// the call's envelope entity (a concrete entity narrows to its subtree;
 /// root — the empty path — asks about the whole tree, filtered by the
 /// caller's traversal rights server-side).
@@ -12,7 +12,7 @@ public struct SchemaRequest: Codable, Hashable, Sendable, SchemaDescribable {
     public static var schema: TypeSchema { .structure(fields: []) }
 }
 
-/// Response for `rpc.schema`.
+/// Response for `server.schema`.
 public struct SchemaResponse: Codable, Hashable, Sendable {
     /// ``SchemaFingerprint`` of the *complete* method set the server exposes
     /// (not of the filtered `methods` list), so a client can compare it with
@@ -47,7 +47,7 @@ public struct SchemaResponse: Codable, Hashable, Sendable {
     }
 }
 
-/// Request for `entity.stat` — an empty payload: the stat **target** is the
+/// Request for `server.entity` — an empty payload: the stat **target** is the
 /// call's envelope entity.
 public struct StatRequest: Codable, Hashable, Sendable, SchemaDescribable {
     public init() {}
@@ -55,7 +55,7 @@ public struct StatRequest: Codable, Hashable, Sendable, SchemaDescribable {
     public static var schema: TypeSchema { .structure(fields: []) }
 }
 
-/// Response for `entity.stat`: the ten bytes of the entity's ACL. Plain
+/// Response for `server.entity`: the ten bytes of the entity's ACL. Plain
 /// `UInt32` fields (not `uid_t`/`gid_t`) because this struct is a wire type.
 public struct StatResponse: Codable, Hashable, Sendable {
     public var owner: UInt32
@@ -80,7 +80,7 @@ public enum Builtins: MethodNamespace {
     /// Schema discovery. `.read`: discovering what methods exist under an
     /// entity is observing it.
     public static let schema = Method<SchemaRequest, SchemaResponse>(
-        name: "rpc.schema",
+        name: "server.schema",
         access: .read
     )
 
@@ -90,13 +90,13 @@ public enum Builtins: MethodNamespace {
     /// that can merely traverse an entity should not learn who owns it. The
     /// x-on-every-ancestor traversal rule still applies on top, exactly as for
     /// every other method.
-    public static let stat = Method<StatRequest, StatResponse>(
-        name: "entity.stat",
+    public static let entity = Method<StatRequest, StatResponse>(
+        name: "server.entity",
         access: .read
     )
 
     @SchemaBuilder public static var all: [AnyMethod] {
         Self.schema
-        Self.stat
+        Self.entity
     }
 }

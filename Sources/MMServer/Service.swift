@@ -37,8 +37,8 @@ public enum MMServiceError: Error, Sendable, Hashable {
 /// exchange and per-connection request loop, and dispatches through the
 /// ``Router``. Conforms to swift-service-lifecycle's `Service`.
 ///
-/// Every server auto-registers the builtin methods (`rpc.schema`,
-/// `entity.stat`): the initializer constructs its ``Router`` with
+/// Every server auto-registers the builtin methods (`server.schema`,
+/// `server.entity`): the initializer constructs its ``Router`` with
 /// `registerBuiltins: true`, so discovery and ACL inspection exist without
 /// user code.
 ///
@@ -83,16 +83,9 @@ public struct MMService: Service {
     private let onBind: (@Sendable (SocketAddress) -> Void)?
     private let serverHello: MMHello
 
-    private let connectionsAccepted: Counter
-    private let connectionsRejected: Counter
-    private let framesIn: Counter
-    private let framesOut: Counter
-    private let protocolViolations: Counter
-    private let acceptFailures: Counter
-    private let activeConnectionsGauge: Gauge
+    private let metrics: ServiceMetrics
     /// Stream frames dropped for an unknown/retired msgid, or an advisory frame
     /// legal to ignore (same label the router used transitionally in S1/S2).
-    private let streamFramesDropped: Counter
 
     private enum TransportKind: Sendable {
         case unix
@@ -151,14 +144,7 @@ public struct MMService: Service {
             schemaFingerprint: self.router.fingerprint,
             capabilities: configuration.capabilities
         )
-        self.connectionsAccepted = Counter(label: "mm_server_connections_accepted_total")
-        self.connectionsRejected = Counter(label: "mm_server_connections_rejected_total")
-        self.framesIn = Counter(label: "mm_server_frames_in_total")
-        self.framesOut = Counter(label: "mm_server_frames_out_total")
-        self.protocolViolations = Counter(label: "mm_server_protocol_violations_total")
-        self.acceptFailures = Counter(label: "mm_server_accept_failures_total")
-        self.activeConnectionsGauge = Gauge(label: "mm_server_active_connections")
-        self.streamFramesDropped = Counter(label: "mm_server_stream_frames_dropped_total")
+        self.metrics = ServiceMetrics()
     }
 
     // MARK: - Service
@@ -265,7 +251,7 @@ public struct MMService: Service {
     /// error first.
     private func initializeServerChannel(_ channel: any Channel) -> EventLoopFuture<Void> {
         let logger = self.logger
-        let acceptFailures = self.acceptFailures
+        let acceptFailures = self.metrics.acceptFailures
         return channel.eventLoop.makeCompletedFuture {
             try channel.pipeline.syncOperations.addHandler(
                 AcceptErrorFilterHandler(logger: logger, acceptFailures: acceptFailures)
@@ -279,7 +265,7 @@ public struct MMService: Service {
         let maxFrameLength = self.configuration.maxFrameLength
         let idleTimeout = self.configuration.idleTimeout
         let serverHello = self.serverHello
-        let violations = self.protocolViolations
+        let violations = self.metrics.protocolViolations
         return channel.eventLoop.makeCompletedFuture {
             try Self.configureChildPipeline(
                 channel: channel,
@@ -311,7 +297,7 @@ public struct MMService: Service {
     ) throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
         let sync = channel.pipeline.syncOperations
         try sync.addHandler(IdleStateHandler(allTimeout: idleTimeout))
-        try sync.addHandler(IdleCloseHandler())
+        try sync.addHandler(MMIdleCloseHandler())
         try sync.addHandler(ByteToMessageHandler(MMFrameDecoder(maxFrameLength: maxFrameLength)))
         try sync.addHandler(MessageToByteHandler(MMFrameEncoder(maxFrameLength: maxFrameLength)))
         try sync.addHandler(
@@ -349,7 +335,7 @@ public struct MMService: Service {
                             // pipeline may already have flushed the server hello
                             // at activation; a rejected peer can observe it
                             // before the close.
-                            self.connectionsRejected.increment()
+                            self.metrics.connectionsRejected.increment()
                             self.logger.debug(
                                 "connection rejected",
                                 metadata: ["reason": "connection_cap"]
@@ -363,8 +349,8 @@ public struct MMService: Service {
                             }
                             continue
                         }
-                        self.connectionsAccepted.increment()
-                        self.activeConnectionsGauge.record(
+                        self.metrics.connectionsAccepted.increment()
+                        self.metrics.activeConnections.record(
                             activeConnections.withLockedValue { $0 }
                         )
                         let connectionID = nextConnectionID
@@ -384,7 +370,7 @@ public struct MMService: Service {
                                 count -= 1
                                 return count
                             }
-                            self.activeConnectionsGauge.record(remaining)
+                            self.metrics.activeConnections.record(remaining)
                         }
                     }
                 } onGracefulShutdown: {
@@ -481,7 +467,7 @@ public struct MMService: Service {
             guard case .success(let clientHello) = MMHello.decode(from: helloFrame) else {
                 // Defensive only — the hello handler forwards nothing
                 // that does not decode.
-                self.protocolViolations.increment()
+                self.metrics.protocolViolations.increment()
                 return
             }
             let negotiated = HelloNegotiation.negotiate(
@@ -502,7 +488,7 @@ public struct MMService: Service {
                 ]
             )
 
-            let writer = ConnectionWriter(outbound: outbound, framesOut: self.framesOut)
+            let writer = ConnectionWriter(outbound: outbound, framesOut: self.metrics.framesOut)
             let context = MMContext(
                 peer: peer,
                 protocolVersion: negotiated.protocolVersion,
@@ -556,11 +542,11 @@ public struct MMService: Service {
         await withDiscardingTaskGroup { handlers in
             do {
                 while let frame = try await frames.next() {
-                    self.framesIn.increment()
+                    self.metrics.framesIn.increment()
                     let envelope: MMEnvelope
                     switch MMEnvelope.decode(from: frame) {
                         case .failure(let error):
-                            self.protocolViolations.increment()
+                            self.metrics.protocolViolations.increment()
                             logger.debug(
                                 "envelope decode failed",
                                 metadata: ["error": "\(error)"]
@@ -623,15 +609,15 @@ public struct MMService: Service {
                     switch await self.router.authorize(
                         route: route, entity: entity, context: context, method: method
                     ) {
-                        case .failure(let errorObject):
+                        case .failure(let error):
                             _ = await writer.send(
-                                .response(msgid: msgid, error: errorObject, result: nil)
+                                .response(msgid: msgid, error: error, result: nil)
                             )
                         case .success(let target):
                             if let plan = await streams.openStream(
                                 msgid: msgid, route: route, params: params,
                                 context: context.scoped(to: target),
-                                framesDropped: self.streamFramesDropped
+                                framesDropped: self.metrics.streamFramesDropped
                             ) {
                                 handlers.addTask { await plan.run() }
                             }
@@ -648,7 +634,7 @@ public struct MMService: Service {
                 // admitted, never given a terminal of its own (the single-terminal
                 // invariant).
                 guard streams.registerUnary(msgid: msgid) else {
-                    self.streamFramesDropped.increment()
+                    self.metrics.streamFramesDropped.increment()
                     return
                 }
                 let admitted = inFlight.withLockedValue { count in
@@ -664,7 +650,7 @@ public struct MMService: Service {
                     _ = await writer.send(
                         .response(
                             msgid: msgid,
-                            error: Router.errorObject(.tooManyInFlight),
+                            error: Router.error(.tooManyInFlight),
                             result: nil
                         )
                     )
@@ -681,7 +667,7 @@ public struct MMService: Service {
                 }
 
             case .credit, .item, .end, .stop, .cancel:
-                await streams.route(envelope, framesDropped: self.streamFramesDropped)
+                await streams.route(envelope, framesDropped: self.metrics.streamFramesDropped)
 
             case .response:
                 // Inbound response: a peer protocol error, logged and dropped by

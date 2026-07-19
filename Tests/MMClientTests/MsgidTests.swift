@@ -1,3 +1,4 @@
+import MMTestSupport
 import MMWire
 import NIOConcurrencyHelpers
 import NIOCore
@@ -96,7 +97,7 @@ struct MsgidTests {
     @Test("reserve enforces the cap before allocating")
     func reserveEnforcesCap() {
         var table = CallTable()
-        #expect(table.reserve(cap: 1) == .success(1))
+        #expect(table.reserve(cap: 1) == .success(0))
         #expect(table.reserve(cap: 1) == .failure(.tooManyInFlight))
     }
 

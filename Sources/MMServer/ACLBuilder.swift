@@ -1,11 +1,11 @@
 import MMSchema
 
 #if canImport(Darwin)
-import Darwin
+    import Darwin
 #elseif canImport(Glibc)
-import Glibc
+    import Glibc
 #elseif canImport(Musl)
-import Musl
+    import Musl
 #endif
 
 /// The declarative form of a static ACL table — sugar over
@@ -57,22 +57,21 @@ public func Entity(
     mode: UInt16? = nil,
     @ACLBuilder _ children: () -> [ACLEntry] = { [] }
 ) -> ACLEntry {
-    ACLEntry(path: path, owner: owner, group: group, mode: mode, children: children())
+    ACLEntry(
+        path: path,
+        owner: owner,
+        group: group,
+        mode: mode,
+        children: children()
+    )
 }
 
 @resultBuilder
-public enum ACLBuilder {
+public enum ACLBuilder: MMListBuilding {
+    public typealias Element = ACLEntry
+
     public static func buildExpression(_ entry: ACLEntry) -> [ACLEntry] { [entry] }
     public static func buildExpression(_ entries: [ACLEntry]) -> [ACLEntry] { entries }
-    public static func buildBlock(_ components: [ACLEntry]...) -> [ACLEntry] {
-        components.flatMap { $0 }
-    }
-    public static func buildOptional(_ component: [ACLEntry]?) -> [ACLEntry] { component ?? [] }
-    public static func buildEither(first component: [ACLEntry]) -> [ACLEntry] { component }
-    public static func buildEither(second component: [ACLEntry]) -> [ACLEntry] { component }
-    public static func buildArray(_ components: [[ACLEntry]]) -> [ACLEntry] {
-        components.flatMap { $0 }
-    }
 }
 
 /// Assembles a declared entity tree into the flat table an
@@ -85,7 +84,8 @@ func assembleACLTable(_ entries: [ACLEntry]) -> [EntityName: EntityACL] {
         let fullPath = parentPath.map { "\($0).\(entry.path)" } ?? entry.path
         guard case .success(let name) = EntityName.parse(fullPath), !name.isRoot else {
             preconditionFailure(
-                "ACLProvider declares \"\(fullPath)\", which is not a valid non-root entity path")
+                "ACLProvider declares \"\(fullPath)\", which is not a valid non-root entity path"
+            )
         }
         let owner = entry.owner ?? inherited?.owner
         let group = entry.group ?? inherited?.group
@@ -95,7 +95,10 @@ func assembleACLTable(_ entries: [ACLEntry]) -> [EntityName: EntityACL] {
             )
         }
         let acl = EntityACL(
-            owner: owner, group: group, mode: entry.mode ?? EntityACL.defaultCreationMode)
+            owner: owner,
+            group: group,
+            mode: entry.mode ?? EntityACL.defaultCreationMode
+        )
         precondition(
             table.updateValue(acl, forKey: name) == nil,
             "ACLProvider declares \"\(fullPath)\" twice"

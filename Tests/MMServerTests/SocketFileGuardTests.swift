@@ -1,5 +1,6 @@
 import Foundation  // Tests only: mkdtemp template under NSTemporaryDirectory().
 import Logging
+import MMTestSupport
 import Testing
 
 @testable import MMServer
@@ -13,19 +14,9 @@ import Musl
 #endif
 
 /// Runs `body` with a fresh temp path (no file created), cleaning up the
-/// directory afterwards.
+/// directory afterwards — the shared harness helper, synchronous variant.
 private func withTempPath(_ body: (String) throws -> Void) throws {
-    var template = Array((NSTemporaryDirectory() + "mm-guard-XXXXXX").utf8CString)
-    let directory = template.withUnsafeMutableBufferPointer { buffer -> String? in
-        guard mkdtemp(buffer.baseAddress!) != nil else { return nil }
-        return String(cString: buffer.baseAddress!)
-    }
-    let unwrapped = try #require(directory)
-    defer {
-        unlink(unwrapped + "/s")
-        rmdir(unwrapped)
-    }
-    try body(unwrapped + "/s")
+    try withTempSocketPath(prefix: "mm-guard-", body)
 }
 
 /// The identity-guarded shutdown unlink: a draining server must remove only

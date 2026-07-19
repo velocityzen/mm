@@ -40,12 +40,13 @@ public struct MMFrameDecoder: ByteToMessageDecoder, Sendable {
         guard length <= self.maxFrameLength else {
             throw MMWireError.frameTooLarge(length: length, limit: self.maxFrameLength)
         }
-        guard buffer.readableBytes >= 4 + Int(length) else {
+        // The cap was checked on the peeked prefix above, so nil here can
+        // only mean the body has not fully arrived.
+        guard
+            let payload = buffer.readLengthPrefixedSlice(endianness: .little, as: UInt32.self)
+        else {
             return .needMoreData
         }
-        buffer.moveReaderIndex(forwardBy: 4)
-        // Force-unwrap is safe: readableBytes was bounds-checked above.
-        let payload = buffer.readSlice(length: Int(length))!
         context.fireChannelRead(self.wrapInboundOut(payload))
         return .continue
     }

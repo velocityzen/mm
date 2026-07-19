@@ -41,7 +41,7 @@ The byte-level contract — every frame, envelope kind, ACL rule, fingerprint st
 ### Envelope
 
 - ``MMEnvelope``
-- ``MMErrorObject``
+- ``MMError``
 
 ### Hello preamble
 

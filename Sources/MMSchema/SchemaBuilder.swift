@@ -44,7 +44,9 @@
 /// descriptor constants plus a declarative `all` is the deliberate division
 /// of labor.
 @resultBuilder
-public enum SchemaBuilder {
+public enum SchemaBuilder: MMListBuilding {
+    public typealias Element = AnyMethod
+
     /// A bare `Method` expression, erased into the list.
     public static func buildExpression<Request: Codable & Sendable, Response: Codable & Sendable>(
         _ method: Method<Request, Response>
@@ -96,25 +98,10 @@ public enum SchemaBuilder {
         methods
     }
 
-    public static func buildBlock(_ components: [AnyMethod]...) -> [AnyMethod] {
-        components.flatMap { $0 }
-    }
 
-    public static func buildOptional(_ component: [AnyMethod]?) -> [AnyMethod] {
-        component ?? []
-    }
 
-    public static func buildEither(first component: [AnyMethod]) -> [AnyMethod] {
-        component
-    }
 
-    public static func buildEither(second component: [AnyMethod]) -> [AnyMethod] {
-        component
-    }
 
-    public static func buildArray(_ components: [[AnyMethod]]) -> [AnyMethod] {
-        components.flatMap { $0 }
-    }
 
     public static func buildLimitedAvailability(_ component: [AnyMethod]) -> [AnyMethod] {
         component

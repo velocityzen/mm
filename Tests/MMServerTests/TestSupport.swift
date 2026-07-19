@@ -1,4 +1,5 @@
 import Foundation
+import MMTestSupport
 import Synchronization
 import MMSchema
 import MMServer
@@ -64,24 +65,8 @@ func makeContext(
 }
 
 // MARK: - Request/response fixtures
-
-struct EchoRequest: Codable, Hashable, Sendable {
-    var entity: EntityName
-    var value: Int
-
-    enum CodingKeys: Int, CodingKey {
-        case entity = 0
-        case value = 1
-    }
-}
-
-struct EchoResponse: Codable, Hashable, Sendable {
-    var value: Int
-
-    enum CodingKeys: Int, CodingKey {
-        case value = 0
-    }
-}
+// EchoRequest/EchoResponse come from MMTestSupport (shared with the
+// integration suite).
 
 /// Counts full-decode invocations.
 final class InvocationCounter: Sendable {
@@ -129,16 +114,7 @@ struct ProbedRequest: Codable, Sendable, SchemaDescribable {
 }
 
 // MARK: - Envelope helpers
-
-func encodedParams<T: Encodable>(_ value: T) -> ByteBuffer {
-    try! MMPackEncoder().encode(value).get()
-}
-
-func request<T: Encodable>(
-    msgid: UInt32 = 1, method: String, entity: EntityName = .root, _ body: T
-) -> MMEnvelope {
-    .request(msgid: msgid, method: method, entity: entity.rawValue, params: encodedParams(body))
-}
+// encodedParams / request come from MMTestSupport.
 
 /// The error code of a response envelope, or `nil` for success responses and
 /// non-responses.

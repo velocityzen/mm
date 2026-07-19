@@ -22,7 +22,7 @@ public enum MMCLIStreamDriver {
     /// First SIGINT: graceful `handle.stop()`, keep draining (items in flight
     /// still arrive); second SIGINT: `handle.cancel()`.
     public static func follow<Element: Codable & Sendable, Response: Codable & Sendable>(
-        _ handle: InboundStreamHandle<Element, Response>,
+        _ handle: InboundStreamHandle<Element, Never, Response>,
         format: OutputFormat, method: String, entity: String
     ) async throws -> Response {
         try await MMCLISignals.withGracefulSigint(
@@ -43,7 +43,7 @@ public enum MMCLIStreamDriver {
     /// SIGINT: stop reading + `finish()` (graceful END — the terminal still
     /// arrives); second: `cancel()`.
     public static func feed<Element: Codable & Sendable, Response: Codable & Sendable>(
-        _ handle: OutboundStreamHandle<Element, Response>,
+        _ handle: OutboundStreamHandle<Element, Never, Response>,
         makeElement: @Sendable @escaping (String) throws -> Element,
         method: String, entity: String
     ) async throws -> Response {
@@ -106,7 +106,7 @@ public enum MMCLIStreamDriver {
     /// The signal-free body of ``follow(_:format:method:entity:)``: drain the
     /// element sequence to stdout, then unwrap the terminal.
     static func followCore<Element: Codable & Sendable, Response: Codable & Sendable>(
-        _ handle: InboundStreamHandle<Element, Response>,
+        _ handle: InboundStreamHandle<Element, Never, Response>,
         format: OutputFormat, method: String, entity: String
     ) async throws -> Response {
         for await element in handle {
@@ -126,7 +126,7 @@ public enum MMCLIStreamDriver {
         Response: Codable & Sendable,
         Lines: AsyncSequence & Sendable
     >(
-        _ handle: OutboundStreamHandle<Element, Response>,
+        _ handle: OutboundStreamHandle<Element, Never, Response>,
         lines: Lines,
         makeElement: @Sendable @escaping (String) throws -> Element,
         stopReading: StreamStopFlag = StreamStopFlag(),

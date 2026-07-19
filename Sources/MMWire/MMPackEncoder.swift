@@ -23,6 +23,7 @@ public struct MMPackEncoder: Sendable {
             buffer.writeMessagePackBinary(payload)
             return .success(())
         }
+
         let root = MPEncodedNode()
         let encoder = MPEncoderImplementation(sink: .node(root), codingPath: [])
         do {
@@ -240,20 +241,10 @@ struct MPKeyedEncoding<Key: CodingKey>: KeyedEncodingContainerProtocol {
     let container: MPEncContainer
     let codingPath: [any CodingKey]
 
-    /// Integer keys from `CodingKeys.intValue`; string fallback otherwise.
-    ///
-    /// The int key is used only when it is a faithful stand-in for the key: either
-    /// the string form is exactly the int's canonical decimal form (dictionary keys
-    /// like "5" — `_DictionaryCodingKey` derives `intValue` via `Int(stringValue)`),
-    /// or the string does not itself parse as an integer (struct `CodingKeys`, whose
-    /// `stringValue` is the property name). A numeric-but-non-canonical string key
-    /// ("05", "+5") travels as a string key — encoding it as its int would silently
-    /// rewrite it on round trip and could collide with a distinct key, producing an
-    /// invalid duplicate-key map.
+    /// Integer keys from `CodingKeys.intValue`; string fallback otherwise —
+    /// see ``mpFaithfulIntKey(_:)``, the rule the decoder mirrors exactly.
     private func writeKey(_ key: Key) {
-        if let intKey = key.intValue,
-            String(intKey) == key.stringValue || Int(key.stringValue) == nil
-        {
+        if let intKey = mpFaithfulIntKey(key) {
             self.container.tail.writeMessagePackInt(Int64(intKey))
         } else {
             self.container.tail.writeMessagePackString(key.stringValue)
@@ -603,4 +594,19 @@ struct MPSingleValueEncoding: SingleValueEncodingContainer {
         }
         try value.encode(to: self.encoder)
     }
+}
+
+/// The faithful-int-key rule, stated once for encoder and decoder: `intValue`
+/// stands in for the key only when its canonical decimal form equals
+/// `stringValue` (dictionary keys like "5" — `_DictionaryCodingKey` derives
+/// `intValue` via `Int(stringValue)`), or when `stringValue` is not itself
+/// numeric (struct `CodingKeys`, whose `stringValue` is the property name). A
+/// numeric-but-non-canonical string key ("05", "+5") travels as a string key —
+/// honoring its claimed int would silently rewrite it on round trip and could
+/// collide with a distinct real int key.
+func mpFaithfulIntKey(_ key: some CodingKey) -> Int? {
+    guard let intKey = key.intValue,
+        String(intKey) == key.stringValue || Int(key.stringValue) == nil
+    else { return nil }
+    return intKey
 }

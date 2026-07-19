@@ -16,7 +16,7 @@ Schema *walking* is written once rather than per consumer: ``TypeResolver`` is t
 
 Authorization is filesystem-style: ``EntityName`` is a validated dotted path, ``EntityACL`` carries owner uid, group gid, and 9 rwx/ugo mode bits with first-matching-class-wins semantics, and ``AccessMode`` is the rwx option set a method declares. ``PeerIdentity`` is deliberately not Codable — it is kernel-derived only and never crosses the wire.
 
-Every server also speaks the ``Builtins``: `rpc.schema` (discovery, scoped by the envelope entity) and `entity.stat` (an entity's ACL record).
+Every server also speaks the ``Builtins``: `server.schema` (discovery, scoped by the envelope entity) and `server.entity` (an entity's ACL record).
 
 ## Topics
 

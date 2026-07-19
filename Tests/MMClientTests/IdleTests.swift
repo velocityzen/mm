@@ -1,3 +1,4 @@
+import MMTestSupport
 import MMWire
 import NIOCore
 import NIOEmbedded
@@ -5,15 +6,15 @@ import Testing
 
 @testable import MMClient
 
-/// The client-side idle reaper: `ClientIdleCloseHandler` behavior and the
+/// The client-side idle reaper: `MMIdleCloseHandler` behavior and the
 /// pipeline assembly that installs it. The full reap/liveness behavior runs
 /// over a real socket in `MMIntegrationTests` (`IdleStateHandler` measures
 /// real monotonic time, so it cannot be driven by a fake test clock).
 @Suite("Client idle reaping")
 struct IdleTests {
-    @Test("ClientIdleCloseHandler closes the channel on an idle event")
+    @Test("MMIdleCloseHandler closes the channel on an idle event")
     func idleEventCloses() throws {
-        let channel = EmbeddedChannel(handler: ClientIdleCloseHandler())
+        let channel = EmbeddedChannel(handler: MMIdleCloseHandler())
         channel.connect(to: try SocketAddress(unixDomainSocketPath: "/mm-test"), promise: nil)
         channel.embeddedEventLoop.run()
         #expect(channel.isActive)
@@ -22,9 +23,9 @@ struct IdleTests {
         #expect(channel.isActive == false)
     }
 
-    @Test("ClientIdleCloseHandler forwards unrelated user events")
+    @Test("MMIdleCloseHandler forwards unrelated user events")
     func unrelatedEventsForwarded() throws {
-        let channel = EmbeddedChannel(handler: ClientIdleCloseHandler())
+        let channel = EmbeddedChannel(handler: MMIdleCloseHandler())
         channel.connect(to: try SocketAddress(unixDomainSocketPath: "/mm-test"), promise: nil)
         channel.embeddedEventLoop.run()
         channel.pipeline.fireUserInboundEventTriggered(ChannelEvent.inputClosed)
@@ -51,7 +52,7 @@ struct IdleTests {
             #expect(idleState.allTimeout == .seconds(30))
             #expect(idleState.readTimeout == nil)
             #expect(idleState.writeTimeout == nil)
-            #expect(throws: Never.self) { try sync.handler(type: ClientIdleCloseHandler.self) }
+            #expect(throws: Never.self) { try sync.handler(type: MMIdleCloseHandler.self) }
         }
         await discard(harness)
         // Without idleTimeout, neither idle handler is installed.
@@ -59,7 +60,7 @@ struct IdleTests {
         try await bare.loop.executeInContext {
             let sync = bare.channel.pipeline.syncOperations
             #expect(throws: (any Error).self) { try sync.handler(type: IdleStateHandler.self) }
-            #expect(throws: (any Error).self) { try sync.handler(type: ClientIdleCloseHandler.self) }
+            #expect(throws: (any Error).self) { try sync.handler(type: MMIdleCloseHandler.self) }
         }
         await discard(bare)
     }

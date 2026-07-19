@@ -2,31 +2,14 @@ import NIOCore
 import Testing
 
 /// Builds a `ByteBuffer` from a hex string ("cc80" → [0xcc, 0x80]).
+/// NIOCore's plain-hex reader; fixture strings are compile-time literals.
 func mpBytes(_ hex: String) -> ByteBuffer {
-    precondition(hex.count.isMultiple(of: 2), "hex string must have even length")
-    var buffer = ByteBuffer()
-    var index = hex.startIndex
-    while index < hex.endIndex {
-        let next = hex.index(index, offsetBy: 2)
-        guard let byte = UInt8(hex[index..<next], radix: 16) else {
-            preconditionFailure("invalid hex: \(hex[index..<next])")
-        }
-        buffer.writeInteger(byte)
-        index = next
-    }
-    return buffer
+    try! ByteBuffer(plainHexEncodedBytes: hex)
 }
 
-/// Lowercase hex of a buffer's readable bytes.
+/// Lowercase hex of a buffer's readable bytes — NIOCore's compact hex dump.
 func mpHex(_ buffer: ByteBuffer) -> String {
-    let digits = Array("0123456789abcdef")
-    var out = ""
-    out.reserveCapacity(buffer.readableBytes * 2)
-    for byte in buffer.readableBytesView {
-        out.append(digits[Int(byte >> 4)])
-        out.append(digits[Int(byte & 0x0f)])
-    }
-    return out
+    buffer.hexDump(format: .compact)
 }
 
 /// Spec-derived canonical MessagePack encoding (hex) of a non-negative integer < 2^16.

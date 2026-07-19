@@ -1,3 +1,4 @@
+import FP
 import Logging
 import MMSchema
 import MMWire
@@ -51,7 +52,7 @@ public actor MMClientConnection {
     typealias Writer = NIOAsyncChannelOutboundWriter<ByteBuffer>
 
     /// The outcome of the hello exchange, fixed for the connection's lifetime.
-    public nonisolated let helloInfo: HelloInfo
+    public nonisolated let server: ServerInfo
 
     nonisolated let channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>
     private nonisolated let configuration: MMClientConfiguration
@@ -64,6 +65,10 @@ public actor MMClientConnection {
     /// single-resume audit.
     private nonisolated let calls: NIOLockedValueBox<CallTable>
     private nonisolated let states: NIOLockedValueBox<StateHub>
+    /// The automatic schema-verification verdict, replay-once. Resolved by
+    /// the verification child of `run()`, or by `finish(reason:)` when the
+    /// connection ends first. Awaited via ``verify()``.
+    private nonisolated let verification = SchemaVerificationCell()
 
     /// Who owns the channel's scoped teardown. `NIOAsyncChannel` requires its
     /// writer to be finished via `executeThenClose` exactly once: `run()`
@@ -80,7 +85,7 @@ public actor MMClientConnection {
 
     init(
         channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>,
-        helloInfo: HelloInfo,
+        server: ServerInfo,
         configuration: MMClientConfiguration,
         logger: Logger
     ) {
@@ -93,7 +98,7 @@ public actor MMClientConnection {
         connectionLogger[metadataKey: "connection"] = "\(connectionID)"
         let metrics = ClientMetrics()
         self.channel = channel
-        self.helloInfo = helloInfo
+        self.server = server
         self.configuration = configuration
         self.logger = connectionLogger
         self.metrics = metrics
@@ -110,7 +115,7 @@ public actor MMClientConnection {
     /// for the server's. The server's first frame must be a decodable hello
     /// (anything else is ``MMClientError/badHello``); the negotiated version
     /// is min-wins, and a fingerprint mismatch is surfaced on
-    /// ``HelloInfo/fingerprintMatched`` — never a disconnect, per the fixed
+    /// ``ServerInfo/fingerprintMatched`` — never a disconnect, per the fixed
     /// wire decision. TCP endpoints get `TCP_NODELAY`.
     public static func connect(
         to endpoint: MMEndpoint,
@@ -138,30 +143,30 @@ public actor MMClientConnection {
                 return ConnectedPipeline(channel: wrapped, serverHello: helloPromise.futureResult)
             }
         }
-        let pipeline: ConnectedPipeline
-        do {
-            // Seam adapter: bootstrap throws untyped; collapse to transport.
+
+        // Seam adapter: bootstrap throws untyped; collapse to transport.
+        return await Result.fromAsync {
             switch endpoint {
                 case .unix(let path):
-                    pipeline = try await bootstrap.connect(
+                    try await bootstrap.connect(
                         unixDomainSocketPath: path,
                         channelInitializer: initializer
                     )
                 case .tcp(let host, let port):
-                    pipeline =
-                        try await bootstrap
+                    try await bootstrap
                         .channelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
                         .connect(host: host, port: port, channelInitializer: initializer)
             }
-        } catch {
-            return .failure(.transport(description: String(describing: error)))
         }
-        return await Self.establish(
-            channel: pipeline.channel,
-            serverHello: pipeline.serverHello,
-            configuration: configuration,
-            logger: logger
-        )
+        .mapError { MMClientError.transport(description: String(describing: $0)) }
+        .flatMapAsync { pipeline in
+            await Self.establish(
+                channel: pipeline.channel,
+                serverHello: pipeline.serverHello,
+                configuration: configuration,
+                logger: logger
+            )
+        }
     }
 
     private struct ConnectedPipeline: Sendable {
@@ -181,7 +186,7 @@ public actor MMClientConnection {
         let sync = channel.pipeline.syncOperations
         if let idleTimeout = configuration.idleTimeout {
             try sync.addHandler(IdleStateHandler(allTimeout: idleTimeout))
-            try sync.addHandler(ClientIdleCloseHandler())
+            try sync.addHandler(MMIdleCloseHandler())
         }
         try sync.addHandler(
             ByteToMessageHandler(MMFrameDecoder(maxFrameLength: configuration.maxFrameLength))
@@ -217,34 +222,29 @@ public actor MMClientConnection {
             raw.eventLoop.scheduleTask(in: timeout) { raw.close(promise: nil) }
         }
         defer { helloDeadline?.cancel() }
-        let hello: MMHello
-        do {
-            // Seam adapter: the promise carries HelloFailure or transport errors.
-            hello = try await withTaskCancellationHandler {
+        // Seam adapter: the promise carries HelloFailure or transport errors;
+        // every failure — bad hello, transport, or a negotiation the next
+        // stage rejects — discards the channel.
+        return await Result.fromAsync {
+            try await withTaskCancellationHandler {
                 try await serverHello.get()
             } onCancel: {
                 raw.close(promise: nil)
             }
-        } catch let failure as HelloFailure {
-            await Self.discard(channel)
-            return .failure(failure.clientError)
-        } catch {
-            await Self.discard(channel)
-            return .failure(.transport(description: String(describing: error)))
         }
-        switch Self.negotiate(serverHello: hello, configuration: configuration) {
-            case .failure(let error):
-                await Self.discard(channel)
-                return .failure(error)
-            case .success(let helloInfo):
-                return .success(
-                    MMClientConnection(
-                        channel: channel,
-                        helloInfo: helloInfo,
-                        configuration: configuration,
-                        logger: logger
-                    )
-                )
+        .mapError { error in
+            (error as? HelloFailure)?.clientError
+                ?? .transport(description: String(describing: error))
+        }
+        .flatMap { hello in Self.negotiate(serverHello: hello, configuration: configuration) }
+        .tapErrorAsync { _ in await Self.discard(channel) }
+        .map { server in
+            MMClientConnection(
+                channel: channel,
+                server: server,
+                configuration: configuration,
+                logger: logger
+            )
         }
     }
 
@@ -255,19 +255,23 @@ public actor MMClientConnection {
     static func negotiate(
         serverHello: MMHello,
         configuration: MMClientConfiguration
-    ) -> Result<HelloInfo, MMClientError> {
-        let negotiatedVersion = min(MMWireInfo.protocolVersion, serverHello.protocolVersion)
-        guard negotiatedVersion >= 1 else {
+    ) -> Result<ServerInfo, MMClientError> {
+        let negotiated = HelloNegotiation.negotiate(
+            localVersion: MMWireInfo.protocolVersion,
+            localCapabilities: configuration.capabilities,
+            remote: serverHello
+        )
+        guard negotiated.protocolVersion >= 1 else {
             return .failure(.versionUnsupported(serverVersion: serverHello.protocolVersion))
         }
         return .success(
-            HelloInfo(
-                negotiatedVersion: negotiatedVersion,
-                serverFingerprint: serverHello.schemaFingerprint,
-                fingerprintMatched: configuration.expectedFingerprint.map {
+            ServerInfo(
+                protocolVersion: negotiated.protocolVersion,
+                fingerprint: serverHello.schemaFingerprint,
+                fingerprintMatched: configuration.schema?.serverFingerprint.map {
                     $0 == serverHello.schemaFingerprint
                 },
-                capabilities: configuration.capabilities & serverHello.capabilities
+                capabilities: negotiated.capabilities
             )
         )
     }
@@ -311,10 +315,22 @@ public actor MMClientConnection {
                 for waiter in waiters {
                     waiter.resume(returning: .success(outbound))
                 }
-                for try await frame in inbound {
-                    if let violation = await self.handleFrame(frame) {
-                        terminal = violation
-                        return
+                // The inbound loop and the automatic schema verification run
+                // as structured siblings: verification rides the normal call
+                // path, so it needs this loop routing responses concurrently.
+                // The defer cancels a verification still in flight when the
+                // loop ends first — its pending call resumes `.cancelled` and
+                // the verdict resolves as skipped, so the implicit
+                // group-exit await can never park on a response that will
+                // never arrive.
+                try await withThrowingTaskGroup(of: Void.self) { verifier in
+                    verifier.addTask { await self.performAutoVerification() }
+                    defer { verifier.cancelAll() }
+                    for try await frame in inbound {
+                        if let violation = await self.handleFrame(frame) {
+                            terminal = violation
+                            return
+                        }
                     }
                 }
             }
@@ -333,18 +349,73 @@ public actor MMClientConnection {
         return .success(())
     }
 
+    // MARK: - Automatic schema verification
+
+    /// The automatic schema verification verdict — replay-once: awaitable
+    /// any number of times, from any task, resolving exactly once per
+    /// connection. Resolves shortly after ``run()`` starts (immediately when
+    /// a complete expectation already matches the hello), and always
+    /// resolves by the time the connection closes. Purely informational —
+    /// see ``MMSchemaVerification``.
+    public nonisolated func verify() async -> Result<
+        MMSchemaVerification, MMSchemaVerificationError
+    > {
+        await self.verification.value()
+    }
+
+    /// The verification child of `run()`: a complete expectation whose
+    /// folded fingerprint matches the hello is proven with zero round-trips;
+    /// anything else — a partial slice, or a complete expectation the hello
+    /// contradicts — is confirmed with one scoped discovery diff per
+    /// declared contract. A difference logs a warning and lands in the
+    /// verdict; nothing here ever closes the connection (soft-verdict rule).
+    private nonisolated func performAutoVerification() async {
+        guard let expectation = self.configuration.schema else {
+            self.verification.failure(.noExpectation)
+            return
+        }
+
+        if self.server.fingerprintMatched == true {
+            self.verification.success(.ok)
+            return
+        }
+
+        switch await self.verifyContracts(expectation.contracts) {
+            case .success(let differences) where differences.isEmpty:
+                self.verification.success(.partial)
+
+            case .success(let differences):
+                self.logger.warning(
+                    "schema difference",
+                    metadata: ["namespaces": "\(differences.count)"]
+                )
+                self.verification.success(.difference(differences))
+
+            case .failure(.denied):
+                // A peer may hold call rights without read on the namespace
+                // entity; verification never blocks what authorization allows.
+                self.verification.failure(.denied)
+
+            case .failure(let error):
+                self.verification.failure(.failed(error))
+        }
+    }
+
     /// Handles one inbound frame. A non-nil return is a fatal protocol
     /// violation: the loop stops and the connection closes.
     private func handleFrame(_ frame: ByteBuffer) async -> MMClientError? {
-        let envelope: MMEnvelope
-        switch MMEnvelope.decode(from: frame) {
-            case .failure(let error):
-                self.metrics.protocolViolations.increment()
+        await MMEnvelope.decode(from: frame)
+            .tapError { error in
                 self.logger.debug("envelope decode failed", metadata: ["error": "\(error)"])
-                return .protocolViolation(description: String(describing: error))
-            case .success(let decoded):
-                envelope = decoded
-        }
+            }
+            .matchAsync(
+                { @Sendable envelope in await self.route(envelope) },
+                { @Sendable error in self.protocolViolation(String(describing: error)) }
+            )
+    }
+
+    /// Routes one decoded envelope; same fatality contract as `handleFrame`.
+    private func route(_ envelope: MMEnvelope) async -> MMClientError? {
         switch envelope {
             case .response(let msgid, let error, let result):
                 let slots = ResponseSlots(error: error, result: result)
@@ -361,21 +432,13 @@ public actor MMClientConnection {
                         // finish its inbound sequence, release any parked sender.
                         control.resolveTerminal(slots)
                     case .dropped:
-                        // Late response for an abandoned (cancelled) msgid, or a
-                        // server bug. Either way: drop, log, count — never an error.
-                        self.metrics.responsesUnmatched.increment()
-                        self.logger.debug("response dropped", metadata: ["msgid": "\(msgid)"])
+                        self.dropResponse(msgid: msgid)
                 }
                 return nil
             case .request(let msgid, let method, _, _):
                 // v1 servers never call clients; tolerate-and-drop (not fatal) so
                 // a future capability-gated extension does not kill old clients.
-                self.metrics.protocolViolations.increment()
-                // Debug, not warning: the peer controls this line's rate.
-                self.logger.debug(
-                    "inbound request dropped",
-                    metadata: ["msgid": "\(msgid)", "method": "\(method)"]
-                )
+                self.dropInboundRequest(msgid: msgid, method: method)
                 return nil
             case .item(let msgid, let seq, let item):
                 return await self.handleInboundItem(msgid: msgid, seq: seq, item: item)
@@ -409,32 +472,26 @@ public actor MMClientConnection {
     /// the per-stream buffer, the loop parks (``awaitInboundDemand``) before
     /// returning — real backpressure to the socket.
     private func handleInboundItem(
-        msgid: UInt32, seq: UInt32, item: ByteBuffer
+        msgid: UInt32,
+        seq: UInt32,
+        item: ByteBuffer
     ) async -> MMClientError? {
-        let (control, isUnary) = self.calls.withLockedValue {
-            ($0.streamControl(msgid: msgid), $0.isLiveUnary(msgid: msgid))
-        }
-        guard let control else {
-            if isUnary {
-                // A stream item addressed to a live unary call's msgid: a server
-                // protocol violation.
-                self.metrics.protocolViolations.increment()
-                return .protocolViolation(
-                    description: "stream item on unary msgid \(msgid)"
-                )
-            }
-            // Unknown/retired msgid: drop-and-count.
-            self.dropStreamFrame(msgid: msgid, kind: "item")
-            return nil
+        let control: any ClientStreamControl
+        switch self.streamControlForFrame(msgid: msgid, kind: "item") {
+            case .dropped:
+                return nil
+            case .violation(let error):
+                return error
+            case .control(let routed):
+                control = routed
         }
         switch control.validateInboundItem(seq: seq) {
             case .drop:
                 self.dropStreamFrame(msgid: msgid, kind: "item")
                 return nil
             case .violation:
-                self.metrics.protocolViolations.increment()
-                return .protocolViolation(
-                    description: "stream item violation on msgid \(msgid) (seq \(seq))"
+                return self.protocolViolation(
+                    "stream item violation on msgid \(msgid) (seq \(seq))"
                 )
             case .deliver:
                 switch control.deliverInboundItem(item) {
@@ -463,29 +520,85 @@ public actor MMClientConnection {
         kind: String,
         _ apply: (any ClientStreamControl) -> Void
     ) -> MMClientError? {
+        switch self.streamControlForFrame(msgid: msgid, kind: kind) {
+            case .dropped:
+                return nil
+            case .violation(let error):
+                return error
+            case .control(let control):
+                apply(control)
+                return nil
+        }
+    }
+
+    /// The routing verdict for a stream-addressed frame.
+    private enum StreamFrameRouting {
+        case control(any ClientStreamControl)
+        case violation(MMClientError)
+        case dropped
+    }
+
+    /// The one lookup policy for every stream-addressed frame kind (item,
+    /// credit, END, STOP): the live stream's control, a connection-fatal
+    /// violation when the msgid belongs to a live *unary* call, or a
+    /// tolerated drop-and-count for unknown/retired msgids.
+    private func streamControlForFrame(msgid: UInt32, kind: String) -> StreamFrameRouting {
         let (control, isUnary) = self.calls.withLockedValue {
             ($0.streamControl(msgid: msgid), $0.isLiveUnary(msgid: msgid))
         }
         guard let control else {
             if isUnary {
-                self.metrics.protocolViolations.increment()
-                return .protocolViolation(
-                    description: "stream \(kind) on unary msgid \(msgid)"
+                return .violation(
+                    self.protocolViolation("stream \(kind) on unary msgid \(msgid)")
                 )
             }
             self.dropStreamFrame(msgid: msgid, kind: kind)
-            return nil
+            return .dropped
         }
-        apply(control)
-        return nil
+        return .control(control)
     }
 
+    // MARK: - Observability (count + log, one name per event)
+
     /// Drop-and-count a stream frame for an unknown/retired msgid.
-    private func dropStreamFrame(msgid: UInt32, kind: String) {
+    private nonisolated func dropStreamFrame(msgid: UInt32, kind: String) {
         self.metrics.streamFramesDropped.increment()
         self.logger.debug(
             "stream frame dropped",
             metadata: ["msgid": "\(msgid)", "kind": "\(kind)"]
+        )
+    }
+
+    /// Drop-and-count a late response for an abandoned (cancelled) msgid, or
+    /// a server bug. Never an error.
+    private nonisolated func dropResponse(msgid: UInt32) {
+        self.metrics.responsesUnmatched.increment()
+        self.logger.debug("response dropped", metadata: ["msgid": "\(msgid)"])
+    }
+
+    /// Drop-and-count an inbound request (v1 servers never call clients).
+    /// Debug, not warning: the peer controls this line's rate.
+    private nonisolated func dropInboundRequest(msgid: UInt32, method: String) {
+        self.metrics.protocolViolations.increment()
+        self.logger.debug(
+            "inbound request dropped",
+            metadata: ["msgid": "\(msgid)", "method": "\(method)"]
+        )
+    }
+
+    /// Counts a server protocol violation and builds the connection-fatal
+    /// error in one step, so no violation path can forget the counter.
+    private nonisolated func protocolViolation(_ description: String) -> MMClientError {
+        self.metrics.protocolViolations.increment()
+        return .protocolViolation(description: description)
+    }
+
+    /// Counts and logs one failed call (any error shape, local or remote).
+    private nonisolated func recordCallFailure(method: String, error: MMCallError) {
+        self.metrics.callFailures.increment()
+        self.logger.debug(
+            "call failed",
+            metadata: ["method": "\(method)", "error": "\(error)"]
         )
     }
 
@@ -512,19 +625,22 @@ public actor MMClientConnection {
         _ request: Request
     ) async -> Result<Response, MMCallError> {
         self.metrics.calls.increment()
-        let outcome = await self.performCall(
-            methodName: method.name, entity: entity, request: request, as: Response.self)
-        if case .failure(let error) = outcome {
-            self.metrics.callFailures.increment()
-            self.logger.debug(
-                "call failed",
-                metadata: ["method": "\(method.name)", "error": "\(error)"]
-            )
+
+        return await self.call(
+            methodName: method.name,
+            entity: entity,
+            request: request,
+            as: Response.self
+        )
+        .tapError { error in
+            self.recordCallFailure(method: method.name, error: error)
         }
-        return outcome
     }
 
-    private nonisolated func performCall<Request: Codable & Sendable, Response: Codable & Sendable>(
+    /// The untyped-descriptor core of ``call(_:on:_:)``: the wire name is a
+    /// plain string, so the dynamic surfaces (discovery, the CLI's raw call)
+    /// and the typed overload share one send path.
+    private nonisolated func call<Request: Codable & Sendable, Response: Codable & Sendable>(
         methodName: String,
         entity: EntityName,
         request: Request,
@@ -533,95 +649,56 @@ public actor MMClientConnection {
         guard !Task.isCancelled else {
             return .failure(.cancelled)
         }
-        // Encode failure: nothing was sent, no msgid consumed.
-        let params: ByteBuffer
-        switch MMPackEncoder().encode(request) {
-            case .failure(let error):
-                return .failure(.encode(error))
-            case .success(let encoded):
-                params = encoded
-        }
-        let msgid: UInt32
-        switch self.calls.withLockedValue({ $0.reserve(cap: self.configuration.maxInFlightCalls) })
-        {
-            case .failure(let error):
-                return .failure(error)
-            case .success(let allocated):
-                msgid = allocated
-        }
-        let frame: ByteBuffer
-        switch MMEnvelope.request(
-            msgid: msgid, method: methodName, entity: entity.rawValue, params: params
-        ).encoded() {
-            case .failure(let error):
-                _ = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
-                return .failure(.encode(error))
-            case .success(let encoded):
-                frame = encoded
-        }
-        // Enforce the outbound cap here, before the frame reaches the
-        // pipeline: `MMFrameEncoder` would throw at the handler seam, which
-        // poisons the encoder and tears down the whole connection (failing
-        // every unrelated in-flight call). One oversized request fails one
-        // call, locally, with an honest .encode error.
-        guard frame.readableBytes <= Int(self.configuration.maxFrameLength) else {
-            _ = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
-            return .failure(
-                .encode(
-                    .frameTooLarge(
-                        length: UInt32(clamping: frame.readableBytes),
-                        limit: self.configuration.maxFrameLength
-                    )
-                )
+        return await self.prepareRequestSend(
+            methodName: methodName,
+            entity: entity,
+            request: request
+        )
+        .flatMapAsync { msgid, frame, writer in
+            await self.sendAndAwaitResponse(
+                msgid: msgid,
+                frame: frame,
+                writer: writer,
+                as: Response.self
             )
         }
-        let writer: Writer
-        switch await self.awaitWriter() {
-            case .failure(let error):
-                _ = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
-                return .failure(error)
-            case .success(let available):
-                writer = available
-        }
+    }
+
+    /// Writes the prepared request and suspends until the response arrives.
+    private nonisolated func sendAndAwaitResponse<Response: Codable & Sendable>(
+        msgid: UInt32,
+        frame: ByteBuffer,
+        writer: Writer,
+        as _: Response.Type
+    ) async -> Result<Response, MMCallError> {
         let start = ContinuousClock.now
         do {
             // Seam adapter: writer backpressure suspends here; a throw means
             // the channel is gone — or the task was cancelled mid-write.
             try await writer.write(frame)
-        } catch is CancellationError {
+        } catch {
             // The writer's yield resumes with CancellationError when the
             // awaiting task is cancelled while suspended on outbound
-            // backpressure (or was already cancelled). The connection is
-            // still alive: honor the documented cancellation contract
-            // (.cancelled, never .connectionClosed). A parked response wins
-            // over cancellation, same as the `cancel(msgid:)` path.
-            let parked = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
-            if case .some(let outcome) = parked {
-                return self.resolve(outcome, as: Response.self, start: start)
-            }
-            return .failure(.cancelled)
-        } catch {
-            let parked = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
-            if case .some(let outcome) = parked {
-                return self.resolve(outcome, as: Response.self, start: start)
-            }
-            return .failure(.connectionClosed)
+            // backpressure (or was already cancelled); the connection is
+            // still alive then, so honor the documented cancellation
+            // contract (.cancelled, never .connectionClosed). Either way a
+            // parked response wins over the write failure, same as the
+            // `cancel(msgid:)` path.
+            return self.calls.withLockedValue { $0.abandon(msgid: msgid) }
+                .map { parked in self.resolve(parked, as: Response.self, start: start) }
+                ?? .failure(error is CancellationError ? .cancelled : .connectionClosed)
         }
-        let outcome: CallTable.Outcome = await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                let immediate = self.calls.withLockedValue {
+        let outcome: CallTable.Outcome = await withParkedContinuation(
+            register: { continuation in
+                self.calls.withLockedValue {
                     $0.register(msgid: msgid, continuation: continuation)
                 }
-                if let immediate {
-                    continuation.resume(returning: immediate)
-                }
-            }
-        } onCancel: {
-            // Synchronous by requirement — this is why CallTable lives in a
-            // lock, not the actor.
-            let cancelled = self.calls.withLockedValue { $0.cancel(msgid: msgid) }
-            cancelled?.resume(returning: .failure(.cancelled))
-        }
+            },
+            takeParkedOnCancel: {
+                self.calls.withLockedValue { $0.cancel(msgid: msgid) }
+            },
+            cancelled: .failure(.cancelled)
+        )
         return self.resolve(outcome, as: Response.self, start: start)
     }
 
@@ -630,24 +707,13 @@ public actor MMClientConnection {
         as _: Response.Type,
         start: ContinuousClock.Instant
     ) -> Result<Response, MMCallError> {
-        switch outcome {
-            case .failure(let error):
-                return .failure(error)
-            case .success(let slots):
-                self.metrics.callRoundtrip.recordNanoseconds(
-                    start.duration(to: .now).wholeNanoseconds)
-                if let errorObject = slots.error {
-                    return .failure(.from(errorObject: errorObject))
-                }
-                // A response with nil in both slots is a valid void success
-                // (wire spec, MMWire.docc/WireProtocol.md §4). On the wire a nil result slot and
-                // an encoded top-level Optional.none are the same byte (0xc0), so
-                // decode the nil slot as the MessagePack nil value: an Optional
-                // `Response` succeeds with nil; a non-optional `Response` fails with a
-                // truthful decode error for this call only.
-                let result = slots.result ?? ByteBuffer(bytes: [0xc0])
-                return MMPackDecoder().decode(Response.self, from: result).mapError { .decode($0) }
-        }
+        outcome
+            .tap { _ in
+                self.metrics.callRoundtrip.record(duration: start.duration(to: .now))
+            }
+            // The shared unary/terminal decode rule (spec §4) —
+            // ``ResponseSlots/decodeResponse(_:)``.
+            .flatMap { slots in slots.decodeResponse(Response.self) }
     }
 
     /// Waits for the outbound writer that `run()` produces. Cancellation-safe:
@@ -655,19 +721,17 @@ public actor MMClientConnection {
     /// starts.
     private nonisolated func awaitWriter() async -> Result<Writer, MMCallError> {
         let id = self.calls.withLockedValue { $0.allocateWriterWaiterID() }
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                let immediate = self.calls.withLockedValue {
+        return await withParkedContinuation(
+            register: { continuation in
+                self.calls.withLockedValue {
                     $0.registerWriterWaiter(id: id, continuation: continuation)
                 }
-                if let immediate {
-                    continuation.resume(returning: immediate)
-                }
-            }
-        } onCancel: {
-            let cancelled = self.calls.withLockedValue { $0.cancelWriterWaiter(id: id) }
-            cancelled?.resume(returning: .failure(.cancelled))
-        }
+            },
+            takeParkedOnCancel: {
+                self.calls.withLockedValue { $0.cancelWriterWaiter(id: id) }
+            },
+            cancelled: .failure(.cancelled)
+        )
     }
 
     // MARK: - Stream open (internal, shared by the typed overloads)
@@ -679,35 +743,23 @@ public actor MMClientConnection {
     /// STOP, CANCEL). Best-effort by design: a failed write means the connection
     /// is dying and the terminal resolves the call — no error is surfaced here.
     nonisolated func writeStreamFrame(_ envelope: MMEnvelope) async -> Bool {
-        let frame: ByteBuffer
-        switch envelope.encoded() {
-            case .failure:
-                return false
-            case .success(let encoded):
-                frame = encoded
-        }
-        guard frame.readableBytes <= Int(self.configuration.maxFrameLength) else {
-            // An oversized outbound stream frame: drop it locally rather than
-            // poison the frame encoder (connection-fatal for every call).
+        // Best-effort: the errors carry no information here, so each stage
+        // erases to an optional. The size gate drops an oversized frame
+        // locally rather than poison the frame encoder (connection-fatal for
+        // every call).
+        guard
+            let frame = try? envelope.encoded().get(),
+            frame.readableBytes <= Int(self.configuration.maxFrameLength),
+            let writer = try? await self.awaitWriter().get()
+        else {
             return false
         }
-        let writer: Writer
-        switch await self.awaitWriter() {
-            case .failure:
-                return false
-            case .success(let available):
-                writer = available
-        }
-        do {
-            try await writer.write(frame)
-            return true
-        } catch {
-            return false
-        }
+
+        return (try? await writer.write(frame)) != nil
     }
 
     /// Opens a streaming call: encodes and sends the opening request (the normal
-    /// `performCall` open path — msgid reservation, in-flight cap, outbound cap,
+    /// untyped `call(methodName:)` open path — msgid reservation, in-flight cap, outbound cap,
     /// writer wait), builds the stream state with its wire sinks, and installs
     /// the control in the CallTable. Local failures before the control is
     /// installed (encode, cap, connection closed) are surfaced by pre-resolving
@@ -715,7 +767,9 @@ public actor MMClientConnection {
     /// failures through `result()` with an empty element sequence — server-side
     /// authorization failures arrive the same way, as the terminal frame.
     nonisolated func openStream<
-        Inbound: Codable & Sendable, Outbound: Codable & Sendable, Response: Codable & Sendable
+        Inbound: Codable & Sendable,
+        Outbound: Codable & Sendable,
+        Response: Codable & Sendable
     >(
         methodName: String,
         entity: EntityName,
@@ -727,77 +781,55 @@ public actor MMClientConnection {
         response _: Response.Type
     ) async -> ClientStreamState<Inbound, Outbound, Response> {
         self.metrics.streamsOpened.increment()
-        // Encode the opening request. A pre-send failure resolves the terminal
+        // The shared send path; a pre-send failure resolves the terminal
         // immediately on a state that never entered the table.
-        let params: ByteBuffer
-        switch MMPackEncoder().encode(request) {
-            case .failure(let error):
-                return self.failedStream(
+        return await self.prepareRequestSend(
+            methodName: methodName,
+            entity: entity,
+            request: request
+        )
+        .matchAsync(
+            { msgid, frame, writer in
+                await self.openPreparedStream(
+                    msgid: msgid,
+                    frame: frame,
+                    writer: writer,
                     methodName: methodName,
                     hasResponseStream: hasResponseStream,
                     hasRequestStream: hasRequestStream,
-                    terminal: .failure(.encode(error))
+                    inbound: Inbound.self,
+                    outbound: Outbound.self,
+                    response: Response.self
                 )
-            case .success(let encoded):
-                params = encoded
-        }
-        let msgid: UInt32
-        switch self.calls.withLockedValue({ $0.reserve(cap: self.configuration.maxInFlightCalls) })
-        {
-            case .failure(let error):
-                return self.failedStream(
-                    methodName: methodName,
+            },
+            { error in
+                self.failedStream(
                     hasResponseStream: hasResponseStream,
                     hasRequestStream: hasRequestStream,
-                    terminal: .failure(error)
+                    error: error
                 )
-            case .success(let allocated):
-                msgid = allocated
-        }
-        let frame: ByteBuffer
-        switch MMEnvelope.request(
-            msgid: msgid, method: methodName, entity: entity.rawValue, params: params
-        ).encoded() {
-            case .failure(let error):
-                _ = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
-                return self.failedStream(
-                    methodName: methodName,
-                    hasResponseStream: hasResponseStream,
-                    hasRequestStream: hasRequestStream,
-                    terminal: .failure(.encode(error))
-                )
-            case .success(let encoded):
-                frame = encoded
-        }
-        guard frame.readableBytes <= Int(self.configuration.maxFrameLength) else {
-            _ = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
-            return self.failedStream(
-                methodName: methodName,
-                hasResponseStream: hasResponseStream,
-                hasRequestStream: hasRequestStream,
-                terminal: .failure(
-                    .encode(
-                        .frameTooLarge(
-                            length: UInt32(clamping: frame.readableBytes),
-                            limit: self.configuration.maxFrameLength
-                        )
-                    )
-                )
-            )
-        }
-        let writer: Writer
-        switch await self.awaitWriter() {
-            case .failure(let error):
-                _ = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
-                return self.failedStream(
-                    methodName: methodName,
-                    hasResponseStream: hasResponseStream,
-                    hasRequestStream: hasRequestStream,
-                    terminal: .failure(error)
-                )
-            case .success(let available):
-                writer = available
-        }
+            }
+        )
+    }
+
+    /// The post-prepare half of ``openStream``: write the opening request,
+    /// build the stream state with its wire sinks, install it in the table,
+    /// and hand it any terminal that raced ahead.
+    private nonisolated func openPreparedStream<
+        Inbound: Codable & Sendable,
+        Outbound: Codable & Sendable,
+        Response: Codable & Sendable
+    >(
+        msgid: UInt32,
+        frame: ByteBuffer,
+        writer: Writer,
+        methodName: String,
+        hasResponseStream: Bool,
+        hasRequestStream: Bool,
+        inbound _: Inbound.Type,
+        outbound _: Outbound.Type,
+        response _: Response.Type
+    ) async -> ClientStreamState<Inbound, Outbound, Response> {
         do {
             try await writer.write(frame)
         } catch {
@@ -805,26 +837,23 @@ public actor MMClientConnection {
             // (claiming a parked terminal if one somehow raced) and fail the
             // handle. Cancellation and death both land here.
             let parked = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
-            let terminal: Result<Response, MMCallError>
+            let reason: MMCallError
             switch parked {
                 case .some(.success(let slots)) where slots.error != nil:
                     // A terminal raced in before the write failed: honor it.
-                    terminal = .failure(.from(errorObject: slots.error!))
-                case .some(.failure(let reason)):
+                    reason = .from(error: slots.error!)
+                case .some(.failure(let closeReason)):
                     // The connection closed and parked the reservation as a failure.
-                    terminal = .failure(reason)
+                    reason = closeReason
                 case .some(.success), .none:
                     // No terminal raced (or a nil-error terminal, impossible for an
                     // un-installed stream): the write failed on cancellation or death.
-                    terminal =
-                        error is CancellationError
-                        ? .failure(.cancelled) : .failure(.connectionClosed)
+                    reason = error is CancellationError ? .cancelled : .connectionClosed
             }
             return self.failedStream(
-                methodName: methodName,
                 hasResponseStream: hasResponseStream,
                 hasRequestStream: hasRequestStream,
-                terminal: terminal
+                error: reason
             )
         }
 
@@ -838,24 +867,86 @@ public actor MMClientConnection {
             outbound: Outbound.self,
             response: Response.self
         )
-        let raced = self.calls.withLockedValue { $0.installStream(msgid: msgid, control: state) }
-        if let raced {
-            // A terminal (or a close) resolved before the control was installed:
-            // hand it to the state so `result()` sees it.
-            switch raced {
-                case .success(let slots):
-                    state.resolveTerminal(slots)
-                case .failure(let error):
-                    state.failTerminal(error)
-            }
-        }
+        // A terminal (or a close) that resolved before the control was
+        // installed is handed to the state so `result()` sees it.
+        self.calls.withLockedValue { $0.installStream(msgid: msgid, control: state) }?
+            .match(state.resolveTerminal, state.failTerminal)
         return state
+    }
+
+    /// The open-request send path every call shape shares: encode params,
+    /// reserve a msgid under the in-flight cap, build the envelope, enforce
+    /// the outbound frame cap *before* the pipeline (`MMFrameEncoder` would
+    /// throw at the handler seam, poisoning the encoder and tearing down the
+    /// whole connection — one oversized request must fail one call, locally),
+    /// and obtain the writer. Two phases: before the reservation a failure
+    /// needs no cleanup; after it, *every* failure must reclaim the msgid —
+    /// stated once, as the `tapError` on the composed second phase, so a new
+    /// failure site cannot forget it. Callers map the `MMCallError` into
+    /// their own failure shape.
+    private nonisolated func prepareRequestSend(
+        methodName: String,
+        entity: EntityName,
+        request: some Codable & Sendable
+    ) async -> Result<(msgid: UInt32, frame: ByteBuffer, writer: Writer), MMCallError> {
+        await MMPackEncoder().encode(request)
+            .mapError { MMCallError.encode($0) }
+            .flatMap { params in
+                self.calls.withLockedValue {
+                    $0.reserve(cap: self.configuration.maxInFlightCalls)
+                }
+                .map { msgid in (msgid: msgid, params: params) }
+            }
+            .flatMapAsync { msgid, params in
+                await self.frameAndWriter(
+                    msgid: msgid, methodName: methodName, entity: entity, params: params
+                )
+                .tapError { _ in
+                    _ = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
+                }
+            }
+    }
+
+    /// The post-reservation half of ``prepareRequestSend``: envelope encode,
+    /// the outbound size gate, and the writer wait. Owns no cleanup — the
+    /// caller reclaims the reservation on any failure.
+    private nonisolated func frameAndWriter(
+        msgid: UInt32,
+        methodName: String,
+        entity: EntityName,
+        params: ByteBuffer
+    ) async -> Result<(msgid: UInt32, frame: ByteBuffer, writer: Writer), MMCallError> {
+        await MMEnvelope.request(
+            msgid: msgid,
+            method: methodName,
+            entity: entity.rawValue,
+            params: params
+        )
+        .encoded()
+        .mapError { MMCallError.encode($0) }
+        .flatMap { frame in
+            frame.readableBytes <= Int(self.configuration.maxFrameLength)
+                ? .success(frame)
+                : .failure(
+                    .encode(
+                        .frameTooLarge(
+                            length: UInt32(clamping: frame.readableBytes),
+                            limit: self.configuration.maxFrameLength
+                        )
+                    )
+                )
+        }
+        .flatMapAsync { frame in
+            await self.awaitWriter().map { writer in (msgid: msgid, frame: frame, writer: writer) }
+        }
     }
 
     /// Builds a stream state wired to write its own lifecycle frames through the
     /// connection's outbound writer.
     private nonisolated func makeStreamState<
-        Inbound: Codable & Sendable, Outbound: Codable & Sendable, Response: Codable & Sendable
+        Inbound: Codable & Sendable,
+        Outbound: Codable & Sendable,
+        Response: Codable & Sendable
     >(
         msgid: UInt32,
         hasResponseStream: Bool,
@@ -905,18 +996,20 @@ public actor MMClientConnection {
         return state
     }
 
-    /// A stream state that never entered the CallTable, with its terminal
-    /// pre-failed to `terminal` and an empty (already finished) element sequence
-    /// — the uniform failure surface for a local pre-send failure (encode, cap,
-    /// connection closed). Server-side authorization failures never come through
-    /// here; they arrive as the normal terminal frame on an installed stream.
+    /// A stream state that never entered the CallTable, born with its
+    /// terminal already failed — the uniform handle for every local pre-send
+    /// failure (encode, cap, connection closed): `result()` reports the
+    /// error, the element sequence is empty (already finished). Server-side
+    /// authorization failures never come through here; they arrive as the
+    /// normal terminal frame on an installed stream.
     private nonisolated func failedStream<
-        Inbound: Codable & Sendable, Outbound: Codable & Sendable, Response: Codable & Sendable
+        Inbound: Codable & Sendable,
+        Outbound: Codable & Sendable,
+        Response: Codable & Sendable
     >(
-        methodName _: String,
         hasResponseStream: Bool,
         hasRequestStream: Bool,
-        terminal: Result<Response, MMCallError>
+        error: MMCallError
     ) -> ClientStreamState<Inbound, Outbound, Response> {
         // msgid 0 is only a log label here; the state is not in the table.
         let state = self.makeStreamState(
@@ -927,9 +1020,7 @@ public actor MMClientConnection {
             outbound: Outbound.self,
             response: Response.self
         )
-        if case .failure(let error) = terminal {
-            state.failTerminal(error)
-        }
+        state.failTerminal(error)
         return state
     }
 
@@ -1021,6 +1112,12 @@ public actor MMClientConnection {
             case .some(let other):
                 callFailure = .transport(description: String(describing: other))
         }
+        // A verdict that never got to run (closed before run(), or death mid
+        // discovery) fails so no awaiter parks forever; a verdict already
+        // resolved wins (the cell is first-resolution-wins).
+        self.verification.failure(
+            self.configuration.schema == nil ? .noExpectation : .failed(callFailure)
+        )
         let (pending, writerWaiters, streams) = self.calls.withLockedValue {
             $0.close(reason: callFailure)
         }
@@ -1078,16 +1175,4 @@ struct ClientMetrics: Sendable {
     let streamItemDecodeFailures = Counter(label: "mm_client_stream_item_decode_failures_total")
     let streamsOpened = Counter(label: "mm_client_streams_opened_total")
     let callRoundtrip = Metrics.Timer(label: "mm_client_call_roundtrip_ns")
-}
-
-extension Duration {
-    /// Whole nanoseconds, saturating at `Int64.max` — metrics plumbing only;
-    /// never used for scheduling.
-    var wholeNanoseconds: Int64 {
-        let (seconds, attoseconds) = self.components
-        let (scaled, overflow) = seconds.multipliedReportingOverflow(by: 1_000_000_000)
-        guard !overflow else { return .max }
-        let (total, overflowed) = scaled.addingReportingOverflow(attoseconds / 1_000_000_000)
-        return overflowed ? .max : total
-    }
 }

@@ -78,7 +78,7 @@ struct ExampleDaemon {
         // cross-check — a Journal method without a handler in the block is a
         // daemon-startup precondition failure, never a runtime unknown-method
         // surprise. The handlers themselves live in JournalHandlers.swift as
-        // a reusable group; the builtins (rpc.schema, entity.stat) register
+        // a reusable group; the builtins (server.schema, server.entity) register
         // automatically.
         let service = MMService {
             Configuration(endpoint: .unix(path: socketPath))
@@ -87,6 +87,12 @@ struct ExampleDaemon {
                     Entity("notes")
                     Entity("system", owner: 0, group: 0, mode: 0o700)
                 }
+                // The builtins' method-name prefixes: granting r-x here makes
+                // server.schema and server.entity visible in filtered discovery
+                // (discovery lists a method only when the peer can traverse
+                // its name-prefix entity — no record means fail-closed, so
+                // without these the builtins stay callable but undiscoverable).
+                Entity("server", owner: uid, group: gid, mode: 0o550)
             }
             Log(logger)
             // OnBind { address in ... } is available when you need to learn

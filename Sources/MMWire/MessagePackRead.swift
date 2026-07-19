@@ -19,7 +19,7 @@ public struct MMPackExtValue: Equatable, Sendable {
 extension ByteBuffer {
     /// Non-consuming peek at the next MessagePack format byte; `nil` if no bytes are readable.
     public func peekMessagePackFormat() -> UInt8? {
-        self.getInteger(at: self.readerIndex, as: UInt8.self)
+        self.peekInteger(as: UInt8.self)
     }
 
     /// Consumes a `nil` value.
@@ -185,12 +185,18 @@ extension ByteBuffer {
                     self.moveReaderIndex(to: start)
                     return .failure(.truncated)
                 }
-                guard mpIsValidUTF8(self.readableBytesView.prefix(length)) else {
+                // Single pass: SE-0405 validates strictly (overlongs,
+                // surrogates, > U+10FFFF all rejected) while building the
+                // string; nil leaves the bytes unconsumed.
+                guard
+                    let string = String(
+                        validating: self.readableBytesView.prefix(length), as: UTF8.self)
+                else {
                     self.moveReaderIndex(to: start)
                     return .failure(.invalidUTF8)
                 }
-                // Force-unwrap is safe: length was bounds-checked above.
-                return .success(self.readString(length: length)!)
+                self.moveReaderIndex(forwardBy: length)
+                return .success(string)
         }
     }
 
@@ -415,48 +421,20 @@ extension ByteBuffer {
     }
 }
 
-/// Strict UTF-8 validation (RFC 3629): rejects overlong encodings, surrogates,
-/// and code points above U+10FFFF.
-func mpIsValidUTF8(_ bytes: some Sequence<UInt8>) -> Bool {
-    var iterator = bytes.makeIterator()
-    func continuation(_ count: Int) -> Bool {
-        for _ in 0..<count {
-            guard let byte = iterator.next(), byte & 0xc0 == 0x80 else { return false }
-        }
-        return true
-    }
-    while let byte = iterator.next() {
-        switch byte {
-            case 0x00...0x7f:
-                continue
-            case 0xc2...0xdf:
-                guard continuation(1) else { return false }
-            case 0xe0:
-                guard let second = iterator.next(), (0xa0...0xbf).contains(second),
-                    continuation(1)
-                else { return false }
-            case 0xe1...0xec, 0xee...0xef:
-                guard continuation(2) else { return false }
-            case 0xed:
-                guard let second = iterator.next(), (0x80...0x9f).contains(second),
-                    continuation(1)
-                else { return false }
-            case 0xf0:
-                guard let second = iterator.next(), (0x90...0xbf).contains(second),
-                    continuation(2)
-                else { return false }
-            case 0xf1...0xf3:
-                guard let second = iterator.next(), (0x80...0xbf).contains(second),
-                    continuation(2)
-                else { return false }
-            case 0xf4:
-                guard let second = iterator.next(), (0x80...0x8f).contains(second),
-                    continuation(2)
-                else { return false }
-            default:
-                // 0x80...0xc1 (stray continuation / overlong lead), 0xf5...0xff.
-                return false
+extension ByteBuffer {
+    /// Measures one value's extent by structurally skipping a probe copy, then
+    /// consumes it as a zero-copy slice — the shared core of
+    /// `readMessagePackRawValueSlice(maxDepth:)` and the decoder's slot
+    /// extraction. Depth accounting is relative: `currentDepth` container
+    /// levels are already open; `cap` is the absolute limit.
+    mutating func sliceMessagePackValue(
+        currentDepth: Int, cap: Int
+    ) -> Result<ByteBuffer, MMWireError> {
+        var probe = self
+        return probe.skipMessagePackValue(currentDepth: currentDepth, cap: cap).map { _ in
+            // Force-unwrap is safe: the skip walked exactly this many
+            // readable bytes of self.
+            self.readSlice(length: probe.readerIndex - self.readerIndex)!
         }
     }
-    return true
 }

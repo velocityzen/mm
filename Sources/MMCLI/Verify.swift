@@ -9,8 +9,8 @@ import MMSchema
 /// This is the build-time-derived check — the right one for a CLI compiled
 /// from one namespace's contract. The hello fingerprint covers the server's
 /// *whole* method set (every namespace plus the builtins), so it can never be
-/// computed from one namespace at build time; pinning that whole-server value
-/// is what `--expect-fingerprint` is for.
+/// computed from one namespace at build time; proving that whole-server value
+/// is what an installed ``MMCLIServerContract`` completeness claim is for.
 ///
 /// Like `diff`: "in sync" goes to stderr and the command exits 0; any
 /// difference prints its buckets and exits 1.
@@ -18,12 +18,11 @@ public enum MMCLIVerify {
     public static func run(contract: SchemaDeclaration, options: MMCLIOptions) async throws {
         let verdict = try await MMCLIRunner.invoke(options) {
             client -> (inSync: Bool, description: String) in
-            let scope = try MMCLIFailure.entity(contract.namespace)
-            let response = try MMCLIFailure.unwrap(
-                await client.discoverSchema(scope: scope),
-                method: "rpc.schema", entity: contract.namespace)
-            let difference = SchemaDifference(local: contract, remote: response)
-            return (difference.isEmpty, "\(difference)")
+            let differences = try MMCLIFailure.unwrap(
+                await client.verifyContracts([contract]),
+                method: "server.schema", entity: contract.namespace)
+            guard let difference = differences.first else { return (true, "in sync") }
+            return (false, "\(difference)")
         }
         MMCLIOutput.note(verdict.description)
         if !verdict.inSync {

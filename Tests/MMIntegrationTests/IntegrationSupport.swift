@@ -1,8 +1,8 @@
-import Foundation  // Tests only: mkdtemp template under NSTemporaryDirectory().
 import Logging
 import MMClient
 import MMSchema
 import MMServer
+import MMTestSupport
 import MMWire
 import NIOConcurrencyHelpers
 import NIOCore
@@ -18,27 +18,8 @@ import Musl
 #endif
 
 // MARK: - Deterministic signalling (no sleeps)
-
-struct DeadlineExceeded: Error {}
-
-/// Bounds any await with a `ContinuousClock` deadline so a broken server hangs
-/// a test for at most `seconds`, never forever. The deadline branch is a
-/// bounded race, not a synchronization sleep.
-func withDeadline<T: Sendable>(
-    seconds: Double = 10,
-    _ body: @escaping @Sendable () async throws -> T
-) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask { try await body() }
-        group.addTask {
-            try await Task.sleep(for: .seconds(seconds), tolerance: nil, clock: ContinuousClock())
-            throw DeadlineExceeded()
-        }
-        guard let first = try await group.next() else { throw DeadlineExceeded() }
-        group.cancelAll()
-        return first
-    }
-}
+// Deadlines, temp sockets, the ServiceGroup and client run-loop choreography,
+// and the echo/envelope wire fixtures come from MMTestSupport.
 
 /// A one-shot, multi-waiter signal carrying a value. Fire-side is synchronous
 /// (callable from `onBind` and handler closures); wait-side suspends on a
@@ -124,34 +105,7 @@ final class Signal<Value: Sendable>: Sendable {
     }
 }
 
-// MARK: - Temp socket paths
-
-/// `mkdtemp(3)` under the system temp directory; the short "s" socket name
-/// keeps the full path well inside `sun_path`'s limit.
-func makeTempSocketPath() throws -> String {
-    var template = Array((NSTemporaryDirectory() + "mm-XXXXXX").utf8CString)
-    let directory = template.withUnsafeMutableBufferPointer { buffer -> String? in
-        guard mkdtemp(buffer.baseAddress!) != nil else { return nil }
-        return String(cString: buffer.baseAddress!)
-    }
-    guard let directory else {
-        throw MMServiceError.io(description: "mkdtemp failed, errno \(errno)")
-    }
-    return directory + "/s"
-}
-
-/// Scopes a fresh temp socket path to `body` and cleans up afterwards — the
-/// socket file (left behind on failure paths where the server never unlinked
-/// it) and the `mkdtemp` directory — pass or fail, so test runs leave no
-/// debris under the system temp directory.
-func withTempSocketPath<T>(_ body: (String) async throws -> T) async throws -> T {
-    let path = try makeTempSocketPath()
-    defer {
-        unlink(path)
-        rmdir(String(path.dropLast("/s".count)))
-    }
-    return try await body(path)
-}
+// MARK: - Dead socket files
 
 /// Creates a *dead* socket file: bound once by a socket that is closed without
 /// unlinking, exactly what a crashed server leaves behind.
@@ -193,24 +147,7 @@ func statMode(path: String) -> mode_t? {
 }
 
 // MARK: - Wire fixtures (request/response types and methods)
-
-struct EchoRequest: Codable, Hashable, Sendable {
-    var entity: EntityName
-    var value: Int
-
-    enum CodingKeys: Int, CodingKey {
-        case entity = 0
-        case value = 1
-    }
-}
-
-struct EchoResponse: Codable, Hashable, Sendable {
-    var value: Int
-
-    enum CodingKeys: Int, CodingKey {
-        case value = 0
-    }
-}
+// EchoRequest/EchoResponse come from MMTestSupport (shared with MMServerTests).
 
 struct TargetRequest: Codable, Hashable, Sendable {
     var entity: EntityName
@@ -366,10 +303,10 @@ struct StreamSummary: Codable, Hashable, Sendable {
     }
 }
 
-/// The exact error object `fail.run` returns: application code (>= 64) with a
+/// The exact `MMError` `fail.run` returns: application code (>= 64) with a
 /// MessagePack payload that must reach the caller verbatim.
-func applicationErrorObject() -> MMErrorObject {
-    MMErrorObject(
+func applicationErrorObject() -> MMError {
+    MMError(
         code: 64, message: "application failure", payload: encodedParams(EchoResponse(value: 13)))
 }
 
@@ -385,7 +322,7 @@ func entity(_ raw: String) -> EntityName {
 ///   bits deny — first-matching-class-wins proves denial for the very process
 ///   that owns the entity, even though group/other bits would grant.
 /// - `sealed` (0o600, no x) over `sealed.item` (0o777): traversal denial.
-/// - `echo` prefix (0o700, ours): `rpc.schema` shows `echo.run` to us, not to
+/// - `echo` prefix (0o700, ours): `server.schema` shows `echo.run` to us, not to
 ///   anonymous peers.
 /// - `hidden` prefix (owned by a different uid, 0o700): invisible to us.
 /// - `pub` prefix and `pub.thing` (foreign-owned, mode 0o001): other-class x,
@@ -696,44 +633,29 @@ func makeTestServer(
 }
 
 /// Boots the service in a `ServiceGroup`, waits (bounded) for the bind signal,
-/// runs `body`, then triggers graceful shutdown and joins. The whole group run
-/// is itself under a deadline so a shutdown bug cannot hang the test run.
+/// runs `body`, then triggers graceful shutdown and joins — the shared
+/// ``withServiceGroup(_:logger:ready:onBodyError:_:)`` choreography, plus the
+/// gate-opening failure hook this fixture needs.
 func withRunningServer<T: Sendable>(
     _ server: TestServer,
     _ body: (ServiceGroup) async throws -> T
 ) async throws -> T {
-    let group = ServiceGroup(
-        configuration: .init(
-            services: [.init(service: server.service)],
-            logger: Logger(label: "mm.test.group")
-        )
-    )
-    return try await withThrowingTaskGroup(of: Void.self) { tasks in
-        tasks.addTask {
-            try await withDeadline(seconds: 60) { try await group.run() }
-        }
-        let bound = server.bound
-        _ = try await withDeadline { try await bound.wait() }
-        let result: T
-        do {
-            result = try await body(group)
-        } catch {
+    let bound = server.bound
+    return try await withServiceGroup(
+        server.service,
+        ready: { _ = try await bound.wait() },
+        onBodyError: {
             // A failed body may have left slow.wait, burst.wait, or a gated
-            // follow handler parked; open every gate so the drain below can
-            // never hang on them. (Cancellation from shutdown also unblocks the
+            // follow handler parked; open every gate so the drain can never
+            // hang on them. (Cancellation from shutdown also unblocks the
             // gated waits — this is belt-and-suspenders for the non-cancellable
             // slow/burst gates.)
             server.slowGate.fire(())
             server.burstGate.fire(())
             server.followGate.fire(())
-            await group.triggerGracefulShutdown()
-            try? await tasks.waitForAll()
-            throw error
-        }
-        await group.triggerGracefulShutdown()
-        try await tasks.waitForAll()
-        return result
-    }
+        },
+        body
+    )
 }
 
 // MARK: - Raw NIO test client
@@ -791,7 +713,7 @@ final class WireSession {
 
     /// Reads envelopes until the response with `msgid` arrives, failing on
     /// stream end. Lets tests tolerate interleaved stream frames.
-    func response(msgid: UInt32) async throws -> (error: MMErrorObject?, result: ByteBuffer?) {
+    func response(msgid: UInt32) async throws -> (error: MMError?, result: ByteBuffer?) {
         while let envelope = try await self.nextEnvelope() {
             if case .response(msgid, let error, let result) = envelope {
                 return (error, result)
@@ -835,7 +757,7 @@ final class WireSession {
     /// Reads the next frame for `msgid`, requiring it to be a terminal
     /// response, and returns its error/result. A stream item or other frame in
     /// its place is an error.
-    func expectTerminal(msgid: UInt32) async throws -> (error: MMErrorObject?, result: ByteBuffer?)
+    func expectTerminal(msgid: UInt32) async throws -> (error: MMError?, result: ByteBuffer?)
     {
         let envelope = try await self.nextEnvelope(msgid: msgid)
         guard case .response(_, let error, let result) = envelope else {
@@ -990,11 +912,9 @@ func withConnectedClient<T: Sendable>(
         to: .unix(path: unixPath), configuration: configuration, body)
 }
 
-/// Connects a real `MMClientConnection` to `endpoint`, runs its inbound loop
-/// as a structured child, executes `body`, closes the connection, and joins
-/// the loop — the client-side twin of `withRunningServer`. The body and the
-/// loop join are deadline-bounded, so neither a broken client nor a broken
-/// server can hang a test.
+/// Connects a real `MMClientConnection` to `endpoint`, then hands off to the
+/// shared ``withClientRunLoop(connection:context:bodySeconds:joinSeconds:_:)``
+/// run/close/join choreography — the client-side twin of `withRunningServer`.
 func withConnectedClient<T: Sendable>(
     to endpoint: MMEndpoint,
     configuration: MMClientConfiguration = MMClientConfiguration(),
@@ -1005,49 +925,17 @@ func withConnectedClient<T: Sendable>(
         configuration: configuration,
         logger: quietClientLogger()
     ).get()
-    let runResult = NIOLockedValueBox<Result<Void, MMClientError>?>(nil)
-    return try await withThrowingTaskGroup(of: Void.self) { group in
-        group.addTask {
-            let result = await connection.run()
-            runResult.withLockedValue { $0 = result }
-        }
-        // A sibling deadline bounds the run() join: if the loop fails to
-        // observe the close, the group throws instead of hanging the test.
-        group.addTask {
-            try await Task.sleep(for: .seconds(30), tolerance: nil, clock: ContinuousClock())
-            throw DeadlineExceeded()
-        }
-        let result: T
-        do {
-            result = try await withDeadline(seconds: 20) { try await body(connection) }
-        } catch {
-            await connection.close()
-            group.cancelAll()
-            try? await group.waitForAll()
-            throw error
-        }
-        await connection.close()
-        _ = try await group.next()  // run() finished, or DeadlineExceeded
-        group.cancelAll()  // stop the deadline child
-        try? await group.waitForAll()  // its CancellationError is expected
-        guard let finished = runResult.withLockedValue({ $0 }) else {
-            throw DeadlineExceeded()
-        }
-        return (result, finished)
-    }
+    return try await withClientRunLoop(
+        connection: connection,
+        context: connection,
+        bodySeconds: 20,
+        joinSeconds: 30,
+        body
+    )
 }
 
 // MARK: - Envelope helpers
-
-func encodedParams<T: Encodable>(_ value: T) -> ByteBuffer {
-    try! MMPackEncoder().encode(value).get()
-}
-
-func request<T: Encodable>(
-    msgid: UInt32, method: String, entity: EntityName = .root, _ body: T
-) -> MMEnvelope {
-    .request(msgid: msgid, method: method, entity: entity.rawValue, params: encodedParams(body))
-}
+// encodedParams / request come from MMTestSupport.
 
 func decodeResult<T: Decodable>(_ type: T.Type, from buffer: ByteBuffer?) throws -> T {
     guard let buffer else { throw MMWireError.truncated }

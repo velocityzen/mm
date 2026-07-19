@@ -106,6 +106,9 @@ final class MPDecoderImplementation: Decoder {
         codingPath: [any CodingKey]
     ) throws -> T {
         if type == ByteBuffer.self {
+            // Guarded force cast: the == check above proves T is ByteBuffer;
+            // the type system cannot carry a metatype comparison into the
+            // generic (the standard Codable short-circuit idiom).
             return try buffer.readMessagePackBinary().get() as! T
         }
         let impl = MPDecoderImplementation(
@@ -199,13 +202,7 @@ final class MPDecoderImplementation: Decoder {
         valueDepth: Int,
         cap: Int
     ) throws -> ByteBuffer {
-        var probe = buffer
-        try probe.skipMessagePackValue(currentDepth: valueDepth, cap: cap).get()
-        let length = probe.readerIndex - buffer.readerIndex
-        guard let slice = buffer.readSlice(length: length) else {
-            throw MMWireError.truncated
-        }
-        return slice
+        try buffer.sliceMessagePackValue(currentDepth: valueDepth, cap: cap).get()
     }
 
     /// Walks the map once, recording a zero-copy value slice per key.
@@ -329,6 +326,7 @@ extension MPDecoderImplementation: SingleValueDecodingContainer {
 
     func decode<T: Decodable>(_ type: T.Type) throws -> T {
         if type == ByteBuffer.self {
+            // Guarded force cast — see decodeValue's short-circuit.
             return try self.buffer.readMessagePackBinary().get() as! T
         }
         return try T(from: self)
@@ -364,14 +362,11 @@ struct MPKeyedDecoding<Key: CodingKey>: KeyedDecodingContainerProtocol {
         key.intValue.map(String.init) ?? key.stringValue
     }
 
-    /// Mirrors the encoder's faithful-int-key rule: the int lookup is honored only
-    /// when `intValue` canonically represents the key — its decimal form equals
-    /// `stringValue`, or `stringValue` is not itself numeric (struct `CodingKeys`).
-    /// A dictionary key like "05" (whose `_DictionaryCodingKey.intValue` claims 5)
-    /// must never read the distinct int key 5's value.
+    /// The encoder's faithful-int-key rule, shared as ``mpFaithfulIntKey(_:)``:
+    /// a dictionary key like "05" (whose `_DictionaryCodingKey.intValue`
+    /// claims 5) must never read the distinct int key 5's value.
     private func slice(for key: Key) -> ByteBuffer? {
-        if let intKey = key.intValue,
-            String(intKey) == key.stringValue || Int(key.stringValue) == nil,
+        if let intKey = mpFaithfulIntKey(key),
             let found = self.index.intKeys[Int64(intKey)]
         {
             return found

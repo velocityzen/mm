@@ -1,5 +1,6 @@
 import Logging
 import MMSchema
+import MMTestSupport
 import MMWire
 import NIOConcurrencyHelpers
 import NIOCore
@@ -284,7 +285,7 @@ struct ClientIntegrationTests {
             try await withRunningServer(server) { _ in
                 // First connection: no expectation — fingerprintMatched is nil.
                 let (schema, _) = try await withConnectedClient(unixPath: path) { connection in
-                    #expect(connection.helloInfo.fingerprintMatched == nil)
+                    #expect(connection.server.fingerprintMatched == nil)
                     return try await connection.discoverSchema().get()
                 }
                 // Filtered by OUR traversal rights (see fixtureACLs); the
@@ -304,16 +305,20 @@ struct ClientIntegrationTests {
                 // Reconnect expecting the right fingerprint, then a wrong one.
                 _ = try await withConnectedClient(
                     unixPath: path,
-                    configuration: .init(expectedFingerprint: schema.fingerprint)
+                    configuration: .init(
+                        schema: MMClientSchema(
+                            contracts: [], serverFingerprint: schema.fingerprint))
                 ) { connection in
-                    #expect(connection.helloInfo.fingerprintMatched == true)
+                    #expect(connection.server.fingerprintMatched == true)
                 }
                 _ = try await withConnectedClient(
                     unixPath: path,
-                    configuration: .init(expectedFingerprint: schema.fingerprint &+ 1)
+                    configuration: .init(
+                        schema: MMClientSchema(
+                            contracts: [], serverFingerprint: schema.fingerprint &+ 1))
                 ) { connection in
-                    #expect(connection.helloInfo.fingerprintMatched == false)
-                    #expect(connection.helloInfo.serverFingerprint == schema.fingerprint)
+                    #expect(connection.server.fingerprintMatched == false)
+                    #expect(connection.server.fingerprint == schema.fingerprint)
                     // The mismatch triggers discovery; the diff pinpoints how
                     // this build's view skews from what the server serves.
                     let remote = try await connection.discoverSchema().get()

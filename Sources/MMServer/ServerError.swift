@@ -5,7 +5,7 @@ import MMWire
 /// leaked raw across the layer boundary.
 ///
 /// This is the error surface of the connection's outbound writer seam. It never
-/// travels on the wire — wire errors are `MMErrorObject` values.
+/// travels on the wire — wire errors are `MMError` values.
 public enum ServerError: Error, Sendable, Hashable {
     /// Encoding an outbound envelope failed. Wraps the wire error so callers
     /// can log the cause without re-deriving it.

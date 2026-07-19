@@ -1,6 +1,7 @@
 import ArgumentParser
 import MMClient
 import MMSchema
+import MMTestSupport
 import Testing
 
 @testable import MMCLI
@@ -216,12 +217,12 @@ struct GenericCommandTests {
             let schema = try await MMCLIRunner.invoke(options) { client in
                 try MMCLIFailure.unwrap(
                     await client.discoverSchema(scope: .root),
-                    method: "rpc.schema", entity: "")
+                    method: "server.schema", entity: "")
             }
             #expect(schema.fingerprint != 0)
             let names = schema.methods.map(\.name)
             #expect(names.contains("echo.run"))
-            #expect(names.contains("rpc.schema"))  // rpc prefix is traversable in the fixture
+            #expect(names.contains("server.schema"))  // rpc prefix is traversable in the fixture
             let follow = schema.methods.first(where: { $0.name == "box.follow" })
             #expect(follow?.responseStream != nil)
             #expect(follow?.requestStream == nil)
@@ -250,7 +251,7 @@ struct GenericCommandTests {
             let tree = try await MMCLIRunner.invoke(options) { client in
                 let schema = try MMCLIFailure.unwrap(
                     await client.discoverSchema(scope: .root),
-                    method: "rpc.schema", entity: "")
+                    method: "server.schema", entity: "")
                 guard let signature = schema.methods.first(where: { $0.name == "echo.run" })
                 else {
                     throw CLITestFailure(description: "echo.run not discovered")
@@ -284,7 +285,7 @@ struct GenericCommandTests {
             let tree = try await MMCLIRunner.invoke(options) { client in
                 let schema = try MMCLIFailure.unwrap(
                     await client.discoverSchema(scope: .root),
-                    method: "rpc.schema", entity: "")
+                    method: "server.schema", entity: "")
                 guard let signature = schema.methods.first(where: { $0.name == "echo.run" })
                 else {
                     throw CLITestFailure(description: "echo.run not discovered")

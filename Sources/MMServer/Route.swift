@@ -1,12 +1,13 @@
+import FP
 import MMSchema
 import MMWire
 import NIOCore
 
-/// Handlers return their domain failures as the wire error object directly
-/// (`Result<Response, MMErrorObject>`), so it needs `Error` in this module. MMWire
-/// deliberately does not conform it — there, the error object is wire *data*,
+/// Handlers return their domain failures as the wire `MMError` directly
+/// (`Result<Response, MMError>`), so it needs `Error` in this module. MMWire
+/// deliberately does not conform it — there, `MMError` is wire *data*,
 /// not a Swift error channel.
-extension MMErrorObject: Error {}
+extension MMError: Error {}
 
 /// What one erased handler invocation produced. Internal: the router maps
 /// these onto wire error codes and logs the internal cases.
@@ -14,7 +15,7 @@ enum RouteOutcome: Sendable {
     /// The handler succeeded; the payload is the encoded response value.
     case reply(ByteBuffer)
     /// The handler returned its typed failure; sent to the peer verbatim.
-    case handlerError(MMErrorObject)
+    case handlerError(MMError)
     /// The params slice failed to decode as the method's request type.
     /// Maps to `MMErrorCode.malformedParams`.
     case malformedParams(MMWireError)
@@ -54,7 +55,7 @@ public struct Route: Sendable {
     /// denies such requests with `permissionDenied` unless the route opted in
     /// via `Handle(method, acceptsRoot: true)`. Opting in is a declaration
     /// that the handler has documented tree-wide semantics and enforces its
-    /// own authorization (as the builtin `rpc.schema` does by filtering its
+    /// own authorization (as the builtin `server.schema` does by filtering its
     /// response by traversal rights).
     public let acceptsRoot: Bool
 
@@ -86,7 +87,7 @@ public struct Route: Sendable {
 /// `MMPackEncoder`. Decode failure maps to `malformedParams`; encode failure
 /// of the response maps to `internalError` (and is logged by the router).
 ///
-/// Handlers return `Result<Response, MMErrorObject>` — the wire error object
+/// Handlers return `Result<Response, MMError>` — the wire error
 /// directly, so a domain failure reaches the peer verbatim. Protocol codes
 /// 1–63 are reserved (`MMErrorCode`); application handlers use codes >= 64.
 ///
@@ -98,7 +99,7 @@ public struct Route: Sendable {
 public func Handle<Request: Codable & Sendable, Response: Codable & Sendable>(
     _ method: Method<Request, Response>,
     acceptsRoot: Bool = false,
-    _ body: @escaping @Sendable (Request, MMContext) async -> Result<Response, MMErrorObject>
+    _ body: @escaping @Sendable (Request, MMContext) async -> Result<Response, MMError>
 ) -> Route {
     Route(
         name: method.name,
@@ -106,55 +107,101 @@ public func Handle<Request: Codable & Sendable, Response: Codable & Sendable>(
         acceptsRoot: acceptsRoot,
         signatureThunk: { method.signature() },
         kind: .unary { params, context in
-            let request: Request
-            switch MMPackDecoder().decode(Request.self, from: params) {
-                case .failure(let error):
-                    return .malformedParams(error)
-                case .success(let decoded):
-                    request = decoded
-            }
-            switch await body(request, context) {
-                case .failure(let errorObject):
-                    return .handlerError(errorObject)
-                case .success(let response):
-                    switch MMPackEncoder().encode(response) {
-                        case .failure(let error):
-                            return .responseEncodingFailed(error)
-                        case .success(let buffer):
-                            return .reply(buffer)
-                    }
-            }
+            // Three stages, each folding its failure into the outcome that
+            // names it: decode → handler → encode.
+            await MMPackDecoder().decode(Request.self, from: params).matchAsync(
+                { request in
+                    await body(request, context).match(
+                        { response in
+                            MMPackEncoder().encode(response).match(
+                                { .reply($0) },
+                                { .responseEncodingFailed($0) }
+                            )
+                        },
+                        { .handlerError($0) }
+                    )
+                },
+                { .malformedParams($0) }
+            )
         }
     )
 }
 
 // MARK: - Stream handler registration
 
-/// Encodes a handler's terminal `Result<Response, MMErrorObject>` into a
+/// Encodes a handler's terminal `Result<Response, MMError>` into a
 /// ``StreamTerminal``. A response that fails to encode is a server-side
 /// programmer error, mapped to an internal-error terminal (the peer never sees
 /// the cause).
 private func streamTerminal<Response: Codable & Sendable>(
-    _ result: Result<Response, MMErrorObject>
+    _ result: Result<Response, MMError>
 ) -> StreamTerminal {
-    switch result {
-        case .failure(let errorObject):
-            return .failure(errorObject)
-        case .success(let response):
-            switch MMPackEncoder().encode(response) {
+    result.match(
+        { response in
+            MMPackEncoder().encode(response).match(
+                { .success($0) },
+                { _ in .failure(Router.error(.internalError)) }
+            )
+        },
+        { .failure($0) }
+    )
+}
+
+/// The construction every stream `Handle` shares: open-request decode (a
+/// malformed request abandons startup with `nil`; the router replies
+/// `malformedParams` itself) and the `Route` assembly. Each shape supplies
+/// only its startup — control wiring and run choreography.
+private func streamRoute<Request: Codable & Sendable>(
+    name: String,
+    access: AccessMode,
+    acceptsRoot: Bool,
+    signatureThunk: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
+    startup:
+        @escaping @Sendable (
+            Request, MMContext, UInt32, StreamWireSeams, MMStreamMetrics
+        ) -> StreamStartup
+) -> Route {
+    Route(
+        name: name,
+        access: access,
+        acceptsRoot: acceptsRoot,
+        signatureThunk: signatureThunk,
+        kind: .stream { params, context, msgid, seams, metrics in
+            switch MMPackDecoder().decode(Request.self, from: params) {
                 case .failure:
-                    return .failure(
-                        MMErrorObject(
-                            code: MMErrorCode.internalError.code, message: "internal error"))
-                case .success(let buffer):
-                    return .success(buffer)
+                    return nil
+                case .success(let request):
+                    return startup(request, context, msgid, seams, metrics)
             }
+        }
+    )
+}
+
+/// The run choreography shared by the two request-stream-carrying shapes:
+/// grant pump as a sibling task, the handler's terminal, finish the inbound
+/// sequence (which ends the pump), optionally end the response sink, join.
+private func runWithGrantPump<Element: Codable & Sendable>(
+    _ source: MMRequestStreamSource<Element>,
+    endSink: (@Sendable () -> Void)? = nil,
+    _ handler: @escaping @Sendable () async -> StreamTerminal
+) async -> StreamTerminal {
+    await withTaskGroup(of: Void.self) { group in
+        group.addTask { await source.runGrantPump() }
+        let terminal = await handler()
+        source.finishFromTerminal()
+        endSink?()
+        await group.waitForAll()
+        return terminal
     }
 }
 
 /// Builds a request-stream source and its typed sequence, wiring credit grants
-/// through `seams`. Shared by the client- and bidirectional-streaming `Handle`s.
+/// through `seams`. Shared by the client- and bidirectional-streaming
+/// `Handle`s. The element type parameter exists purely to pin `Element` —
+/// nothing else in the argument list mentions it (the house convention for
+/// return-type-only generics, as in `openStream(inbound:outbound:response:)`).
 private func makeRequestStream<Element: Codable & Sendable>(
+    of _: Element.Type,
     msgid: UInt32,
     seams: StreamWireSeams,
     metrics: MMStreamMetrics
@@ -189,36 +236,28 @@ public func Handle<
     acceptsRoot: Bool = false,
     _ body:
         @escaping @Sendable (Request, MMResponseSink<Element>, MMContext) async ->
-        Result<Response, MMErrorObject>
+        Result<Response, MMError>
 ) -> Route {
-    Route(
+    streamRoute(
         name: method.name,
         access: method.access,
         acceptsRoot: acceptsRoot,
-        signatureThunk: { method.signature() },
-        kind: .stream { params, context, msgid, seams, metrics in
-            let request: Request
-            switch MMPackDecoder().decode(Request.self, from: params) {
-                case .failure:
-                    return nil
-                case .success(let decoded):
-                    request = decoded
-            }
-            let sinkState = MMResponseSinkState(
-                msgid: msgid,
-                itemSink: seams.sendItem,
-                metrics: metrics
-            )
-            let control = ConcreteStreamControl<NeverElement, Element>(
-                requestSource: nil,
-                responseSink: sinkState
-            )
-            let sink = MMResponseSink<Element>(state: sinkState)
-            return StreamStartup(control: control) {
-                streamTerminal(await body(request, sink, context))
-            }
+        signatureThunk: { method.signature() }
+    ) { (request: Request, context, msgid, seams, metrics) in
+        let sinkState = MMResponseSinkState(
+            msgid: msgid,
+            itemSink: seams.sendItem,
+            metrics: metrics
+        )
+        let control = ConcreteStreamControl<NeverElement, Element>(
+            requestSource: nil,
+            responseSink: sinkState
+        )
+        let sink = MMResponseSink<Element>(state: sinkState)
+        return StreamStartup(control: control) {
+            streamTerminal(await body(request, sink, context))
         }
-    )
+    }
 }
 
 /// Binds a client-streaming handler: `(request, elements, context)`. The client streams
@@ -235,42 +274,31 @@ public func Handle<
     acceptsRoot: Bool = false,
     _ body:
         @escaping @Sendable (Request, MMRequestStream<Element>, MMContext) async ->
-        Result<Response, MMErrorObject>
+        Result<Response, MMError>
 ) -> Route {
-    Route(
+    streamRoute(
         name: method.name,
         access: method.access,
         acceptsRoot: acceptsRoot,
-        signatureThunk: { method.signature() },
-        kind: .stream { params, context, msgid, seams, metrics in
-            let request: Request
-            switch MMPackDecoder().decode(Request.self, from: params) {
-                case .failure:
-                    return nil
-                case .success(let decoded):
-                    request = decoded
-            }
-            let (source, stream) =
-                makeRequestStream(
-                    msgid: msgid, seams: seams, metrics: metrics
-                ) as (MMRequestStreamSource<Element>, MMRequestStream<Element>)
-            let control = ConcreteStreamControl<Element, NeverElement>(
-                requestSource: source,
-                responseSink: nil
-            )
-            return StreamStartup(control: control) {
-                await withTaskGroup(of: Void.self) { group in
-                    group.addTask { await source.runGrantPump() }
-                    let terminal = streamTerminal(await body(request, stream, context))
-                    // Handler returned: finish the inbound sequence and end the
-                    // grant nudge so the pump loop exits, then join.
-                    source.finishFromTerminal()
-                    await group.waitForAll()
-                    return terminal
-                }
+        signatureThunk: { method.signature() }
+    ) { (request: Request, context, msgid, seams, metrics) in
+        let (source, stream) = makeRequestStream(
+            of: Element.self,
+            msgid: msgid,
+            seams: seams,
+            metrics: metrics
+        )
+
+        let control = ConcreteStreamControl<Element, NeverElement>(
+            requestSource: source,
+            responseSink: nil
+        )
+        return StreamStartup(control: control) {
+            await runWithGrantPump(source) {
+                streamTerminal(await body(request, stream, context))
             }
         }
-    )
+    }
 }
 
 /// Binds a bidirectional-streaming handler: `(request, elements, sink, context)`. The client
@@ -288,47 +316,38 @@ public func Handle<
     _ body:
         @escaping @Sendable (
             Request, MMRequestStream<RequestElement>, MMResponseSink<ResponseElement>, MMContext
-        ) async -> Result<Response, MMErrorObject>
+        ) async -> Result<Response, MMError>
 ) -> Route {
-    Route(
+    streamRoute(
         name: method.name,
         access: method.access,
         acceptsRoot: acceptsRoot,
-        signatureThunk: { method.signature() },
-        kind: .stream { params, context, msgid, seams, metrics in
-            let request: Request
-            switch MMPackDecoder().decode(Request.self, from: params) {
-                case .failure:
-                    return nil
-                case .success(let decoded):
-                    request = decoded
-            }
-            let (source, stream) =
-                makeRequestStream(
-                    msgid: msgid, seams: seams, metrics: metrics
-                ) as (MMRequestStreamSource<RequestElement>, MMRequestStream<RequestElement>)
-            let sinkState = MMResponseSinkState(
-                msgid: msgid,
-                itemSink: seams.sendItem,
-                metrics: metrics
-            )
-            let control = ConcreteStreamControl<RequestElement, ResponseElement>(
-                requestSource: source,
-                responseSink: sinkState
-            )
-            let sink = MMResponseSink<ResponseElement>(state: sinkState)
-            return StreamStartup(control: control) {
-                await withTaskGroup(of: Void.self) { group in
-                    group.addTask { await source.runGrantPump() }
-                    let terminal = streamTerminal(await body(request, stream, sink, context))
-                    source.finishFromTerminal()
-                    sinkState.end()
-                    await group.waitForAll()
-                    return terminal
-                }
+        signatureThunk: { method.signature() }
+    ) { (request: Request, context, msgid, seams, metrics) in
+        let (source, stream) = makeRequestStream(
+            of: RequestElement.self,
+            msgid: msgid,
+            seams: seams,
+            metrics: metrics
+        )
+
+        let sinkState = MMResponseSinkState(
+            msgid: msgid,
+            itemSink: seams.sendItem,
+            metrics: metrics
+        )
+
+        let control = ConcreteStreamControl<RequestElement, ResponseElement>(
+            requestSource: source,
+            responseSink: sinkState
+        )
+        let sink = MMResponseSink<ResponseElement>(state: sinkState)
+        return StreamStartup(control: control) {
+            await runWithGrantPump(source, endSink: { sinkState.end() }) {
+                streamTerminal(await body(request, stream, sink, context))
             }
         }
-    )
+    }
 }
 
 /// A `Codable & Sendable` placeholder for the absent element direction of a

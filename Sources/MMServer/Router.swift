@@ -1,7 +1,7 @@
+import FP
 import Logging
 import MMSchema
 import MMWire
-import Metrics
 import NIOCore
 
 /// The message router: route table, authorization, and dispatch.
@@ -40,20 +40,20 @@ import NIOCore
 /// envelopes are **denied with `permissionDenied` by default**. Only routes
 /// registered with `Handle(method, acceptsRoot: true)` accept them: methods
 /// with documented tree-wide semantics whose handlers enforce their own
-/// authorization. The builtin `rpc.schema` opts in (its response is filtered
-/// by per-method traversal rights); `entity.stat` does not (root carries no
+/// authorization. The builtin `server.schema` opts in (its response is filtered
+/// by per-method traversal rights); `server.entity` does not (root carries no
 /// ACL to report, so a root stat is denied like any absent record).
 public struct Router: Sendable {
     /// `SchemaFingerprint.compute` over **all** registered signatures and
     /// type definitions, memoized at init. This is the hello-preamble
     /// fingerprint.
     public let fingerprint: UInt64
-    /// Every registered method's signature, sorted by name. `rpc.schema`
+    /// Every registered method's signature, sorted by name. `server.schema`
     /// serves a per-peer filtered subset of this list.
     public let signatures: [MethodSignature]
     /// Every registered named-type definition, sorted by name — the union of
     /// the declared namespaces' tables and the shared `Types` containers.
-    /// `rpc.schema` serves the subset transitively reachable from a peer's
+    /// `server.schema` serves the subset transitively reachable from a peer's
     /// visible methods.
     public let types: [TypeDefinition]
 
@@ -61,10 +61,7 @@ public struct Router: Sendable {
     private let aclProvider: any EntityACLProvider
     private let logger: Logger
     private let decoder: MMPackDecoder
-    private let authorizationDenials: Counter
-    private let inboundResponsesDropped: Counter
-    private let streamFramesDropped: Counter
-    private let dispatchTimer: Timer
+    private let metrics: RouterMetrics
 
     /// Builds the route table and runs all startup cross-checks.
     ///
@@ -82,7 +79,7 @@ public struct Router: Sendable {
     ///   - logger: Structured logger; messages are constant, variables ride in
     ///     metadata.
     ///   - registerBuiltins: When true, wires the `Builtins` namespace —
-    ///     `rpc.schema` (traversal-filtered discovery) and `entity.stat` — and
+    ///     `server.schema` (traversal-filtered discovery) and `server.entity` — and
     ///     includes it in the cross-checks. The server (part B) passes true;
     ///     it defaults to false so router-only tests stay minimal.
     ///   - routes: The application's routes, built with `Handle`.
@@ -103,154 +100,47 @@ public struct Router: Sendable {
         registerBuiltins: Bool = false,
         @RouterBuilder routes: () -> [Route]
     ) {
+        // The boot-validation pipeline, one named step per invariant; every
+        // step fails the daemon boot, never the first call.
         let applicationRoutes = routes()
-
-        var names = applicationRoutes.map(\.name)
-        if registerBuiltins {
-            names.append(contentsOf: Builtins.all.map(\.name))
-        }
-        var seenNames = Set<String>()
-        for name in names {
-            precondition(
-                seenNames.insert(name).inserted,
-                "Router: duplicate route registered for method '\(name)'"
-            )
+        let builtinDescriptors = registerBuiltins ? Builtins.all : []
+        let names = applicationRoutes.map(\.name) + builtinDescriptors.map(\.name)
+        if let duplicate = firstDuplicate(names) {
+            preconditionFailure("Router: duplicate route registered for method '\(duplicate)'")
         }
 
-        // The nominal type table: definitions from every declared namespace
-        // plus the shared containers. Names must be unique, and every
-        // reference in the registered schemas (and in the definitions
-        // themselves) must resolve — a dangling name would surface as an
-        // unresolvable discovery response on some peer, so it fails the boot.
-        var typeTable: [TypeDefinition] = []
-        for namespace in namespaces {
-            typeTable.append(contentsOf: namespace.types)
-        }
-        for container in sharedTypes {
-            typeTable.append(contentsOf: container.types)
-        }
-        var typesByName: [String: TypeDefinition] = [:]
-        for definition in typeTable {
-            precondition(
-                typesByName.updateValue(definition, forKey: definition.name) == nil,
-                "Router: duplicate type definition '\(definition.name)'"
-            )
-        }
+        let (types, typesByName) = Self.assembleTypeTable(
+            namespaces: namespaces,
+            sharedTypes: sharedTypes
+        )
+        let signatures = Self.probeSignatures(
+            routes: applicationRoutes,
+            builtins: builtinDescriptors
+        )
+        Self.requireResolvedReferences(signatures: signatures, types: types, in: typesByName)
 
-        // Probe every signature at startup: an unprobeable type fails the
-        // daemon boot, not the first call, and the fingerprint needs them all.
-        var namedResults: [(name: String, result: Result<MethodSignature, SchemaError>)] =
-            applicationRoutes.map { ($0.name, $0.signatureThunk()) }
-        if registerBuiltins {
-            namedResults.append(contentsOf: Builtins.all.map { ($0.name, $0.signature()) })
-        }
-        var signatures: [MethodSignature] = []
-        signatures.reserveCapacity(namedResults.count)
-        for entry in namedResults {
-            switch entry.result {
-                case .success(let signature):
-                    signatures.append(signature)
-                case .failure(let error):
-                    preconditionFailure(
-                        "Router: schema probe failed for method '\(entry.name)': \(error)"
-                    )
-            }
-        }
-        signatures.sort { $0.name < $1.name }
-
-        var referencedNames: Set<String> = []
-        for signature in signatures {
-            signature.collectReferencedTypeNames(into: &referencedNames)
-        }
-        for definition in typeTable {
-            definition.schema.collectReferencedTypeNames(into: &referencedNames)
-        }
-        for name in referencedNames.sorted() {
-            precondition(
-                typesByName[name] != nil,
-                """
-                Router: unresolved type reference '\(name)' — no declared namespace or shared \
-                Types container defines it
-                """
-            )
-        }
-        let types = typeTable.sorted { $0.name < $1.name }
         let fingerprint = SchemaFingerprint.compute(signatures, types: types)
-
-        // Each method's namespace prefix as an entity, for rpc.schema
-        // filtering: "journal.append" → "journal"; a single-segment name → root.
-        var prefixByName: [String: EntityName] = [:]
-        for name in names {
-            switch EntityName.parse(Self.methodNamePrefix(of: name)) {
-                case .success(let prefix):
-                    prefixByName[name] = prefix
-                case .failure(let error):
-                    preconditionFailure(
-                        "Router: method name '\(name)' has an invalid namespace prefix: \(error)"
-                    )
-            }
-        }
-
-        var allRoutes = applicationRoutes
-        if registerBuiltins {
-            allRoutes.append(
-                // acceptsRoot: discovery scoped to root is the method's
-                // documented tree-wide semantics; the handler filters its
-                // response by per-method traversal rights.
-                Handle(Builtins.schema, acceptsRoot: true) {
-                    [signatures, prefixByName, types] _, context in
-                    await Self.filteredSchema(
-                        scope: context.entity,
-                        peer: context.peer,
-                        signatures: signatures,
-                        prefixByName: prefixByName,
-                        types: types,
-                        fingerprint: fingerprint,
-                        provider: aclProvider,
-                        logger: logger
-                    )
-                }
-            )
-            allRoutes.append(
-                Handle(Builtins.stat) { _, context in
-                    await Self.stat(entity: context.entity, provider: aclProvider, logger: logger)
-                }
-            )
-        }
-        var routesByName: [String: Route] = [:]
-        routesByName.reserveCapacity(allRoutes.count)
-        for route in allRoutes {
-            routesByName[route.name] = route
-        }
-
-        var declaredNamespaces = namespaces
-        if registerBuiltins {
-            declaredNamespaces.append(Builtins.self)
-        }
-        for namespace in declaredNamespaces {
-            let descriptors = namespace.all
-            let namespaceNames = Set(descriptors.map(\.name))
-            for descriptor in descriptors {
-                precondition(
-                    routesByName[descriptor.name] != nil,
-                    """
-                    Router: unbound descriptor '\(descriptor.name)' — listed in \
-                    \(namespace).all but no route registered
-                    """
+        let prefixByName = Self.prefixTable(names: names)
+        let allRoutes =
+            applicationRoutes
+            + (registerBuiltins
+                ? Self.builtinRoutes(
+                    signatures: signatures,
+                    prefixByName: prefixByName,
+                    types: types,
+                    typesByName: typesByName,
+                    fingerprint: fingerprint,
+                    aclProvider: aclProvider,
+                    logger: logger
                 )
-            }
-            let ownedPrefixes = Set(descriptors.map { Self.methodNamePrefix(of: $0.name) })
-            for name in routesByName.keys
-            where ownedPrefixes.contains(Self.methodNamePrefix(of: name)) {
-                precondition(
-                    namespaceNames.contains(name),
-                    """
-                    Router: route '\(name)' is under a method-name prefix owned by \
-                    \(namespace) but missing from its `all` list
-                    """
-                )
-            }
-        }
+                : [])
+
+        // Unique by the name check above.
+        let routesByName = Dictionary(uniqueKeysWithValues: allRoutes.map { ($0.name, $0) })
+        Self.requireNamespaceOwnership(
+            of: namespaces + (registerBuiltins ? [Builtins.self] : []),
+            over: routesByName
+        )
 
         self.fingerprint = fingerprint
         self.signatures = signatures
@@ -259,10 +149,159 @@ public struct Router: Sendable {
         self.aclProvider = aclProvider
         self.logger = logger
         self.decoder = MMPackDecoder()
-        self.authorizationDenials = Counter(label: "mm_server_auth_denials_total")
-        self.inboundResponsesDropped = Counter(label: "mm_server_inbound_responses_dropped_total")
-        self.streamFramesDropped = Counter(label: "mm_server_stream_frames_dropped_total")
-        self.dispatchTimer = Timer(label: "mm_server_dispatch_duration_ns")
+        self.metrics = RouterMetrics()
+    }
+
+    // MARK: - Boot-validation steps
+
+    /// The nominal type table: definitions from every declared namespace plus
+    /// the shared containers, sorted by name, with a by-name index. Duplicate
+    /// names fail the boot.
+    private static func assembleTypeTable(
+        namespaces: [any MethodNamespace.Type],
+        sharedTypes: [any TypeNamespace.Type]
+    ) -> (types: [TypeDefinition], typesByName: [String: TypeDefinition]) {
+        let typeTable = namespaces.flatMap { $0.types } + sharedTypes.flatMap { $0.types }
+        if let duplicate = firstDuplicate(typeTable.map(\.name)) {
+            preconditionFailure("Router: duplicate type definition '\(duplicate)'")
+        }
+        return (
+            types: typeTable.sorted { $0.name < $1.name },
+            typesByName: Dictionary(uniqueKeysWithValues: typeTable.map { ($0.name, $0) })
+        )
+    }
+
+    /// Probes every signature at startup: an unprobeable type fails the
+    /// daemon boot, not the first call, and the fingerprint needs them all.
+    private static func probeSignatures(
+        routes: [Route],
+        builtins: [AnyMethod]
+    ) -> [MethodSignature] {
+        let named =
+            routes.map { ($0.name, $0.signatureThunk()) }
+            + builtins.map { ($0.name, $0.signature()) }
+
+        return
+            named
+            .map { name, probed in
+                probed.getOrElse { error in
+                    preconditionFailure(
+                        "Router: schema probe failed for method '\(name)': \(error)"
+                    )
+                }
+            }
+            .sorted { $0.name < $1.name }
+    }
+
+    /// Every reference in the registered schemas (and in the definitions
+    /// themselves) must resolve — a dangling name would surface as an
+    /// unresolvable discovery response on some peer, so it fails the boot.
+    private static func requireResolvedReferences(
+        signatures: [MethodSignature],
+        types: [TypeDefinition],
+        in typesByName: [String: TypeDefinition]
+    ) {
+        let referenced = types.reduce(
+            into: signatures.reduce(into: Set<String>()) { collected, signature in
+                signature.collectReferencedTypeNames(into: &collected)
+            }
+        ) { collected, definition in
+            definition.schema.collectReferencedTypeNames(into: &collected)
+        }
+
+        if let unresolved = referenced.sorted().first(where: { typesByName[$0] == nil }) {
+            preconditionFailure(
+                """
+                Router: unresolved type reference '\(unresolved)' — no declared namespace or \
+                shared Types container defines it
+                """
+            )
+        }
+    }
+
+    /// Each method's namespace prefix as an entity, for `server.schema`
+    /// filtering: "journal.append" → "journal"; a single-segment name → root.
+    private static func prefixTable(names: [String]) -> [String: EntityName] {
+        Dictionary(
+            uniqueKeysWithValues: names.map { name in
+                (
+                    name,
+                    EntityName.parse(Self.methodNamePrefix(of: name)).getOrElse { error in
+                        preconditionFailure(
+                            "Router: method name '\(name)' has an invalid namespace prefix: \(error)"
+                        )
+                    }
+                )
+            }
+        )
+    }
+
+    /// The two builtin routes, closing over the validated tables so the
+    /// handlers never rebuild what init already proved (`typesByName` rides
+    /// the capture for the reachability filter).
+    private static func builtinRoutes(
+        signatures: [MethodSignature],
+        prefixByName: [String: EntityName],
+        types: [TypeDefinition],
+        typesByName: [String: TypeDefinition],
+        fingerprint: UInt64,
+        aclProvider: any EntityACLProvider,
+        logger: Logger
+    ) -> [Route] {
+        [
+            // acceptsRoot: discovery scoped to root is the method's
+            // documented tree-wide semantics; the handler filters its
+            // response by per-method traversal rights.
+            Handle(Builtins.schema, acceptsRoot: true) { _, context in
+                await Self.filteredSchema(
+                    scope: context.entity,
+                    peer: context.peer,
+                    signatures: signatures,
+                    prefixByName: prefixByName,
+                    types: types,
+                    typesByName: typesByName,
+                    fingerprint: fingerprint,
+                    provider: aclProvider,
+                    logger: logger
+                )
+            },
+            Handle(Builtins.entity) { _, context in
+                await Self.stat(entity: context.entity, provider: aclProvider, logger: logger)
+            },
+        ]
+    }
+
+    /// Namespace cross-check: every descriptor a namespace lists is bound to
+    /// a route, and every route under a namespace-owned method-name prefix is
+    /// listed by that namespace.
+    private static func requireNamespaceOwnership(
+        of namespaces: [any MethodNamespace.Type],
+        over routesByName: [String: Route]
+    ) {
+        for namespace in namespaces {
+            let descriptors = namespace.all
+            if let unbound = descriptors.first(where: { routesByName[$0.name] == nil }) {
+                preconditionFailure(
+                    """
+                    Router: unbound descriptor '\(unbound.name)' — listed in \
+                    \(namespace).all but no route registered
+                    """
+                )
+            }
+            let namespaceNames = Set(descriptors.map(\.name))
+            let ownedPrefixes = Set(descriptors.map { Self.methodNamePrefix(of: $0.name) })
+            if let orphan = routesByName.keys.first(where: { name in
+                ownedPrefixes.contains(Self.methodNamePrefix(of: name))
+                    && !namespaceNames.contains(name)
+            }) {
+                preconditionFailure(
+                    """
+                    Router: route '\(orphan)' is under a method-name prefix owned by \
+                    \(namespace) but missing from its `all` list
+                    """
+                )
+            }
+        }
     }
 
     // MARK: - Stream classification
@@ -301,7 +340,7 @@ public struct Router: Sendable {
                 // A peer protocol error, but a peer-controlled per-frame event:
                 // logged at debug (warning would let a hostile client force a
                 // log line per frame at line rate) and counted for operators.
-                self.inboundResponsesDropped.increment()
+                self.metrics.inboundResponsesDropped.increment()
                 self.logger.debug(
                     "inbound response dropped",
                     metadata: [
@@ -322,18 +361,21 @@ public struct Router: Sendable {
                     )
                     return .response(
                         msgid: msgid,
-                        error: Self.errorObject(.unknownMethod),
+                        error: Self.error(.unknownMethod),
                         result: nil
                     )
                 }
-                switch await self.authorizeAndInvoke(
-                    route: route, entity: entity, params: params, context: context, method: method
-                ) {
-                    case .success(let result):
-                        return .response(msgid: msgid, error: nil, result: result)
-                    case .failure(let errorObject):
-                        return .response(msgid: msgid, error: errorObject, result: nil)
-                }
+                return await self.authorizeAndInvoke(
+                    route: route,
+                    entity: entity,
+                    params: params,
+                    context: context,
+                    method: method
+                )
+                .match(
+                    { result in .response(msgid: msgid, error: nil, result: result) },
+                    { error in .response(msgid: msgid, error: error, result: nil) }
+                )
 
             case .credit(let msgid, _), .item(let msgid, _, _), .end(let msgid),
                 .stop(let msgid, _), .cancel(let msgid):
@@ -343,7 +385,7 @@ public struct Router: Sendable {
                 // connection — a unit test, or a broken/premature peer.
                 // Tolerate-and-drop, never fatal — log at debug, count, keep the
                 // connection alive.
-                self.streamFramesDropped.increment()
+                self.metrics.streamFramesDropped.increment()
                 self.logger.debug(
                     "stream frame dropped",
                     metadata: [
@@ -361,18 +403,17 @@ public struct Router: Sendable {
     /// always runs on the open envelope's entity slot, never on any payload
     /// byte (the params slice is not interpreted before this passes). Returns
     /// the parsed target when the peer is authorized for the route's access on
-    /// it (and `.execute` on every ancestor), or the wire error object to
+    /// it (and `.execute` on every ancestor), or the wire `MMError` to
     /// answer with.
     func authorize(
         route: Route,
         entity entityPath: String,
         context: MMContext,
         method: String
-    ) async -> Result<EntityName, MMErrorObject> {
+    ) async -> Result<EntityName, MMError> {
         // (3) Parse the envelope's entity slot; params stay untouched.
-        let entity: EntityName
-        switch EntityName.parse(entityPath) {
-            case .failure(let error):
+        await EntityName.parse(entityPath)
+            .tapError { error in
                 self.logger.debug(
                     "target entity invalid",
                     metadata: [
@@ -381,48 +422,50 @@ public struct Router: Sendable {
                         "error": "\(error)",
                     ]
                 )
-                return .failure(Self.errorObject(.malformedParams))
-            case .success(let target):
-                entity = target
-        }
-
-        // Root targets: root has no ancestors and carries no ACL, so nothing
-        // below would gate the dispatch — deny unless the route opted in via
-        // `acceptsRoot` (see the type documentation).
-        if entity.isRoot && !route.acceptsRoot {
-            self.authorizationDenials.increment()
-            self.logger.debug(
-                "authorization denied",
-                metadata: [
-                    "connection": "\(context.connectionID)",
-                    "method": "\(method)",
-                    "entity": "\(entity)",
-                    "reason": "root_target",
-                ]
-            )
-            return .failure(Self.errorObject(.permissionDenied))
-        }
-
-        // (4) Traversal: x on every ancestor prefix, outermost first.
-        for ancestor in entity.ancestors {
-            if case .failure(let errorObject) = await self.requireAccess(
-                .execute, on: ancestor, context: context, method: method
-            ) {
-                return .failure(errorObject)
             }
-        }
+            .mapError { _ in Self.error(.malformedParams) }
+            .flatMapAsync { entity in
+                // Root targets: root has no ancestors and carries no ACL, so
+                // nothing below would gate the dispatch — deny unless the
+                // route opted in via `acceptsRoot` (see the type docs).
+                if entity.isRoot && !route.acceptsRoot {
+                    return .failure(
+                        self.authorizationDenied(
+                            method: method,
+                            entity: entity,
+                            reason: "root_target",
+                            context: context
+                        )
+                    )
+                }
 
-        // (5) Target check. Root is "the whole tree" and carries no ACL, so
-        // there is nothing to check here — root only reaches this point on an
-        // opted-in route (see the root gate above).
-        if !entity.isRoot {
-            if case .failure(let errorObject) = await self.requireAccess(
-                route.access, on: entity, context: context, method: method
-            ) {
-                return .failure(errorObject)
+                // (4) Traversal: x on every ancestor prefix, outermost first.
+                for ancestor in entity.ancestors {
+                    if case .failure(let error) = await self.requireAccess(
+                        .execute,
+                        on: ancestor,
+                        context: context,
+                        method: method
+                    ) {
+                        return .failure(error)
+                    }
+                }
+
+                // (5) Target check. Root is "the whole tree" and carries no
+                // ACL, so there is nothing to check here — root only reaches
+                // this point on an opted-in route (see the root gate above).
+                if !entity.isRoot {
+                    if case .failure(let error) = await self.requireAccess(
+                        route.access,
+                        on: entity,
+                        context: context,
+                        method: method
+                    ) {
+                        return .failure(error)
+                    }
+                }
+                return .success(entity)
             }
-        }
-        return .success(entity)
     }
 
     /// Steps 3–6 of the dispatch order for unary calls: authorization
@@ -436,16 +479,31 @@ public struct Router: Sendable {
         params: ByteBuffer,
         context baseContext: MMContext,
         method: String
-    ) async -> Result<ByteBuffer, MMErrorObject> {
-        let context: MMContext
-        switch await self.authorize(
-            route: route, entity: entity, context: baseContext, method: method
-        ) {
-            case .failure(let errorObject):
-                return .failure(errorObject)
-            case .success(let target):
-                context = baseContext.scoped(to: target)
+    ) async -> Result<ByteBuffer, MMError> {
+        return await self.authorize(
+            route: route,
+            entity: entity,
+            context: baseContext,
+            method: method
+        )
+        .flatMapAsync { target in
+            await self.invoke(
+                route: route,
+                context: baseContext.scoped(to: target),
+                method: method,
+                params: params
+            )
         }
+    }
+
+    /// Step 6: the typed handler, with the context already scoped to the
+    /// authorized target.
+    private func invoke(
+        route: Route,
+        context: MMContext,
+        method: String,
+        params: ByteBuffer
+    ) async -> Result<ByteBuffer, MMError> {
         guard let handler = route.handler else {
             // Unreachable: the connection routes stream opens away from
             // dispatch, so only unary routes arrive here.
@@ -453,15 +511,15 @@ public struct Router: Sendable {
                 "stream route reached unary dispatch",
                 metadata: ["connection": "\(context.connectionID)", "method": "\(method)"]
             )
-            return .failure(Self.errorObject(.internalError))
+            return .failure(Self.error(.internalError))
         }
 
         // (6) Full params decode + typed handler, only after authorization.
         switch await handler(params, context) {
             case .reply(let buffer):
                 return .success(buffer)
-            case .handlerError(let errorObject):
-                return .failure(errorObject)
+            case .handlerError(let error):
+                return .failure(error)
             case .malformedParams(let error):
                 self.logger.debug(
                     "params decode failed",
@@ -471,7 +529,7 @@ public struct Router: Sendable {
                         "error": "\(error)",
                     ]
                 )
-                return .failure(Self.errorObject(.malformedParams))
+                return .failure(Self.error(.malformedParams))
             case .responseEncodingFailed(let error):
                 self.logger.error(
                     "response encoding failed",
@@ -481,7 +539,7 @@ public struct Router: Sendable {
                         "error": "\(error)",
                     ]
                 )
-                return .failure(Self.errorObject(.internalError))
+                return .failure(Self.error(.internalError))
         }
     }
 
@@ -493,44 +551,37 @@ public struct Router: Sendable {
         on entity: EntityName,
         context: MMContext,
         method: String
-    ) async -> Result<Void, MMErrorObject> {
+    ) async -> Result<Void, MMError> {
         switch await self.aclProvider.acl(for: entity) {
             case .failure(let error):
-                self.logger.error(
-                    "acl provider failed",
-                    metadata: [
-                        "connection": "\(context.connectionID)",
-                        "method": "\(method)",
-                        "entity": "\(entity)",
-                        "error": "\(error.description)",
-                    ]
+                return .failure(
+                    Self.aclProviderFailed(
+                        error,
+                        method: method,
+                        entity: entity,
+                        connection: "\(context.connectionID)",
+                        logger: self.logger
+                    )
                 )
-                return .failure(Self.errorObject(.internalError))
             case .success(.none):
-                self.authorizationDenials.increment()
-                self.logger.debug(
-                    "authorization denied",
-                    metadata: [
-                        "connection": "\(context.connectionID)",
-                        "method": "\(method)",
-                        "entity": "\(entity)",
-                        "reason": "no_acl",
-                    ]
+                return .failure(
+                    self.authorizationDenied(
+                        method: method,
+                        entity: entity,
+                        reason: "no_acl",
+                        context: context
+                    )
                 )
-                return .failure(Self.errorObject(.permissionDenied))
             case .success(.some(let acl)):
                 guard acl.permitted(for: context.peer, required) else {
-                    self.authorizationDenials.increment()
-                    self.logger.debug(
-                        "authorization denied",
-                        metadata: [
-                            "connection": "\(context.connectionID)",
-                            "method": "\(method)",
-                            "entity": "\(entity)",
-                            "reason": "mode",
-                        ]
+                    return .failure(
+                        self.authorizationDenied(
+                            method: method,
+                            entity: entity,
+                            reason: "mode",
+                            context: context
+                        )
                     )
-                    return .failure(Self.errorObject(.permissionDenied))
                 }
                 return .success(())
         }
@@ -538,7 +589,7 @@ public struct Router: Sendable {
 
     // MARK: - Builtin handlers
 
-    /// `rpc.schema`: discovery filtered by traversal rights.
+    /// `server.schema`: discovery filtered by traversal rights.
     ///
     /// ## Filtering rule (fixed)
     ///
@@ -562,10 +613,11 @@ public struct Router: Sendable {
         signatures: [MethodSignature],
         prefixByName: [String: EntityName],
         types: [TypeDefinition],
+        typesByName: [String: TypeDefinition],
         fingerprint: UInt64,
         provider: any EntityACLProvider,
         logger: Logger
-    ) async -> Result<SchemaResponse, MMErrorObject> {
+    ) async -> Result<SchemaResponse, MMError> {
         // Per-request memo only; the router holds no cross-request ACL cache.
         var aclByEntity: [EntityName: EntityACL?] = [:]
         var visible: [MethodSignature] = []
@@ -586,15 +638,15 @@ public struct Router: Sendable {
                 } else {
                     switch await provider.acl(for: step) {
                         case .failure(let error):
-                            logger.error(
-                                "acl provider failed",
-                                metadata: [
-                                    "method": "rpc.schema",
-                                    "entity": "\(step)",
-                                    "error": "\(error.description)",
-                                ]
+                            return .failure(
+                                Self.aclProviderFailed(
+                                    error,
+                                    method: "server.schema",
+                                    entity: step,
+                                    connection: nil,
+                                    logger: logger
+                                )
                             )
-                            return .failure(Self.errorObject(.internalError))
                         case .success(let resolved):
                             aclByEntity[step] = resolved
                             acl = resolved
@@ -617,8 +669,6 @@ public struct Router: Sendable {
         for signature in visible {
             signature.collectReferencedTypeNames(into: &reachableTypeNames)
         }
-        let typesByName = Dictionary(
-            types.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
         var frontier = reachableTypeNames
         while !frontier.isEmpty {
             var discovered: Set<String> = []
@@ -630,30 +680,31 @@ public struct Router: Sendable {
         }
         let visibleTypes = types.filter { reachableTypeNames.contains($0.name) }
         return .success(
-            SchemaResponse(fingerprint: fingerprint, methods: visible, types: visibleTypes))
+            SchemaResponse(fingerprint: fingerprint, methods: visible, types: visibleTypes)
+        )
     }
 
-    /// `entity.stat`: the target's ten-byte ACL. Dispatch already required
+    /// `server.entity`: the target's ten-byte ACL. Dispatch already required
     /// `.read` on the target, so a nil ACL is reachable only for root — which
     /// has no ACL to report and denies like any other absent record.
     private static func stat(
         entity: EntityName,
         provider: any EntityACLProvider,
         logger: Logger
-    ) async -> Result<StatResponse, MMErrorObject> {
+    ) async -> Result<StatResponse, MMError> {
         switch await provider.acl(for: entity) {
             case .failure(let error):
-                logger.error(
-                    "acl provider failed",
-                    metadata: [
-                        "method": "entity.stat",
-                        "entity": "\(entity)",
-                        "error": "\(error.description)",
-                    ]
+                return .failure(
+                    Self.aclProviderFailed(
+                        error,
+                        method: "server.entity",
+                        entity: entity,
+                        connection: nil,
+                        logger: logger
+                    )
                 )
-                return .failure(Self.errorObject(.internalError))
             case .success(.none):
-                return .failure(Self.errorObject(.permissionDenied))
+                return .failure(Self.error(.permissionDenied))
             case .success(.some(let acl)):
                 return .success(
                     StatResponse(owner: UInt32(acl.owner), group: UInt32(acl.group), mode: acl.mode)
@@ -682,9 +733,51 @@ public struct Router: Sendable {
         return String(name[name.startIndex..<lastDot])
     }
 
-    /// The wire error object for a protocol code, with a constant message —
+    /// One implementation behind every deny site: count the denial, log it
+    /// with its reason, produce the wire error.
+    private func authorizationDenied(
+        method: String,
+        entity: EntityName,
+        reason: String,
+        context: MMContext
+    ) -> MMError {
+        self.metrics.authorizationDenials.increment()
+        self.logger.debug(
+            "authorization denied",
+            metadata: [
+                "connection": "\(context.connectionID)",
+                "method": "\(method)",
+                "entity": "\(entity)",
+                "reason": "\(reason)",
+            ]
+        )
+        return Self.error(.permissionDenied)
+    }
+
+    /// The one mapping for an ACL-provider failure: error log plus
+    /// `internalError` — details stay in server logs, never on the wire.
+    private static func aclProviderFailed(
+        _ error: ACLProviderError,
+        method: String,
+        entity: EntityName,
+        connection: String?,
+        logger: Logger
+    ) -> MMError {
+        var metadata: Logger.Metadata = [
+            "method": "\(method)",
+            "entity": "\(entity)",
+            "error": "\(error.description)",
+        ]
+        if let connection {
+            metadata["connection"] = "\(connection)"
+        }
+        logger.error("acl provider failed", metadata: metadata)
+        return Self.error(.internalError)
+    }
+
+    /// The wire `MMError` for a protocol code, with a constant message —
     /// details stay in server logs, never on the wire.
-    static func errorObject(_ code: MMErrorCode) -> MMErrorObject {
+    static func error(_ code: MMErrorCode) -> MMError {
         let message: String
         switch code {
             case .unknownMethod: message = "unknown method"
@@ -696,14 +789,11 @@ public struct Router: Sendable {
             case .cancelled: message = "cancelled"
             case .unknown(let raw): message = "error \(raw)"
         }
-        return MMErrorObject(code: code.code, message: message)
+        return MMError(code: code.code, message: message)
     }
 
     private func recordDispatchLatency(since start: ContinuousClock.Instant) {
-        let elapsed = start.duration(to: ContinuousClock.now)
-        let nanoseconds =
-            elapsed.components.seconds &* 1_000_000_000
-            &+ elapsed.components.attoseconds / 1_000_000_000
-        self.dispatchTimer.recordNanoseconds(nanoseconds)
+        // swift-metrics owns the Duration→nanoseconds conversion (saturating).
+        self.metrics.dispatchDuration.record(duration: start.duration(to: ContinuousClock.now))
     }
 }

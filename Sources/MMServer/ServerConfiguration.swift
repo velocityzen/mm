@@ -60,14 +60,22 @@ public struct MMServerConfiguration: Sendable {
     /// intersection with the peer's.
     public var capabilities: UInt32
 
+    /// The creation defaults, single-sourced for this initializer and the
+    /// server builder's mirrored `Configuration(...)` form.
+    public static let defaultMaxConnections = 128
+    public static let defaultMaxInFlightRequestsPerConnection = 16
+    public static let defaultMaxConcurrentStreamsPerConnection = 8
+    public static let defaultIdleTimeout = TimeAmount.seconds(120)
+    public static let defaultUnixSocketMode: UInt16 = 0o660
+
     public init(
         endpoint: MMEndpoint,
         maxFrameLength: UInt32 = MMWireInfo.defaultMaxFrameLength,
-        maxConnections: Int = 128,
-        maxInFlightRequestsPerConnection: Int = 16,
-        maxConcurrentStreamsPerConnection: Int = 8,
-        idleTimeout: TimeAmount = .seconds(120),
-        unixSocketMode: UInt16 = 0o660,
+        maxConnections: Int = Self.defaultMaxConnections,
+        maxInFlightRequestsPerConnection: Int = Self.defaultMaxInFlightRequestsPerConnection,
+        maxConcurrentStreamsPerConnection: Int = Self.defaultMaxConcurrentStreamsPerConnection,
+        idleTimeout: TimeAmount = Self.defaultIdleTimeout,
+        unixSocketMode: UInt16 = Self.defaultUnixSocketMode,
         capabilities: UInt32 = 0
     ) {
         precondition(maxConnections > 0, "maxConnections must be positive")

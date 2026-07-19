@@ -47,21 +47,30 @@ extension TypeSchema {
             case .bytes: return try transform(.bytes)
             case .optional(let wrapped):
                 return try transform(
-                    .optional(try wrapped.foldImplementation(resolver, inFlight, transform)))
+                    .optional(try wrapped.foldImplementation(resolver, inFlight, transform))
+                )
             case .array(let element):
                 return try transform(
-                    .array(try element.foldImplementation(resolver, inFlight, transform)))
+                    .array(try element.foldImplementation(resolver, inFlight, transform))
+                )
             case .map(let key, let value):
                 return try transform(
                     .map(
                         key: try key.foldImplementation(resolver, inFlight, transform),
-                        value: try value.foldImplementation(resolver, inFlight, transform)))
+                        value: try value.foldImplementation(resolver, inFlight, transform)
+                    )
+                )
             case .structure(let fields):
                 return try transform(
                     .structure(
                         try fields.map { field in
-                            (field, try field.type.foldImplementation(resolver, inFlight, transform))
-                        }))
+                            (
+                                field,
+                                try field.type.foldImplementation(resolver, inFlight, transform)
+                            )
+                        }
+                    )
+                )
             case .enumeration(let cases):
                 return try transform(.enumeration(cases))
             case .reference(let name):
@@ -72,7 +81,10 @@ extension TypeSchema {
                     return try transform(.unresolvedReference(.unresolved(name)))
                 }
                 return try definition.schema.foldImplementation(
-                    resolver, inFlight.union([name]), transform)
+                    resolver,
+                    inFlight.union([name]),
+                    transform
+                )
             case .unknown:
                 return try transform(.unknown)
         }

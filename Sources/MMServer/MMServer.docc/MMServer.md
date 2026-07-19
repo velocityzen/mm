@@ -28,7 +28,7 @@ Handlers are registered with `On` inside the service builder (or `Handle` on a b
 
 Authorization is asked of an ``EntityACLProvider`` — the host's dynamic authority, with ``InMemoryACLProvider`` and the declarative `ACLProvider { Entity(...) { ... } }` tree as the static form. Peer identity comes from kernel credentials on Unix sockets; a capture failure closes the connection with no dispatch, and a missing ACL is a denial that never leaks existence.
 
-Startup ordering on top of ServiceLifecycle (which has none) uses ``ServiceReadiness``, ``GatedService``, and the `Ready(_:)` builder part firing at bind. Every server auto-registers the builtins `rpc.schema` and `entity.stat`.
+Startup ordering on top of ServiceLifecycle (which has none) uses ``ServiceReadiness``, ``GatedService``, and the `Ready(_:)` builder part firing at bind. Every server auto-registers the builtins `server.schema` and `server.entity`.
 
 The <doc:IntegrationGuide> walks through embedding all of this in a production daemon (including a SQLite-backed ACL provider and hardening knobs); <doc:RemoteAccess> covers SSH socket forwarding, systemd/launchd recipes, and TCP caveats.
 

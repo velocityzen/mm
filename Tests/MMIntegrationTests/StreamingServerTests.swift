@@ -1,6 +1,7 @@
 import MMSchema
 import MMWire
 import MMServer
+import MMTestSupport
 import NIOCore
 import ServiceLifecycle
 import Testing
@@ -792,7 +793,7 @@ struct StreamingServerTests {
     /// races), and returns the first terminal response.
     static func readTerminalTolerating(
         items session: WireSession, msgid: UInt32
-    ) async throws -> (error: MMErrorObject?, result: ByteBuffer?) {
+    ) async throws -> (error: MMError?, result: ByteBuffer?) {
         while true {
             let envelope = try await session.nextEnvelope(msgid: msgid)
             switch envelope {

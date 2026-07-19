@@ -12,7 +12,7 @@ import NIOCore
 ///   typed decode attempt for one key never corrupts the buffer — which is
 ///   what makes the ordered `.unknown` fallback tries safe.
 /// - Encode/decode of a call run on the **caller's** task
-///   (`ClientConnection.performCall`/`resolve` are nonisolated), so a
+///   (`ClientConnection`'s untyped `call(methodName:)`/`resolve` are nonisolated), so a
 ///   `@TaskLocal` bound around `client.call(...)` propagates into
 ///   ``MMCLIDynamicResponse/init(from:)``.
 public struct MMCLIDynamicResponse: Codable, Sendable {
@@ -199,22 +199,9 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                 return try Self.decodeField(wrapped, resolver: resolver, in: container, forKey: key)
             case .unknown:
                 guard container.contains(key) else { return .null }
-                if let value = try? container.decode(String.self, forKey: key) {
-                    return .string(value)
-                }
-                if let value = try? container.decode(Int64.self, forKey: key) {
-                    return .int(value)
-                }
-                if let value = try? container.decode(UInt64.self, forKey: key) {
-                    return .uint(value)
-                }
-                if let value = try? container.decode(Bool.self, forKey: key) {
-                    return .bool(value)
-                }
-                if let value = try? container.decode(Double.self, forKey: key) {
-                    return .double(value)
-                }
-                return .null
+                // One ordered-tries implementation for all container shapes:
+                // probe the slot through its child decoder.
+                return Self.decodeUnknown(from: try container.superDecoder(forKey: key))
             case .structure, .array, .map:
                 return try Self.decodeValue(
                     resolved, resolver: resolver,
@@ -260,13 +247,9 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                 return try Self.decodeElement(
                     resolvedWrapped, resolver: resolver, from: &container)
             case .unknown:
-                if let value = try? container.decode(String.self) { return .string(value) }
-                if let value = try? container.decode(Int64.self) { return .int(value) }
-                if let value = try? container.decode(UInt64.self) { return .uint(value) }
-                if let value = try? container.decode(Bool.self) { return .bool(value) }
-                if let value = try? container.decode(Double.self) { return .double(value) }
-                _ = try container.superDecoder()  // consume the unrecognized element
-                return .null
+                // superDecoder() consumes exactly one element; the shared
+                // ordered tries then probe within it.
+                return Self.decodeUnknown(from: try container.superDecoder())
             case .structure, .array, .map:
                 return try Self.decodeValue(
                     resolved, resolver: resolver, from: container.superDecoder())

@@ -141,7 +141,7 @@ final class ClientStreamState<
         // credit (the server grants itself the same window for the response
         // direction). A stream with no request direction never sends items, so
         // its credit is irrelevant; keep it at the window for uniformity.
-        self.state = NIOLockedValueBox(State(outboundCredit: StreamCredit.initialWindow))
+        self.state = NIOLockedValueBox(State(outboundCredit: MMStreamFlowControl.initialWindow))
         self.sinks = sinks
         self.logger = logger
         self.metrics = metrics
@@ -201,7 +201,7 @@ extension ClientStreamState {
         self.state.withLockedValue { state -> UInt32? in
             guard self.hasResponseStream, !state.terminated else { return nil }
             state.consumedSinceGrant &+= 1
-            guard state.consumedSinceGrant >= StreamCredit.initialWindow else {
+            guard state.consumedSinceGrant >= MMStreamFlowControl.initialWindow else {
                 return nil
             }
             let grant = state.consumedSinceGrant
@@ -268,43 +268,49 @@ extension ClientStreamState: ClientStreamControl {
     }
 
     func awaitInboundDemand() async {
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                let immediate = self.state.withLockedValue { state -> Bool in
+        await withParkedContinuation(
+            register: { continuation in
+                self.state.withLockedValue { state -> Void? in
                     if state.inboundEnded || state.inboundParkCancelled || state.demandAvailable {
                         state.demandAvailable = false
-                        return true
+                        return ()
                     }
                     state.inboundParked = continuation
-                    return false
+                    return nil
                 }
-                if immediate { continuation.resume() }
-            }
-        } onCancel: {
-            // Synchronous by requirement — unparks the inbound loop so run() can
-            // unwind and close.
-            let parked = self.state.withLockedValue { state -> CheckedContinuation<Void, Never>? in
-                state.inboundParkCancelled = true
-                let parked = state.inboundParked
-                state.inboundParked = nil
-                return parked
-            }
-            parked?.resume()
-        }
+            },
+            takeParkedOnCancel: {
+                // Unparks the inbound loop so run() can unwind and close.
+                self.state.withLockedValue { state in
+                    state.inboundParkCancelled = true
+                    let parked = state.inboundParked
+                    state.inboundParked = nil
+                    return parked
+                }
+            },
+            cancelled: ()
+        )
+    }
+
+    /// The one end-inbound mutation, shared by the server's END, the
+    /// consumer's iterator drop, and terminal resolution: idempotently marks
+    /// the inbound direction ended and yields the parked producer plus the
+    /// source (the caller resumes/finishes them OUTSIDE the lock).
+    private static func endInbound(
+        _ state: inout State
+    ) -> (parked: CheckedContinuation<Void, Never>?, source: Source?) {
+        guard !state.inboundEnded else { return (nil, nil) }
+        state.inboundEnded = true
+        let parked = state.inboundParked
+        state.inboundParked = nil
+        let source = state.source
+        state.source = nil
+        return (parked, source)
     }
 
     func serverEndInbound() {
         guard self.hasResponseStream else { return }
-        let (parked, source) = self.state.withLockedValue {
-            state -> (CheckedContinuation<Void, Never>?, Source?) in
-            guard !state.inboundEnded else { return (nil, nil) }
-            state.inboundEnded = true
-            let parked = state.inboundParked
-            state.inboundParked = nil
-            let source = state.source
-            state.source = nil
-            return (parked, source)
-        }
+        let (parked, source) = self.state.withLockedValue { Self.endInbound(&$0) }
         parked?.resume()
         // Finish after buffered items drain; also satisfies the producer's
         // finish-before-deinit requirement (`finishOnDeinit: false`).
@@ -353,15 +359,10 @@ extension ClientStreamState: ClientStreamControl {
 // MARK: - Terminal resolution
 
 extension ClientStreamState {
-    /// Decodes the terminal response slots into `Response` (the same rules as the
-    /// unary path: an error object maps through `MMCallError.from`, a nil result
-    /// decodes as the MessagePack nil value).
+    /// Decodes the terminal response slots into `Response` — the shared unary
+    /// rule (``ResponseSlots/decodeResponse(_:)``).
     private static func decodeTerminal(_ slots: ResponseSlots) -> TerminalOutcome {
-        if let errorObject = slots.error {
-            return .failure(.from(errorObject: errorObject))
-        }
-        let result = slots.result ?? ByteBuffer(bytes: [0xc0])
-        return MMPackDecoder().decode(Response.self, from: result).mapError { .decode($0) }
+        slots.decodeResponse(Response.self)
     }
 
     /// The single terminal-resolving transition, shared by the terminal frame,
@@ -391,15 +392,7 @@ extension ClientStreamState {
             // death still reads `.connectionClosed`.
             if connectionClosed { state.connectionClosed = true }
 
-            var inboundParked: CheckedContinuation<Void, Never>?
-            var source: Source?
-            if !state.inboundEnded {
-                state.inboundEnded = true
-                inboundParked = state.inboundParked
-                state.inboundParked = nil
-                source = state.source
-                state.source = nil
-            }
+            let (inboundParked, source) = Self.endInbound(&state)
 
             state.outboundEnded = true
             let senderParked = state.senderParked
@@ -505,15 +498,15 @@ extension ClientStreamState {
     /// Suspends the sender at zero credit; resumed by `grantOutbound`,
     /// `serverStopOutbound`, terminal/fail/cancel, or the cancel handler.
     private func parkSender() async {
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                let immediate = self.state.withLockedValue { state -> Bool in
+        await withParkedContinuation(
+            register: { continuation in
+                self.state.withLockedValue { state -> Void? in
                     // Any disposition that lets the loop make progress resolves
                     // the park immediately.
                     if state.terminated || state.outboundEnded || state.peerStopped
                         || state.senderParkCancelled || state.outboundCredit > 0
                     {
-                        return true
+                        return ()
                     }
                     // Single-sender discipline: exactly one send may park at a
                     // time (the request direction is driven by one task). A
@@ -528,19 +521,19 @@ extension ClientStreamState {
                         "stream \(self.msgid): concurrent send on one outbound direction"
                     )
                     state.senderParked = continuation
-                    return false
+                    return nil
                 }
-                if immediate { continuation.resume() }
-            }
-        } onCancel: {
-            let parked = self.state.withLockedValue { state -> CheckedContinuation<Void, Never>? in
-                state.senderParkCancelled = true
-                let parked = state.senderParked
-                state.senderParked = nil
-                return parked
-            }
-            parked?.resume()
-        }
+            },
+            takeParkedOnCancel: {
+                self.state.withLockedValue { state in
+                    state.senderParkCancelled = true
+                    let parked = state.senderParked
+                    state.senderParked = nil
+                    return parked
+                }
+            },
+            cancelled: ()
+        )
     }
 
     /// Sends the outbound END (kind 4) exactly once. Idempotent: a second
@@ -604,16 +597,7 @@ extension ClientStreamState: NIOAsyncSequenceProducerDelegate {
     /// inbound loop can proceed. The terminal is unaffected — a consumer that
     /// stops iterating still awaits `result()`.
     func didTerminate() {
-        let (parked, source) = self.state.withLockedValue {
-            state -> (CheckedContinuation<Void, Never>?, Source?) in
-            guard !state.inboundEnded else { return (nil, nil) }
-            state.inboundEnded = true
-            let parked = state.inboundParked
-            state.inboundParked = nil
-            let source = state.source
-            state.source = nil
-            return (parked, source)
-        }
+        let (parked, source) = self.state.withLockedValue { Self.endInbound(&$0) }
         parked?.resume()
         source?.finish()
     }

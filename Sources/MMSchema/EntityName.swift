@@ -11,7 +11,7 @@
 /// ## Root semantics
 ///
 /// ``EntityName/root`` means "the whole entity tree". It never names a concrete
-/// entity: it exists for discovery-style requests (`rpc.schema` scoped to root
+/// entity: it exists for discovery-style requests (`server.schema` scoped to root
 /// asks about everything the peer can reach). Precisely:
 ///
 /// - It encodes as the empty string on the wire and decodes back from it.

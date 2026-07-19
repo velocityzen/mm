@@ -32,7 +32,7 @@ public enum MMClientError: Error, Equatable, Sendable {
 /// below; code 6 (streamViolation) maps to ``streamViolation(_:)`` preserving
 /// the object, code 7 (cancelled) maps to ``cancelled``; any other code — the
 /// application range >= 64 or a future protocol code this client predates —
-/// arrives as ``remote(_:)`` with the full error object preserved. Never
+/// arrives as ``remote(_:)`` with the full `MMError` preserved. Never
 /// switch exhaustively on wire codes: the mapping goes through `MMErrorCode`,
 /// whose `unknown` case is the catch-all.
 public enum MMCallError: Error, Equatable, Sendable {
@@ -50,10 +50,10 @@ public enum MMCallError: Error, Equatable, Sendable {
     /// The handler failed server-side in a way that is not the caller's fault
     /// (`MMErrorCode.internalError`).
     case remoteInternal
-    /// An error object with a code this client has no dedicated case for —
+    /// An `MMError` with a code this client has no dedicated case for —
     /// application errors (>= 64) and unknown future protocol codes. The object
     /// (code, message, raw payload) is preserved verbatim.
-    case remote(MMErrorObject)
+    case remote(MMError)
     /// The server ended the call with a stream-contract violation
     /// (`MMErrorCode.streamViolation`, code 6): an item on an undeclared
     /// stream, a seq gap, a credit overrun, or an item that failed to decode.
@@ -61,7 +61,7 @@ public enum MMCallError: Error, Equatable, Sendable {
     /// Distinct from ``MMClientError/protocolViolation(description:)`` — that is a *client*
     /// verdict that fails the whole connection; this is a *terminal* the server
     /// sent for one call, and the connection lives on.
-    case streamViolation(MMErrorObject)
+    case streamViolation(MMError)
     /// The request/payload failed to encode. Nothing was sent.
     case encode(MMWireError)
     /// The response arrived but its result slot failed to decode as the
@@ -80,58 +80,82 @@ public enum MMCallError: Error, Equatable, Sendable {
     case cancelled
 }
 
-extension MMCallError {
-    /// Maps a wire error object to the typed call error. Total over
-    /// `MMErrorCode`, whose `unknown` case is the open-world catch-all — this
-    /// is the sanctioned way to branch on wire codes without an exhaustive
-    /// switch over raw integers.
-    static func from(errorObject: MMErrorObject) -> MMCallError {
-        switch MMErrorCode(code: errorObject.code) {
-        case .unknownMethod: return .unknownMethod
-        case .permissionDenied: return .denied
-        case .malformedParams: return .malformedParams
-        case .tooManyInFlight: return .tooManyInFlight
-        case .internalError: return .remoteInternal
-        case .streamViolation:
-            // Code 6: a stream-contract violation the server turned into this
-            // call's terminal. Surface it typed, preserving the object; the
-            // connection is unaffected (unlike a *client*-side protocol
-            // violation, which fails the whole connection).
-            return .streamViolation(errorObject)
-        case .cancelled:
-            // Code 7: the server acknowledged a client CANCEL. Locally this is
-            // the same outcome as a task-cancelled call — the msgid is retired
-            // and the request may still have executed server-side.
-            return .cancelled
-        case .unknown: return .remote(errorObject)
+extension MMClientError: CustomStringConvertible {
+    /// Log-ready one-liner; the associated detail is included verbatim.
+    public var description: String {
+        switch self {
+            case .badHello:
+                return "server hello was malformed"
+            case .versionUnsupported(let serverVersion):
+                return "server protocol version \(serverVersion) is unsupported"
+            case .transport(let description):
+                return "transport failure: \(description)"
+            case .protocolViolation(let description):
+                return "protocol violation: \(description)"
+            case .alreadyRunning:
+                return "run() called while the inbound loop is already running"
         }
     }
 }
 
-/// The outcome of the hello exchange, exposed on the connection after
-/// `connect` returns.
-public struct HelloInfo: Sendable, Hashable {
-    /// Min-wins negotiated protocol version. Always >= 1 on a live connection.
-    public let negotiatedVersion: UInt8
-    /// The schema fingerprint the server advertised, verbatim.
-    public let serverFingerprint: UInt64
-    /// `nil` when ``MMClientConfiguration/expectedFingerprint`` was `nil` (no
-    /// comparison requested); otherwise whether the server's fingerprint
-    /// matched. `false` is a discovery trigger, never a failure.
-    public let fingerprintMatched: Bool?
-    /// Bitwise intersection of both sides' capability bitsets. 0 in v1.
-    public let capabilities: UInt32
+extension MMCallError: CustomStringConvertible {
+    /// Log-ready one-liner; nested `MMError` values render through
+    /// ``MMError/description``.
+    public var description: String {
+        switch self {
+            case .denied:
+                return "permission denied"
+            case .unknownMethod:
+                return "unknown method"
+            case .malformedParams:
+                return "malformed params"
+            case .tooManyInFlight:
+                return "too many calls in flight"
+            case .remoteInternal:
+                return "internal server error"
+            case .remote(let error):
+                return "remote error (\(error))"
+            case .streamViolation(let error):
+                return "stream violation (\(error))"
+            case .encode(let error):
+                return "request encode failed: \(error)"
+            case .decode(let error):
+                return "response decode failed: \(error)"
+            case .transport(let description):
+                return "transport failure: \(description)"
+            case .connectionClosed:
+                return "connection closed"
+            case .cancelled:
+                return "cancelled"
+        }
+    }
+}
 
-    public init(
-        negotiatedVersion: UInt8,
-        serverFingerprint: UInt64,
-        fingerprintMatched: Bool?,
-        capabilities: UInt32
-    ) {
-        self.negotiatedVersion = negotiatedVersion
-        self.serverFingerprint = serverFingerprint
-        self.fingerprintMatched = fingerprintMatched
-        self.capabilities = capabilities
+extension MMCallError {
+    /// Maps a wire `MMError` to the typed call error. Total over
+    /// `MMErrorCode`, whose `unknown` case is the open-world catch-all — this
+    /// is the sanctioned way to branch on wire codes without an exhaustive
+    /// switch over raw integers.
+    static func from(error: MMError) -> MMCallError {
+        switch MMErrorCode(code: error.code) {
+            case .unknownMethod: return .unknownMethod
+            case .permissionDenied: return .denied
+            case .malformedParams: return .malformedParams
+            case .tooManyInFlight: return .tooManyInFlight
+            case .internalError: return .remoteInternal
+            case .streamViolation:
+                // Code 6: a stream-contract violation the server turned into this
+                // call's terminal. Surface it typed, preserving the object; the
+                // connection is unaffected (unlike a *client*-side protocol
+                // violation, which fails the whole connection).
+                return .streamViolation(error)
+            case .cancelled:
+                // Code 7: the server acknowledged a client CANCEL. Locally this is
+                // the same outcome as a task-cancelled call — the msgid is retired
+                // and the request may still have executed server-side.
+                return .cancelled
+            case .unknown: return .remote(error)
+        }
     }
 }
 

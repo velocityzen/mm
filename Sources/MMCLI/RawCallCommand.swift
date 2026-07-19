@@ -50,7 +50,7 @@ public struct MMCLIRawCall: AsyncParsableCommand {
             // the response is filtered to what this peer can reach anyway.
             let schema = try MMCLIFailure.unwrap(
                 await client.discoverSchema(scope: .root),
-                method: "rpc.schema",
+                method: "server.schema",
                 entity: ""
             )
             guard let signature = schema.methods.first(where: { $0.name == methodName }) else {

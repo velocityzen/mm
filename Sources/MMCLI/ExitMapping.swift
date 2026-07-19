@@ -12,7 +12,7 @@ public enum MMCLIFailure {
     /// - `denied` → 77 (EX_NOPERM)
     /// - `unknownMethod` → 64 (EX_USAGE)
     /// - `malformedParams` → 65 (EX_DATAERR)
-    /// - `remote` (application error object) → 1
+    /// - `remote` (application `MMError`) → 1
     /// - `remoteInternal`, `encode`, `decode`, `streamViolation`,
     ///   `tooManyInFlight` → 70 (EX_SOFTWARE)
     /// - `transport`, `connectionClosed` → 69 (EX_UNAVAILABLE)

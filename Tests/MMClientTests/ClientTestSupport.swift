@@ -1,5 +1,6 @@
 import Logging
 import MMSchema
+import MMTestSupport
 import MMWire
 import NIOConcurrencyHelpers
 import NIOCore
@@ -8,33 +9,13 @@ import NIOEmbedded
 @testable import MMClient
 
 // MARK: - Deadlines (no test may hang)
-
-struct DeadlineExceeded: Error {}
+// withDeadline / DeadlineExceeded come from MMTestSupport.
 
 /// The failure of a `Result`, or nil on success — exact typed assertions for
 /// results whose success side is not `Equatable` (`Void`, the connection).
 func failure<T, E>(_ result: Result<T, E>) -> E? {
     guard case .failure(let error) = result else { return nil }
     return error
-}
-
-/// Bounds any await with a `ContinuousClock` deadline so a broken client hangs
-/// a test for at most `seconds`, never forever. The deadline branch is a
-/// bounded race, not a synchronization sleep.
-func withDeadline<T: Sendable>(
-    seconds: Double = 10,
-    _ body: @escaping @Sendable () async throws -> T
-) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask { try await body() }
-        group.addTask {
-            try await Task.sleep(for: .seconds(seconds), tolerance: nil, clock: ContinuousClock())
-            throw DeadlineExceeded()
-        }
-        guard let first = try await group.next() else { throw DeadlineExceeded() }
-        group.cancelAll()
-        return first
-    }
 }
 
 // MARK: - Wire fixtures
@@ -127,9 +108,7 @@ func allBytes(_ buffer: ByteBuffer) -> [UInt8] {
     Array(buffer.readableBytesView)
 }
 
-func encodedParams<T: Encodable>(_ value: T) -> ByteBuffer {
-    try! MMPackEncoder().encode(value).get()
-}
+// encodedParams comes from MMTestSupport.
 
 /// Strips the 4-byte LE length prefix and decodes the envelope.
 func decodeFrame(_ frame: ByteBuffer) throws -> MMEnvelope {
@@ -203,8 +182,8 @@ func responseFrame(msgid: UInt32, result: some Encodable) -> ByteBuffer {
     )
 }
 
-func errorFrame(msgid: UInt32, _ errorObject: MMErrorObject) -> ByteBuffer {
-    framed(try! MMEnvelope.response(msgid: msgid, error: errorObject, result: nil).encoded().get())
+func errorFrame(msgid: UInt32, _ error: MMError) -> ByteBuffer {
+    framed(try! MMEnvelope.response(msgid: msgid, error: error, result: nil).encoded().get())
 }
 
 func quietLogger() -> Logger {
@@ -314,34 +293,5 @@ func withRunningConnection<T: Sendable>(
         channel: harness.channel,
         connection: connection
     )
-    let runResult = NIOLockedValueBox<Result<Void, MMClientError>?>(nil)
-    return try await withThrowingTaskGroup(of: Void.self) { group in
-        group.addTask {
-            let result = await connection.run()
-            runResult.withLockedValue { $0 = result }
-        }
-        // A sibling deadline bounds the run() join: if the loop fails to
-        // observe the close, the group throws instead of hanging the test.
-        group.addTask {
-            try await Task.sleep(for: .seconds(15), tolerance: nil, clock: ContinuousClock())
-            throw DeadlineExceeded()
-        }
-        let result: T
-        do {
-            result = try await withDeadline { try await body(client) }
-        } catch {
-            await connection.close()
-            group.cancelAll()
-            try? await group.waitForAll()
-            throw error
-        }
-        await connection.close()
-        _ = try await group.next()  // run() finished, or DeadlineExceeded
-        group.cancelAll()  // stop the deadline child
-        try? await group.waitForAll()  // its CancellationError is expected
-        guard let finished = runResult.withLockedValue({ $0 }) else {
-            throw DeadlineExceeded()
-        }
-        return (result, finished)
-    }
+    return try await withClientRunLoop(connection: connection, context: client, body)
 }

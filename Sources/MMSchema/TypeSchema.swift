@@ -1,5 +1,5 @@
 /// The wire shape of a value, as discovered by the ``of(_:)`` probe or declared via
-/// ``SchemaDescribable``. This is what `rpc.schema` serves to clients.
+/// ``SchemaDescribable``. This is what `server.schema` serves to clients.
 ///
 /// ## Wire encoding (fixed)
 ///
@@ -105,24 +105,55 @@ extension TypeSchema {
     /// fingerprint hashes and `verify`/`SchemaDifference` compare, so doc
     /// edits never register as schema drift.
     public var strippingDescriptions: TypeSchema {
+        self.rewritten(
+            field: { Field(key: $0.key, name: $0.name, type: $0.type) },
+            enumCase: { EnumCase(name: $0.name) }
+        )
+    }
+
+    /// The one structure-preserving rebuild behind every rewriting walker
+    /// (description stripping, reference qualification): children rebuild
+    /// first, `field`/`enumCase` reshape structure members (each field's
+    /// `type` already rewritten), then `node` rewrites the assembled node.
+    func rewritten(
+        node: (TypeSchema) -> TypeSchema = { $0 },
+        field: (Field) -> Field = { $0 },
+        enumCase: (EnumCase) -> EnumCase = { $0 }
+    ) -> TypeSchema {
+        let rebuilt: TypeSchema
         switch self {
             case .bool, .int, .uint, .float, .double, .string, .bytes, .reference, .unknown:
-                return self
+                rebuilt = self
             case .optional(let wrapped):
-                return .optional(wrapped.strippingDescriptions)
+                rebuilt = .optional(wrapped.rewritten(node: node, field: field, enumCase: enumCase))
             case .array(let element):
-                return .array(element.strippingDescriptions)
+                rebuilt = .array(element.rewritten(node: node, field: field, enumCase: enumCase))
             case .map(let key, let value):
-                return .map(key: key.strippingDescriptions, value: value.strippingDescriptions)
+                rebuilt = .map(
+                    key: key.rewritten(node: node, field: field, enumCase: enumCase),
+                    value: value.rewritten(node: node, field: field, enumCase: enumCase)
+                )
             case .structure(let fields):
-                return .structure(
-                    fields: fields.map {
-                        Field(key: $0.key, name: $0.name, type: $0.type.strippingDescriptions)
+                rebuilt = .structure(
+                    fields: fields.map { original in
+                        field(
+                            Field(
+                                key: original.key,
+                                name: original.name,
+                                type: original.type.rewritten(
+                                    node: node,
+                                    field: field,
+                                    enumCase: enumCase
+                                ),
+                                description: original.description
+                            )
+                        )
                     }
                 )
             case .enumeration(let cases):
-                return .enumeration(cases: cases.map { EnumCase(name: $0.name) })
+                rebuilt = .enumeration(cases: cases.map(enumCase))
         }
+        return node(rebuilt)
     }
 }
 
@@ -147,7 +178,9 @@ extension TypeSchema: Codable {
         case second = 2
     }
 
-    private var tag: UInt8 {
+    /// The case tag — shared by the wire coder and the fingerprint's
+    /// canonical encoding, so the number exists in exactly one table.
+    var tag: UInt8 {
         switch self {
             case .bool: return 0
             case .int: return 1
@@ -208,7 +241,8 @@ extension TypeSchema: Codable {
             case 7:
                 self =
                     (try? container.decode(TypeSchema.self, forKey: .first)).map(
-                        TypeSchema.optional) ?? .unknown
+                        TypeSchema.optional
+                    ) ?? .unknown
             case 8:
                 self =
                     (try? container.decode(TypeSchema.self, forKey: .first)).map(TypeSchema.array)

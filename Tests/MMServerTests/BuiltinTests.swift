@@ -1,10 +1,11 @@
 import MMSchema
 import MMServer
+import MMTestSupport
 import MMWire
 import Testing
 
-/// The builtin handlers wired by `registerBuiltins`: rpc.schema's
-/// traversal-filtered discovery and entity.stat's ACL report.
+/// The builtin handlers wired by `registerBuiltins`: server.schema's
+/// traversal-filtered discovery and server.entity's ACL report.
 @Suite("Builtins")
 struct BuiltinTests {
     /// Five app methods + two builtins over this ACL world (owner 1000,
@@ -18,8 +19,7 @@ struct BuiltinTests {
     static let world: [EntityName: EntityACL] = [
         entity("journal"): acl(0o555),
         entity("admin"): acl(0o550),
-        entity("rpc"): acl(0o555),
-        entity("entity"): acl(0o555),
+        entity("server"): acl(0o555),
     ]
 
     private func makeRouter(acls: [EntityName: EntityACL] = Self.world) -> Router {
@@ -48,7 +48,7 @@ struct BuiltinTests {
         scope: EntityName = .root
     ) async throws -> SchemaResponse {
         let reply = await router.dispatch(
-            envelope: request(method: "rpc.schema", entity: scope, SchemaRequest()),
+            envelope: request(method: "server.schema", entity: scope, SchemaRequest()),
             context: makeContext(peer: peer)
         )
         let buffer = try #require(resultBuffer(of: reply))
@@ -62,13 +62,13 @@ struct BuiltinTests {
         let otherView = try await self.discover(router, peer: Peers.other)
         #expect(
             otherView.methods.map(\.name)
-                == ["entity.stat", "journal.append", "journal.list", "rpc.schema"]
+                == ["journal.append", "journal.list", "server.entity", "server.schema"]
         )
 
         let ownerView = try await self.discover(router, peer: Peers.owner)
         #expect(
             ownerView.methods.map(\.name)
-                == ["admin.wipe", "entity.stat", "journal.append", "journal.list", "rpc.schema"]
+                == ["admin.wipe", "journal.append", "journal.list", "server.entity", "server.schema"]
         )
     }
 
@@ -99,8 +99,8 @@ struct BuiltinTests {
         #expect(
             router.signatures.map(\.name)
                 == [
-                    "admin.wipe", "entity.stat", "ghost.walk", "journal.append",
-                    "journal.list", "journal.sub.op", "rpc.schema",
+                    "admin.wipe", "ghost.walk", "journal.append",
+                    "journal.list", "journal.sub.op", "server.entity", "server.schema",
                 ]
         )
     }
@@ -113,11 +113,11 @@ struct BuiltinTests {
         #expect(view.fingerprint == router.fingerprint)
     }
 
-    @Test("entity.stat returns the exact ACL fields when read is granted")
+    @Test("server.entity returns the exact ACL fields when read is granted")
     func statGranted() async throws {
         let router = self.makeRouter()
         let reply = await router.dispatch(
-            envelope: request(method: "entity.stat", entity: entity("journal"), StatRequest()),
+            envelope: request(method: "server.entity", entity: entity("journal"), StatRequest()),
             context: makeContext(peer: Peers.other)
         )
         let buffer = try #require(resultBuffer(of: reply))
@@ -127,44 +127,44 @@ struct BuiltinTests {
         )
     }
 
-    @Test("entity.stat denies without read on the target")
+    @Test("server.entity denies without read on the target")
     func statDeniedWithoutRead() async {
         let router = self.makeRouter()
         // "admin" is r-x for owner+group only; `other` lacks read.
         let reply = await router.dispatch(
-            envelope: request(method: "entity.stat", entity: entity("admin"), StatRequest()),
+            envelope: request(method: "server.entity", entity: entity("admin"), StatRequest()),
             context: makeContext(peer: Peers.other)
         )
         #expect(errorCode(of: reply) == MMErrorCode.permissionDenied.code)
     }
 
-    @Test("entity.stat on an entity with no ACL record is permissionDenied")
+    @Test("server.entity on an entity with no ACL record is permissionDenied")
     func statMissingACLDenied() async {
         let router = self.makeRouter()
         let reply = await router.dispatch(
-            envelope: request(method: "entity.stat", entity: entity("ghost"), StatRequest()),
+            envelope: request(method: "server.entity", entity: entity("ghost"), StatRequest()),
             context: makeContext(peer: Peers.owner)
         )
         #expect(errorCode(of: reply) == MMErrorCode.permissionDenied.code)
     }
 
-    @Test("entity.stat on root is permissionDenied (root carries no ACL)")
+    @Test("server.entity on root is permissionDenied (root carries no ACL)")
     func statRootDenied() async {
         let router = self.makeRouter()
         let reply = await router.dispatch(
-            envelope: request(method: "entity.stat", entity: .root, StatRequest()),
+            envelope: request(method: "server.entity", entity: .root, StatRequest()),
             context: makeContext(peer: Peers.owner)
         )
         #expect(errorCode(of: reply) == MMErrorCode.permissionDenied.code)
     }
 
-    @Test("rpc.schema scoped to a concrete entity requires read on it")
+    @Test("server.schema scoped to a concrete entity requires read on it")
     func schemaScopedRequiresRead() async {
         let router = self.makeRouter()
         // "admin" grants nothing to `other`, so even asking about that
         // subtree is denied.
         let reply = await router.dispatch(
-            envelope: request(method: "rpc.schema", entity: entity("admin"), SchemaRequest()),
+            envelope: request(method: "server.schema", entity: entity("admin"), SchemaRequest()),
             context: makeContext(peer: Peers.other)
         )
         #expect(errorCode(of: reply) == MMErrorCode.permissionDenied.code)

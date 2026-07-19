@@ -1,3 +1,4 @@
+import MMTestSupport
 import MMWire
 import NIOConcurrencyHelpers
 import NIOCore
@@ -28,7 +29,8 @@ struct HelloTests {
     func clientHelloBytesConfigured() async throws {
         let configuration = MMClientConfiguration(
             capabilities: 0x0000_0105,
-            expectedFingerprint: 0x0123_4567_89AB_CDEF
+            schema: MMClientSchema(
+                contracts: [], serverFingerprint: 0x0123_4567_89AB_CDEF)
         )
         let harness = try await connectPipeline(configuration: configuration)
         let expected: [UInt8] = [
@@ -49,7 +51,7 @@ struct HelloTests {
             helloFrame(MMHello(protocolVersion: 7, schemaFingerprint: 0, capabilities: 0))
         )
         let connection = try await establish(harness).get()
-        #expect(connection.helloInfo.negotiatedVersion == MMWireInfo.protocolVersion)
+        #expect(connection.server.protocolVersion == MMWireInfo.protocolVersion)
         await connection.close()
     }
 
@@ -63,8 +65,8 @@ struct HelloTests {
             ),
             configuration: MMClientConfiguration(capabilities: 0b0110)
         ).get()
-        #expect(info.negotiatedVersion == 1)
-        #expect(info.serverFingerprint == 9)
+        #expect(info.protocolVersion == 1)
+        #expect(info.fingerprint == 9)
         #expect(info.capabilities == 0b0100)
     }
 
@@ -102,14 +104,16 @@ struct HelloTests {
 
     @Test("fingerprint mismatch sets fingerprintMatched false and does NOT close")
     func fingerprintMismatchIsNotFatal() async throws {
-        let configuration = MMClientConfiguration(expectedFingerprint: 0xAAAA)
+        let configuration = MMClientConfiguration(
+            schema: MMClientSchema(
+                contracts: [], serverFingerprint: 0xAAAA))
         let harness = try await connectPipeline(configuration: configuration)
         try await harness.channel.writeInbound(
             helloFrame(MMHello(protocolVersion: 1, schemaFingerprint: 0xBBBB, capabilities: 0))
         )
         let connection = try await establish(harness, configuration: configuration).get()
-        #expect(connection.helloInfo.fingerprintMatched == false)
-        #expect(connection.helloInfo.serverFingerprint == 0xBBBB)
+        #expect(connection.server.fingerprintMatched == false)
+        #expect(connection.server.fingerprint == 0xBBBB)
         // Mismatch triggers discovery, never disconnection: still connected.
         #expect(harness.channel.isActive)
         #expect(connection.state == .connected)
@@ -118,25 +122,27 @@ struct HelloTests {
 
     @Test("matching fingerprint sets fingerprintMatched true")
     func fingerprintMatch() async throws {
-        let configuration = MMClientConfiguration(expectedFingerprint: 0xAAAA)
+        let configuration = MMClientConfiguration(
+            schema: MMClientSchema(
+                contracts: [], serverFingerprint: 0xAAAA))
         let harness = try await connectPipeline(configuration: configuration)
         try await harness.channel.writeInbound(
             helloFrame(MMHello(protocolVersion: 1, schemaFingerprint: 0xAAAA, capabilities: 0))
         )
         let connection = try await establish(harness, configuration: configuration).get()
-        #expect(connection.helloInfo.fingerprintMatched == true)
+        #expect(connection.server.fingerprintMatched == true)
         await connection.close()
     }
 
-    @Test("nil expectedFingerprint means no comparison: fingerprintMatched is nil")
+    @Test("no expected schema means no comparison: fingerprintMatched is nil")
     func fingerprintNotCompared() async throws {
         let harness = try await connectPipeline()
         try await harness.channel.writeInbound(
             helloFrame(MMHello(protocolVersion: 1, schemaFingerprint: 0xBBBB, capabilities: 0))
         )
         let connection = try await establish(harness).get()
-        #expect(connection.helloInfo.fingerprintMatched == nil)
-        #expect(connection.helloInfo.serverFingerprint == 0xBBBB)
+        #expect(connection.server.fingerprintMatched == nil)
+        #expect(connection.server.fingerprint == 0xBBBB)
         await connection.close()
     }
 

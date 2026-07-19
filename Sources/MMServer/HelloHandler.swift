@@ -4,22 +4,8 @@ import Metrics
 import NIOCore
 import NIOPosix
 
-/// The hello-negotiation math, factored out of the transport so it is a pure,
-/// testable function. Both rules are fixed wire decisions:
-/// version is **min-wins**, capabilities are the **bitwise intersection**.
-enum HelloNegotiation {
-    struct Negotiated: Sendable, Hashable {
-        var protocolVersion: UInt8
-        var capabilities: UInt32
-    }
-
-    static func negotiate(server: MMHello, client: MMHello) -> Negotiated {
-        Negotiated(
-            protocolVersion: min(server.protocolVersion, client.protocolVersion),
-            capabilities: server.capabilities & client.capabilities
-        )
-    }
-}
+// The hello-negotiation math (min-wins version, intersected capabilities)
+// lives in MMWire as `HelloNegotiation`, shared with the client.
 
 /// Server side of the connection preamble, as a thin channel handler above the
 /// framing codec.
@@ -101,21 +87,8 @@ final class ServerHelloHandler: ChannelInboundHandler {
     }
 }
 
-/// Closes the channel when `IdleStateHandler` reports idleness. Sits directly
-/// after `IdleStateHandler` (before the frame decoder), so it also reaps
-/// clients that connect and never complete the hello exchange.
-final class IdleCloseHandler: ChannelInboundHandler {
-    typealias InboundIn = ByteBuffer
-    typealias InboundOut = ByteBuffer
-
-    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
-        if event is IdleStateHandler.IdleStateEvent {
-            context.close(promise: nil)
-        } else {
-            context.fireUserInboundEventTriggered(event)
-        }
-    }
-}
+// Idle reaping is MMWire's shared `MMIdleCloseHandler`, installed by both
+// sides directly after `IdleStateHandler`.
 
 /// Keeps per-child accept failures from killing the listener.
 ///

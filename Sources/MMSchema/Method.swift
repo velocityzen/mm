@@ -25,7 +25,12 @@ public struct Method<Request: Codable & Sendable, Response: Codable & Sendable>:
             TypeSchema.of(Response.self).map { response in
                 documentation.applied(
                     to: MethodSignature(
-                        name: name, access: access, request: request, response: response))
+                        name: name,
+                        access: access,
+                        request: request,
+                        response: response
+                    )
+                )
             }
         }
     }
@@ -35,7 +40,12 @@ public struct Method<Request: Codable & Sendable, Response: Codable & Sendable>:
     func probedSignature() -> Result<MethodSignature, SchemaError> {
         TypeSchema.probed(Request.self).flatMap { request in
             TypeSchema.probed(Response.self).map { response in
-                MethodSignature(name: name, access: access, request: request, response: response)
+                MethodSignature(
+                    name: name,
+                    access: access,
+                    request: request,
+                    response: response
+                )
             }
         }
     }
@@ -77,7 +87,7 @@ public struct MethodDocumentation: Sendable, Hashable {
     }
 }
 
-/// The wire-facing description of one method, served by `rpc.schema` and
+/// The wire-facing description of one method, served by `server.schema` and
 /// hashed into the schema fingerprint.
 ///
 /// Keys are grouped by what they describe: the method itself in the single

@@ -119,18 +119,5 @@ final class ClientHelloHandler: ChannelInboundHandler {
     }
 }
 
-/// Closes the channel when `IdleStateHandler` reports idleness. Client-side
-/// twin of the server's idle reaper; installed only when
-/// ``MMClientConfiguration/idleTimeout`` is set.
-final class ClientIdleCloseHandler: ChannelInboundHandler {
-    typealias InboundIn = ByteBuffer
-    typealias InboundOut = ByteBuffer
-
-    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
-        if event is IdleStateHandler.IdleStateEvent {
-            context.close(promise: nil)
-        } else {
-            context.fireUserInboundEventTriggered(event)
-        }
-    }
-}
+// Idle reaping is MMWire's shared `MMIdleCloseHandler`, installed only when
+// ``MMClientConfiguration/idleTimeout`` is set.

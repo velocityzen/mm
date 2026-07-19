@@ -3,7 +3,7 @@
 ///
 /// Bit layout matches POSIX exactly: execute = 1, write = 2, read = 4. A method
 /// descriptor carries the `AccessMode` its verb requires on its target entity
-/// (`journal.append` requires `.write`, `rpc.schema` requires `.read`, traversal
+/// (`journal.append` requires `.write`, `server.schema` requires `.read`, traversal
 /// requires `.execute` on every ancestor prefix).
 ///
 /// On the wire an `AccessMode` travels as its raw `UInt8`. Unknown high bits are
@@ -25,6 +25,23 @@ public struct AccessMode: OptionSet, Sendable, Hashable {
 
     /// All three bits: `rwx` = 7.
     public static let all: AccessMode = [.read, .write, .execute]
+}
+
+extension AccessMode: CustomStringConvertible {
+    /// The POSIX triple in `ls` order: `"rwx"`, `"rw-"`, `"---"`. Unknown
+    /// high bits — preserved by decoding per the wire-evolution rule — are
+    /// appended in hex (`"r--+0x8"`) so the description never hides them.
+    public var description: String {
+        var out = ""
+        out += self.contains(.read) ? "r" : "-"
+        out += self.contains(.write) ? "w" : "-"
+        out += self.contains(.execute) ? "x" : "-"
+        let unknown = self.rawValue & ~AccessMode.all.rawValue
+        if unknown != 0 {
+            out += "+0x" + String(unknown, radix: 16)
+        }
+        return out
+    }
 }
 
 extension AccessMode: Codable {

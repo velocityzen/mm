@@ -4,21 +4,25 @@ extension MMClientConnection {
     /// Discovers the server's schema: the method signatures this peer can
     /// reach, plus the server's *unfiltered* schema fingerprint.
     ///
-    /// This is a plain call to the builtin `rpc.schema` method
+    /// This is a plain call to the builtin `server.schema` method
     /// (`Builtins.schema`) scoped to `EntityName.root`, riding the normal
     /// call path — msgid, in-flight cap, cancellation, and error mapping all
     /// apply. The response's `methods` list is filtered server-side by this
     /// peer's traversal rights (you discover what you can reach, nothing
     /// more), while `fingerprint` covers the server's *complete* method set,
-    /// so it is directly comparable with ``HelloInfo/serverFingerprint``.
+    /// so it is directly comparable with ``ServerInfo/fingerprint``.
     ///
     /// ## Degrading deliberately on a fingerprint mismatch
     ///
     /// A fingerprint mismatch in the hello is never a disconnect — it is the
-    /// trigger for discovery, so the application can decide what still works:
+    /// trigger for discovery. Set ``MMClientConfiguration/schema``
+    /// and the connection runs this flow itself (await the verdict via
+    /// ``MMClientConnection/verify()``); reach for the manual
+    /// form below only when the application wants its own policy over the
+    /// raw difference:
     ///
     /// ```swift
-    /// if connection.helloInfo.fingerprintMatched == false {
+    /// if connection.server.fingerprintMatched == false {
     ///     switch await connection.discoverSchema() {
     ///     case .failure(let error):
     ///         // Discovery itself failed (transport, denial): treat as fatal
@@ -51,7 +55,7 @@ extension MMClientConnection {
 /// All four buckets are sorted by method name, so assertions and logs are
 /// deterministic.
 ///
-/// > Note: `rpc.schema` responses are filtered by the requesting peer's
+/// > Note: `server.schema` responses are filtered by the requesting peer's
 /// > traversal rights. A method in ``missingMethods`` is therefore "absent
 /// > *or invisible to this peer*" — from the client's point of view the two
 /// > are equivalent (it cannot call the method either way), but the fix may
@@ -179,19 +183,11 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
         localTypes: [TypeDefinition] = [],
         remote: SchemaResponse
     ) {
-        let remoteByName = Dictionary(
-            remote.methods.map { ($0.name, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        let localNames = Set(local.map(\.name))
-        var missing: [MethodSignature] = []
         var access: [Change] = []
         var signature: [Change] = []
-        for localMethod in local.sorted(by: { $0.name < $1.name }) {
-            guard let remoteMethod = remoteByName[localMethod.name] else {
-                missing.append(localMethod)
-                continue
-            }
+        let methods = Self.diffByName(
+            local: local, remote: remote.methods, name: \.name
+        ) { localMethod, remoteMethod in
             if localMethod.access != remoteMethod.access {
                 access.append(Change(local: localMethod, remote: remoteMethod))
             }
@@ -205,35 +201,50 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
                 signature.append(Change(local: localMethod, remote: remoteMethod))
             }
         }
-        self.missingMethods = missing
+        self.missingMethods = methods.missing
         self.accessChanged = access
         self.signatureChanged = signature
-        self.remoteOnly =
-            remote.methods
-            .filter { !localNames.contains($0.name) }
-            .sorted(by: { $0.name < $1.name })
+        self.remoteOnly = methods.remoteOnly
 
-        let remoteTypesByName = Dictionary(
-            remote.types.map { ($0.name, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        let localTypeNames = Set(localTypes.map(\.name))
-        var missingTypes: [TypeDefinition] = []
         var typeChanged: [TypeChange] = []
-        for localType in localTypes.sorted(by: { $0.name < $1.name }) {
-            guard let remoteType = remoteTypesByName[localType.name] else {
-                missingTypes.append(localType)
-                continue
-            }
+        let types = Self.diffByName(
+            local: localTypes, remote: remote.types, name: \.name
+        ) { localType, remoteType in
             if localType.strippingDescriptions.schema != remoteType.strippingDescriptions.schema {
                 typeChanged.append(TypeChange(local: localType, remote: remoteType))
             }
         }
-        self.missingTypes = missingTypes
+        self.missingTypes = types.missing
         self.typeChanged = typeChanged
-        self.remoteOnlyTypes =
-            remote.types
-            .filter { !localTypeNames.contains($0.name) }
-            .sorted(by: { $0.name < $1.name })
+        self.remoteOnlyTypes = types.remoteOnly
+    }
+
+    /// The one by-name diff pass, run for methods and for named types:
+    /// name-sorted locals bucket into missing or a matched-pair visit;
+    /// remote-only entries are name-sorted survivors.
+    private static func diffByName<Element>(
+        local: [Element],
+        remote: [Element],
+        name: (Element) -> String,
+        matched: (Element, Element) -> Void
+    ) -> (missing: [Element], remoteOnly: [Element]) {
+        let remoteByName = Dictionary(
+            remote.map { (name($0), $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let localNames = Set(local.map(name))
+        var missing: [Element] = []
+        for localElement in local.sorted(by: { name($0) < name($1) }) {
+            guard let remoteElement = remoteByName[name(localElement)] else {
+                missing.append(localElement)
+                continue
+            }
+            matched(localElement, remoteElement)
+        }
+        let remoteOnly =
+            remote
+            .filter { !localNames.contains(name($0)) }
+            .sorted(by: { name($0) < name($1) })
+        return (missing, remoteOnly)
     }
 }

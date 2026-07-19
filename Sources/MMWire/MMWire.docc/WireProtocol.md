@@ -77,7 +77,7 @@ offset  0         1         2         3 .. 10                     11 .. 14
 
 **Version negotiation is min-wins.** The effective protocol version of the connection is `min(local version, peer version)`. A peer that cannot operate at the resulting version closes the connection; otherwise both sides proceed speaking the effective version. Because the hello exchange may be concurrent, a side may send envelopes before it has processed the peer's hello — before the effective version is known. Envelopes sent in that window MUST be valid at the sender's lowest supported version (in version 1, that is version 1); a sender that needs the features of a higher version MUST wait for the peer's hello before its first envelope.
 
-**Fingerprint mismatch means discovery, never disconnection.** If the fingerprints differ, the connection stays up; the client SHOULD invoke schema discovery (`rpc.schema`, section 7) and adapt. A fingerprint mismatch is a hint that the method set changed, nothing more. Implementations MUST NOT close a connection because the fingerprints differ.
+**Fingerprint mismatch means discovery, never disconnection.** If the fingerprints differ, the connection stays up; the client SHOULD invoke schema discovery (`server.schema`, section 7) and adapt. A fingerprint mismatch is a hint that the method set changed, nothing more. Implementations MUST NOT close a connection because the fingerprints differ.
 
 ### 3.1 Worked example
 
@@ -113,7 +113,7 @@ Element semantics:
 - The leading element is the **kind tag**, a MessagePack integer 0–6. Any other value — 7, a larger integer, or a negative one — is an `unknownEnvelope` error.
 - **Arity tolerance.** Arity is exact per kind, with three mandated tolerances for forward evolution: kind 1 tolerates arity 6 — the sixth element is reserved for future call options and is structurally skipped, never interpreted; kind 4 tolerates any arity ≥ 3 — the third element is reserved (senders MUST write the integer 0) and it and anything beyond are structurally skipped; kind 6 tolerates any arity ≥ 2 — elements after msgid are structurally skipped. Everything else about the envelope is fixed; evolution otherwise happens inside payloads and the error object.
 - **msgid** is an unsigned integer that MUST fit in `u32`. It is assigned by the caller opening the call, is scoped **per connection**, and **wraps around** modulo 2³². A caller MUST NOT reuse a msgid while a call with that msgid is still awaiting its terminal response on the same connection (on wrap, the caller must ensure no live collision). The msgid slot follows the integer representability rule of section 5.4: any value not exactly representable in `u32` — wider than `u32`, or a negative MessagePack integer — is a decode error (`numberOutOfRange`); a non-canonical wider-than-necessary (oversized) encoding of a representable value is tolerated (e.g. msgid 1 encoded as `cc 01`).
-- **method** is a MessagePack string (e.g. `journal.append`, `rpc.schema`). Method names are dotted paths like entity names.
+- **method** is a MessagePack string (e.g. `journal.append`, `server.schema`). Method names are dotted paths like entity names.
 - **entity** is a MessagePack string: the dotted path of the call's target entity (`""` = root). It is **authorization metadata, not payload** — the server parses and authorizes it (section 7) before the params slot is ever interpreted. A string that does not parse as an entity path is answered with `malformedParams` (code 3).
 - **params**, **result**, and **item** are **raw payload slots**: each holds exactly one complete MessagePack value of any type, passed through opaquely by the envelope layer. A receiver computes the slot's byte extent by structurally walking the value (respecting the nesting cap, section 5.6) without materializing it; the payload is decoded later, against the concrete request/response/element type, after dispatch and authorization. On encode, a sender MUST place exactly one complete MessagePack value in each raw slot — no more, no fewer bytes.
 - **error** in a response is either MessagePack `nil` (success) or an error object (section 6). In a response, the sender MUST encode `nil` in the slot it is not using: `error` is `nil` on success; `result` SHOULD be `nil` on failure. A receiver treats any non-nil `error` as failure. A response with `nil` in both slots is a valid void success.
@@ -313,7 +313,7 @@ On the wire an entity name is a plain MessagePack string.
 
 **The call's target entity is envelope metadata, never payload**: it rides the open frame's dedicated entity slot (section 4), as the dotted-path string. The server parses it and runs the full authorization (traversal + target check) **before interpreting a single byte of the params slot** — an unauthorized peer's payload is never decoded at all, which both saves work and minimizes the pre-auth attack surface. Request payloads are consequently plain values like responses and stream elements: fields keyed from 0, no reserved key, and any named type (a `reference`, section 8.3) can stand as a whole request payload with no special shape.
 
-Worked example — a `rpc.schema` call scoped to entity `journal` puts `journal` in the envelope's entity slot; its request payload is the empty map `{}` (`80`).
+Worked example — a `server.schema` call scoped to entity `journal` puts `journal` in the envelope's entity slot; its request payload is the empty map `{}` (`80`).
 
 ### 7.3 The rwx / ugo ACL model
 
@@ -323,7 +323,7 @@ Access bits (per class): **execute/traverse = 1, write/mutate = 2, read/observe 
 
 Mode layout: `mode` is a `u16` whose low 9 bits are `(owner_bits << 6) | (group_bits << 3) | other_bits` — conventionally written in octal (`0o750` = owner rwx, group r-x, other ---). The default creation mode for new entities is **0o750**, configurable umask-style per server.
 
-Each method declares the access class its verb requires on the target entity (e.g. `journal.append` requires write; `rpc.schema` requires read).
+Each method declares the access class its verb requires on the target entity (e.g. `journal.append` requires write; `server.schema` requires read).
 
 **Class selection.** The peer is classified once, in this order:
 
@@ -364,9 +364,9 @@ Peer identity (uid, primary gid, supplementary groups) is derived by the server 
 
 ## 8. Schema discovery
 
-Two builtin methods exist on every server. Both declare **read** on their target entity and are subject to the traversal rule of section 7.4 like any other method. A **root** target, having no ACL and no ancestors (section 7.1), is exempt from both checks and reaches the handler unconditionally: `rpc.schema` then filters its response by the peer's per-method traversal rights (section 8.1), and `entity.stat` denies root inside its handler via the no-ACL rule (section 8.2).
+Two builtin methods exist on every server. Both declare **read** on their target entity and are subject to the traversal rule of section 7.4 like any other method. A **root** target, having no ACL and no ancestors (section 7.1), is exempt from both checks and reaches the handler unconditionally: `server.schema` then filters its response by the peer's per-method traversal rights (section 8.1), and `server.entity` denies root inside its handler via the no-ACL rule (section 8.2).
 
-### 8.1 `rpc.schema`
+### 8.1 `server.schema`
 
 Request (`SchemaRequest`): the empty map `{}` — the discovery **scope** is the call's envelope entity (a concrete entity narrows to its subtree; root, the empty path, asks about the whole tree). Response (`SchemaResponse`):
 
@@ -408,7 +408,7 @@ Every optional slot is absent (the key omitted from the map) when unset; readers
 | 1 | schema | TypeSchema — a `structure` or `enumeration` |
 | 2 | description | string — **optional**; documentation only |
 
-### 8.2 `entity.stat`
+### 8.2 `server.entity`
 
 Request (`StatRequest`): the empty map `{}` — the stat **target** is the call's envelope entity. Root has no ACL to report: a stat call whose envelope entity is the empty string reaches the handler (section 8) but is denied with `permissionDenied` (code 2), the same no-ACL rule as section 6.1. Response (`StatResponse`) is the target's ACL:
 
@@ -479,7 +479,7 @@ Hex: `82000701810005`. Bare `string` alone is `810005`.
 
 ## 9. Schema fingerprint
 
-The 8-byte fingerprint exchanged in the hello is a stable, cross-platform hash of the server's method set **and named-type table**. The set includes the two builtin methods of section 8: `rpc.schema` and `entity.stat` are fingerprinted like any application method (their canonical signatures are pinned in section 9.5). Two independent implementations MUST compute identical values for the same set of method signatures and type definitions. It is computed as **FNV-1a 64** over a canonical byte encoding of the sorted signatures followed by the sorted type definitions.
+The 8-byte fingerprint exchanged in the hello is a stable, cross-platform hash of the server's method set **and named-type table**. The set includes the two builtin methods of section 8: `server.schema` and `server.entity` are fingerprinted like any application method (their canonical signatures are pinned in section 9.5). Two independent implementations MUST compute identical values for the same set of method signatures and type definitions. It is computed as **FNV-1a 64** over a canonical byte encoding of the sorted signatures followed by the sorted type definitions.
 
 **Descriptions are never hashed.** None of the five signature doc slots (keys 2, 11, 13, 21, 23), field descriptions (Field key 3), enum-case descriptions, or definition descriptions appear in the canonical encoding — doc edits never change the fingerprint.
 
@@ -514,10 +514,10 @@ Consequences: source registration order never matters (sorted); struct **field o
 
 ### 9.3 Worked example
 
-The canonical encoding of the `entity.stat` signature — name `entity.stat`, access read (4), request `structure[]` (an empty payload: the target rides the envelope), response `structure[{key 0, "owner", uint}, {key 1, "group", uint}, {key 2, "mode", uint}]`:
+The canonical encoding of the `server.entity` signature — name `server.entity`, access read (4), request `structure[]` (an empty payload: the target rides the envelope), response `structure[{key 0, "owner", uint}, {key 1, "group", uint}, {key 2, "mode", uint}]`:
 
 ```
-0b000000 656e746974792e73746174        name: len 11, "entity.stat"
+0b000000 656e746974792e73746174        name: len 11, "server.entity"
 04                                      access: read (4)
 0a 00000000                             request: structure, 0 fields
 0a 03000000                             response: structure, 3 fields
@@ -539,10 +539,10 @@ FNV-1a 64 reference vectors (published test values): empty input → `0xcbf29ce4
 Pinned golden fingerprint: the three-signature set below MUST fingerprint to **`0x401118443279fc06`** (verified independently against the reference implementation). A change to this value in any implementation is a wire-protocol break.
 
 1. `journal.append`, access write (2), request `structure[{0, "entity", string}, {1, "events", array(bytes)}, {2, "note", optional(string)}]`, response `structure[{0, "sequence", uint}]`.
-2. `entity.stat`, access read (4), request and response as in 9.3.
+2. `server.entity`, access read (4), request and response as in 9.3.
 3. `journal.list`, access read (4), request `structure[{0, "entity", string}, {1, "filters", map(string, bool)}, {no key, "legacy", unknown}]`, response `array(double)`.
 
-(Sorted order for hashing: `entity.stat`, `journal.append`, `journal.list`.)
+(Sorted order for hashing: `server.entity`, `journal.append`, `journal.list`.)
 
 Pinned golden fingerprint for a **typed** set (exercises `enumeration`, `reference`, and the tag-3 type-definition entries; verified independently against the reference implementation): the set below MUST fingerprint to **`0x96667b7065cbb8e4`**.
 
@@ -556,9 +556,9 @@ Pinned golden fingerprint for a **typed** set (exercises `enumeration`, `referen
 
 Because the builtins (section 8) are part of the fingerprinted set, a real server's fingerprint is reproducible only with their exact canonical signatures, pinned here.
 
-`entity.stat` is exactly the signature of section 9.3.
+`server.entity` is exactly the signature of section 9.3.
 
-`rpc.schema` is: name `rpc.schema`, access read (4), request `structure[]` (empty, identical to `entity.stat`'s request — targets ride the envelope), response `structure[{0, "fingerprint", uint}, {1, "methods", array(MethodSignature)}, {2, "types", optional(array(TypeDefinition))}]`. `MethodSignature` hashes as the structure `structure[{0, "name", string}, {1, "access", uint}, {2, "description", optional(string)}, {10, "request", TypeSchema}, {11, "requestDescription", optional(string)}, {12, "requestStream", optional(TypeSchema)}, {13, "requestStreamDescription", optional(string)}, {20, "response", TypeSchema}, {21, "responseDescription", optional(string)}, {22, "responseStream", optional(TypeSchema)}, {23, "responseStreamDescription", optional(string)}]` (the stream and doc slots are always-present optional fields in the *type*, distinct from the wire encoding of a concrete signature, where an absent slot omits the key). `TypeDefinition` hashes as `structure[{0, "name", string}, {1, "schema", TypeSchema}, {2, "description", optional(string)}]`. The schema standing for a `TypeSchema`-typed field is the pinned structure `structure[{0, "tag", uint}, {1, "first", unknown}, {2, "second", unknown}]` — the payload slots are `unknown` (tag 255) because the shape in those positions depends on the tag, which a static schema cannot express. (The `types` slot is `optional(array(...))` because the reference decoder reads it with a presence check — the key is absent on pre-types wires.)
+`server.schema` is: name `server.schema`, access read (4), request `structure[]` (empty, identical to `server.entity`'s request — targets ride the envelope), response `structure[{0, "fingerprint", uint}, {1, "methods", array(MethodSignature)}, {2, "types", optional(array(TypeDefinition))}]`. `MethodSignature` hashes as the structure `structure[{0, "name", string}, {1, "access", uint}, {2, "description", optional(string)}, {10, "request", TypeSchema}, {11, "requestDescription", optional(string)}, {12, "requestStream", optional(TypeSchema)}, {13, "requestStreamDescription", optional(string)}, {20, "response", TypeSchema}, {21, "responseDescription", optional(string)}, {22, "responseStream", optional(TypeSchema)}, {23, "responseStreamDescription", optional(string)}]` (the stream and doc slots are always-present optional fields in the *type*, distinct from the wire encoding of a concrete signature, where an absent slot omits the key). `TypeDefinition` hashes as `structure[{0, "name", string}, {1, "schema", TypeSchema}, {2, "description", optional(string)}]`. The schema standing for a `TypeSchema`-typed field is the pinned structure `structure[{0, "tag", uint}, {1, "first", unknown}, {2, "second", unknown}]` — the payload slots are `unknown` (tag 255) because the shape in those positions depends on the tag, which a static schema cannot express. (The `types` slot is `optional(array(...))` because the reference decoder reads it with a presence check — the key is absent on pre-types wires.)
 
 ## 10. Connection lifecycle (protocol-normative subset)
 

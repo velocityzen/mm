@@ -34,13 +34,13 @@ struct MethodTests {
         .init(key: 2, name: "description", type: .optional(.string)),
     ])
 
-    @Test("rpc.schema signature")
+    @Test("server.schema signature")
     func schemaSignature() {
         #expect(
             Builtins.schema.signature()
                 == .success(
                     MethodSignature(
-                        name: "rpc.schema",
+                        name: "server.schema",
                         access: .read,
                         request: Self.emptyRequest,
                         response: .structure(fields: [
@@ -58,13 +58,13 @@ struct MethodTests {
         )
     }
 
-    @Test("entity.stat signature")
+    @Test("server.entity signature")
     func statSignature() {
         #expect(
-            Builtins.stat.signature()
+            Builtins.entity.signature()
                 == .success(
                     MethodSignature(
-                        name: "entity.stat",
+                        name: "server.entity",
                         access: .read,
                         request: Self.emptyRequest,
                         response: .structure(fields: [
@@ -80,14 +80,14 @@ struct MethodTests {
     @Test("AnyMethod erases without losing name, access, or signature")
     func anyMethodErasure() {
         let erased = AnyMethod(Builtins.schema)
-        #expect(erased.name == "rpc.schema")
+        #expect(erased.name == "server.schema")
         #expect(erased.access == .read)
         #expect(erased.signature() == Builtins.schema.signature())
     }
 
     @Test("Builtins namespace lists all methods")
     func namespaceAll() {
-        #expect(Builtins.all.map(\.name) == ["rpc.schema", "entity.stat"])
+        #expect(Builtins.all.map(\.name) == ["server.schema", "server.entity"])
         #expect(Builtins.all.map(\.access) == [.read, .read])
         for method in Builtins.all {
             #expect(throws: Never.self) {

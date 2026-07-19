@@ -1,4 +1,4 @@
-/// Well-known protocol-level RPC error codes carried in `MMErrorObject.code`.
+/// Well-known protocol-level RPC error codes carried in `MMError.code`.
 ///
 /// Code table (streaming amendment): 1 unknownMethod, 2 permissionDenied,
 /// 3 malformedParams, 4 tooManyInFlight, 5 internalError, 6 streamViolation,

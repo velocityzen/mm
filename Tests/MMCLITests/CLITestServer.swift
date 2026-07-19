@@ -1,8 +1,8 @@
-import Foundation  // Tests only: mkdtemp template under NSTemporaryDirectory().
 import Logging
 import MMClient
 import MMSchema
 import MMServer
+import MMTestSupport
 import MMWire
 import NIOCore
 import ServiceLifecycle
@@ -18,56 +18,10 @@ import Musl
 #endif
 
 // MARK: - Bounded waits (no sleeps)
+// withDeadline and withTempSocketPath come from MMTestSupport.
 
 struct CLITestFailure: Error {
     let description: String
-}
-
-/// Bounds any await with a `ContinuousClock` deadline so a broken server
-/// hangs a test for at most `seconds`, never forever.
-func withCLIDeadline<T: Sendable>(
-    seconds: Double = 10,
-    _ body: @escaping @Sendable () async throws -> T
-) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask { try await body() }
-        group.addTask {
-            try await Task.sleep(for: .seconds(seconds), tolerance: nil, clock: ContinuousClock())
-            throw CLITestFailure(description: "deadline exceeded")
-        }
-        guard let first = try await group.next() else {
-            throw CLITestFailure(description: "deadline exceeded")
-        }
-        group.cancelAll()
-        return first
-    }
-}
-
-// MARK: - Temp socket paths
-
-/// `mkdtemp(3)` under the system temp directory; the short "s" socket name
-/// keeps the full path well inside `sun_path`'s limit.
-private func makeCLITempSocketPath() throws -> String {
-    var template = Array((NSTemporaryDirectory() + "mm-cli-XXXXXX").utf8CString)
-    let directory = template.withUnsafeMutableBufferPointer { buffer -> String? in
-        guard let base = buffer.baseAddress, mkdtemp(base) != nil else { return nil }
-        return String(cString: base)
-    }
-    guard let directory else {
-        throw CLITestFailure(description: "mkdtemp failed, errno \(errno)")
-    }
-    return directory + "/s"
-}
-
-/// Scopes a fresh temp socket path to `body` and cleans up afterwards, pass
-/// or fail, so test runs leave no debris under the system temp directory.
-private func withCLITempSocketPath<T>(_ body: (String) async throws -> T) async throws -> T {
-    let path = try makeCLITempSocketPath()
-    defer {
-        unlink(path)
-        rmdir(String(path.dropLast("/s".count)))
-    }
-    return try await body(path)
 }
 
 // MARK: - Wire fixtures
@@ -167,10 +121,9 @@ private func cliTestACLs() -> [EntityName: EntityACL] {
         cliTestEntity("box"): EntityACL(owner: uid, group: gid, mode: 0o700),
         cliTestEntity("echo"): EntityACL(owner: uid, group: gid, mode: 0o700),
         cliTestEntity("locked"): EntityACL(owner: uid, group: gid, mode: 0o000),
-        // The builtins' method-name prefixes: x here makes rpc.schema and
-        // entity.stat visible in this peer's filtered discovery response.
-        cliTestEntity("rpc"): EntityACL(owner: uid, group: gid, mode: 0o700),
-        cliTestEntity("entity"): EntityACL(owner: uid, group: gid, mode: 0o700),
+        // The builtins' method-name prefixes: x here makes server.schema and
+        // server.entity visible in this peer's filtered discovery response.
+        cliTestEntity("server"): EntityACL(owner: uid, group: gid, mode: 0o700),
     ]
 }
 
@@ -209,10 +162,10 @@ private func makeCLITestService(
                     case .sent:
                         continue
                     case .peerStopped, .callEnded:
-                        return .failure(MMErrorObject(code: 64, message: "follow failure"))
+                        return .failure(MMError(code: 64, message: "follow failure"))
                 }
             }
-            return .failure(MMErrorObject(code: 64, message: "follow failure"))
+            return .failure(MMError(code: 64, message: "follow failure"))
         }
         Handle(CLITestMethods.importItems) { _, elements, _ in
             var consumed = 0
@@ -236,40 +189,25 @@ private func makeCLITestService(
 
 /// Boots the test service on a fresh temp socket, waits (bounded) for the
 /// bind, hands `body` ready-made `MMCLIOptions` pointing at the socket, then
-/// triggers graceful shutdown and joins — everything deadline-bounded.
+/// triggers graceful shutdown and joins — the shared
+/// ``withServiceGroup(_:logger:ready:onBodyError:_:)`` choreography.
 func withCLIServer<T: Sendable>(
     _ body: @escaping @Sendable (MMCLIOptions) async throws -> T
 ) async throws -> T {
-    try await withCLITempSocketPath { path in
+    try await withTempSocketPath(prefix: "mm-cli-") { path in
         let (bound, boundContinuation) = AsyncStream<SocketAddress>.makeStream()
         let service = makeCLITestService(socketPath: path) { address in
             boundContinuation.yield(address)
             boundContinuation.finish()
         }
-        var groupLogger = Logger(label: "mm.clitest.group")
-        groupLogger.logLevel = .error
-        let group = ServiceGroup(
-            configuration: .init(services: [.init(service: service)], logger: groupLogger)
-        )
-        return try await withThrowingTaskGroup(of: Void.self) { tasks in
-            tasks.addTask {
-                try await withCLIDeadline(seconds: 60) { try await group.run() }
-            }
-            _ = try await withCLIDeadline { await bound.first(where: { _ in true }) }
+        return try await withServiceGroup(
+            service,
+            ready: { _ = await bound.first(where: { _ in true }) }
+        ) { _ in
             // Parsed, not memberwise-constructed: ArgumentParser property
             // wrappers trap when read before a parse has populated them.
             let optionsForBody = try MMCLIOptions.parse(["--socket", path])
-            let result: T
-            do {
-                result = try await withCLIDeadline(seconds: 30) { try await body(optionsForBody) }
-            } catch {
-                await group.triggerGracefulShutdown()
-                try? await tasks.waitForAll()
-                throw error
-            }
-            await group.triggerGracefulShutdown()
-            try await tasks.waitForAll()
-            return result
+            return try await withDeadline(seconds: 30) { try await body(optionsForBody) }
         }
     }
 }

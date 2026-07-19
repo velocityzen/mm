@@ -30,7 +30,7 @@ import MMSchema
 /// Named types (`Enum`/`Type`) are part of the contract too: `Priority` is a
 /// string-valued wire enum (the generated Swift enum gains an `unknown` case
 /// for unrecognized values), `LineMeta` a named struct other fields reference.
-/// Every `description:` below is served by `rpc.schema` — discovery is
+/// Every `description:` below is served by `server.schema` — discovery is
 /// self-documenting — while staying out of the fingerprint and all
 /// compatibility checks: doc edits are never schema drift.
 public enum Journal: MethodNamespace {

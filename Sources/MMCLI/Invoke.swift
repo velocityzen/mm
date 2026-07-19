@@ -17,20 +17,18 @@ public enum MMCLIRunner {
     ///
     /// ## Automatic schema verification
     ///
-    /// Verification is never manual; three layers, cheapest first:
-    /// 1. An operator `--expect-fingerprint` pin is an identity gate —
-    ///    mismatch refuses the invocation outright (exit 76).
-    /// 2. An installed ``MMCLIServerContract`` completeness claim whose
+    /// Verification is never manual; two layers, cheapest first:
+    /// 1. An installed ``MMCLIServerContract`` completeness claim whose
     ///    folded fingerprint matches the hello proves every declared
     ///    namespace for free — no discovery round-trip.
-    /// 3. Otherwise, when the command passes its `verifying:` contract
+    /// 2. Otherwise, when the command passes its `verifying:` contract
     ///    (every generated command does), the contract's namespace is
     ///    confirmed with one scoped discovery diff before dispatch: drift
     ///    prints the difference and exits 76. A *denied* discovery skips
     ///    with a note — verification is best-effort protection, and a peer
     ///    may hold call rights without read on the namespace entity.
     ///
-    /// `--no-verify` skips layer 3 for one invocation.
+    /// `--no-verify` skips layer 2 for one invocation.
     public static func invoke<T: Sendable>(
         _ options: MMCLIOptions,
         verifying contract: SchemaDeclaration? = nil,
@@ -51,29 +49,17 @@ public enum MMCLIRunner {
             case .success(let connected):
                 connection = connected
         }
-        // An explicit operator pin is enforced, unlike the library's soft
-        // fingerprint verdict: `--expect-fingerprint` plus a mismatch refuses
-        // the invocation before a single call is dispatched. The library
-        // itself never disconnects on mismatch — but a deployment pin the
-        // operator spelled out is allowed to be hard (EX_PROTOCOL).
-        if connection.helloInfo.fingerprintMatched == false {
-            let served = String(connection.helloInfo.serverFingerprint, radix: 16)
-            await connection.close()
-            MMCLIOutput.note(
-                "server schema fingerprint 0x\(served) does not match --expect-fingerprint")
-            throw ExitCode(76)
-        }
-        // Layer 2: a matching completeness claim proves every declared
+        // Layer 1: a matching completeness claim proves every declared
         // contract straight from the hello; anything else falls through to
         // the per-namespace diff.
         var provenByClaim = false
         if let installed = claim ?? MMCLIServerContract.current() {
-            if connection.helloInfo.serverFingerprint == installed.expectedFingerprint {
+            if connection.server.fingerprint == installed.expectedFingerprint {
                 provenByClaim = true
             } else {
-                let served = String(connection.helloInfo.serverFingerprint, radix: 16)
+                let served = fingerprintHexString(connection.server.fingerprint)
                 MMCLIOutput.note(
-                    "server composition differs from this build (0x\(served), expected \(installed.fingerprintHex)) — verifying the namespace in use"
+                    "server composition differs from this build (\(served), expected \(installed.fingerprintHex)) — verifying the namespace in use"
                 )
             }
         }
@@ -98,7 +84,7 @@ public enum MMCLIRunner {
         }
     }
 
-    /// Layer 3: the scoped discovery diff for one contract (see `invoke`).
+    /// Layer 2: the scoped discovery diff for one contract (see `invoke`).
     private static func verify(
         _ contract: SchemaDeclaration, on connection: MMClientConnection
     ) async throws {
@@ -114,7 +100,7 @@ public enum MMCLIRunner {
                     "schema verification skipped: discovery denied for \(contract.namespace)")
             case .failure(let error):
                 throw MMCLIFailure.exit(
-                    for: error, method: "rpc.schema", entity: contract.namespace)
+                    for: error, method: "server.schema", entity: contract.namespace)
         }
     }
 }

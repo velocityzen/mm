@@ -1,4 +1,5 @@
 import MMSchema
+import MMTestSupport
 import MMWire
 import NIOCore
 import Testing
@@ -33,7 +34,7 @@ private func remote(
 
 @Suite("Schema discovery: wire behavior")
 struct DiscoveryWireTests {
-    @Test("discoverSchema is a plain rpc.schema call scoped to root, and decodes the response")
+    @Test("discoverSchema is a plain server.schema call scoped to root, and decodes the response")
     func discoverSchemaOverTheWire() async throws {
         _ = try await withRunningConnection { client in
             let served = [signature("box.get"), signature("box.watch", access: .write)]
@@ -43,7 +44,7 @@ struct DiscoveryWireTests {
                     #expect(reply == .success(SchemaResponse(fingerprint: 0xFEED, methods: served)))
                 }
                 let (msgid, method, params) = try await client.readRequestFrame()
-                #expect(method == "rpc.schema")
+                #expect(method == "server.schema")
                 // SchemaRequest is an empty payload — the scope is the
                 // envelope entity (root here).
                 #expect(allBytes(params) == [0x80])
@@ -58,7 +59,7 @@ struct DiscoveryWireTests {
         }
     }
 
-    @Test("a denied rpc.schema surfaces as a normal call error")
+    @Test("a denied server.schema surfaces as a normal call error")
     func discoveryDenied() async throws {
         _ = try await withRunningConnection { client in
             try await withThrowingTaskGroup(of: Void.self) { group in
@@ -70,7 +71,7 @@ struct DiscoveryWireTests {
                 try await client.channel.writeInbound(
                     errorFrame(
                         msgid: msgid,
-                        MMErrorObject(code: 2, message: "permission denied", payload: nil)
+                        MMError(code: 2, message: "permission denied", payload: nil)
                     )
                 )
                 try await group.waitForAll()

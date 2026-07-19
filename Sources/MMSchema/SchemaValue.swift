@@ -63,10 +63,12 @@ extension SchemaValue {
                 resolved = followed
             case .failure(.unresolved(let name)):
                 return .failure(
-                    SchemaValueError(path: path, problem: "unresolved type reference '\(name)'"))
+                    SchemaValueError(path: path, problem: "unresolved type reference '\(name)'")
+                )
             case .failure(.cycle(let name)):
                 return .failure(
-                    SchemaValueError(path: path, problem: "cyclic type reference '\(name)'"))
+                    SchemaValueError(path: path, problem: "cyclic type reference '\(name)'")
+                )
         }
         switch resolved {
             case .optional(let wrapped):
@@ -109,95 +111,73 @@ extension SchemaValue {
                 guard case .array(let items) = self else {
                     return self.mismatch(path, expected: "array")
                 }
-                var validatedItems: [SchemaValue] = []
-                validatedItems.reserveCapacity(items.count)
-                for (index, item) in items.enumerated() {
-                    switch item.validated(
-                        against: element, resolver: resolver, path: "\(path)[\(index)]")
-                    {
-                        case .success(let canonical): validatedItems.append(canonical)
-                        case .failure(let error): return .failure(error)
+                return items.enumerated()
+                    .traverse { index, item in
+                        item.validated(
+                            against: element, resolver: resolver, path: "\(path)[\(index)]")
                     }
-                }
-                return .success(.array(validatedItems))
+                    .map { .array($0) }
             case .map(let keySchema, let valueSchema):
                 guard case .object(let members) = self else {
                     return self.mismatch(path, expected: "object (wire map)")
                 }
-                var validatedMembers: [Member] = []
-                validatedMembers.reserveCapacity(members.count)
-                var seen: Set<String> = []
-                for member in members {
-                    let memberPath = path.isEmpty ? member.name : "\(path).\(member.name)"
-                    guard seen.insert(member.name).inserted else {
-                        return .failure(
-                            SchemaValueError(path: memberPath, problem: "duplicate key"))
-                    }
-                    // JSON keys are strings; integer-keyed wire maps take
-                    // their keys as decimal text.
-                    switch keySchema {
-                        case .string:
-                            break
-                        case .int, .uint:
-                            guard Int64(member.name) != nil else {
-                                return .failure(
-                                    SchemaValueError(
-                                        path: memberPath, problem: "key is not an integer"))
-                            }
-                        default:
-                            return .failure(
-                                SchemaValueError(
-                                    path: memberPath,
-                                    problem: "unsupported map key schema for dynamic values"))
-                    }
-                    switch member.value.validated(
-                        against: valueSchema, resolver: resolver, path: memberPath)
-                    {
-                        case .success(let canonical):
-                            validatedMembers.append(Member(member.name, canonical))
-                        case .failure(let error):
-                            return .failure(error)
-                    }
+                if let duplicate = firstDuplicate(members.map(\.name)) {
+                    return .failure(
+                        SchemaValueError(
+                            path: Self.appending(duplicate, to: path), problem: "duplicate key")
+                    )
                 }
-                return .success(.object(validatedMembers))
+                return members
+                    .traverse { member in
+                        let memberPath = Self.appending(member.name, to: path)
+                        return Self.validateMapKey(member.name, against: keySchema, path: memberPath)
+                            .flatMap {
+                                member.value.validated(
+                                    against: valueSchema, resolver: resolver, path: memberPath)
+                            }
+                            .map { canonical in Member(member.name, canonical) }
+                    }
+                    .map { .object($0) }
             case .structure(let fields):
                 guard case .object(let members) = self else {
                     return self.mismatch(path, expected: "object")
                 }
-                var byName: [String: SchemaValue] = [:]
-                for member in members {
-                    let memberPath = path.isEmpty ? member.name : "\(path).\(member.name)"
-                    guard byName.updateValue(member.value, forKey: member.name) == nil else {
-                        return .failure(
-                            SchemaValueError(path: memberPath, problem: "duplicate member"))
-                    }
-                    guard fields.contains(where: { $0.name == member.name }) else {
-                        return .failure(
-                            SchemaValueError(
-                                path: memberPath,
-                                problem: "unknown member (schema declares no such field)"))
-                    }
+                if let duplicate = firstDuplicate(members.map(\.name)) {
+                    return .failure(
+                        SchemaValueError(
+                            path: Self.appending(duplicate, to: path), problem: "duplicate member")
+                    )
                 }
-                var canonicalMembers: [Member] = []
-                canonicalMembers.reserveCapacity(fields.count)
-                for field in fields {
-                    let fieldPath = path.isEmpty ? field.name : "\(path).\(field.name)"
-                    guard let provided = byName[field.name] else {
-                        if case .optional = field.type { continue }
-                        return .failure(
-                            SchemaValueError(
-                                path: fieldPath, problem: "missing required field"))
-                    }
-                    switch provided.validated(
-                        against: field.type, resolver: resolver, path: fieldPath)
-                    {
-                        case .success(let canonical):
-                            canonicalMembers.append(Member(field.name, canonical))
-                        case .failure(let error):
-                            return .failure(error)
-                    }
+                if let unknown = members.first(where: { member in
+                    !fields.contains(where: { $0.name == member.name })
+                }) {
+                    return .failure(
+                        SchemaValueError(
+                            path: Self.appending(unknown.name, to: path),
+                            problem: "unknown member (schema declares no such field)"
+                        )
+                    )
                 }
-                return .success(.object(canonicalMembers))
+                let byName = Dictionary(
+                    members.map { ($0.name, $0.value) },
+                    uniquingKeysWith: { first, _ in first }
+                )
+                // Canonical order is schema field order; an absent optional
+                // field simply drops out of the canonical object.
+                return fields
+                    .traverse { field -> Result<Member?, SchemaValueError> in
+                        let fieldPath = Self.appending(field.name, to: path)
+                        guard let provided = byName[field.name] else {
+                            if case .optional = field.type { return .success(nil) }
+                            return .failure(
+                                SchemaValueError(path: fieldPath, problem: "missing required field")
+                            )
+                        }
+                        return provided
+                            .validated(against: field.type, resolver: resolver, path: fieldPath)
+                            .map { canonical in Member(field.name, canonical) }
+                    }
+                    .map { .object($0.compactMap { $0 }) }
             case .enumeration(let cases):
                 guard case .string(let raw) = self else {
                     return self.mismatch(path, expected: "enum case (string)")
@@ -206,26 +186,58 @@ extension SchemaValue {
                     let known = cases.map(\.name).joined(separator: ", ")
                     return .failure(
                         SchemaValueError(
-                            path: path, problem: "'\(raw)' is not one of: \(known)"))
+                            path: path,
+                            problem: "'\(raw)' is not one of: \(known)"
+                        )
+                    )
                 }
                 return .success(self)
             case .reference:
                 // Unreachable: resolve(_:) above never returns a reference.
                 return .failure(
-                    SchemaValueError(path: path, problem: "unresolvable reference"))
+                    SchemaValueError(path: path, problem: "unresolvable reference")
+                )
             case .unknown:
                 return .success(self)
         }
     }
 
     private func mismatch(
-        _ path: String, expected: String
+        _ path: String,
+        expected: String
     ) -> Result<SchemaValue, SchemaValueError> {
         .failure(SchemaValueError(path: path, problem: "expected \(expected), got \(self.kind)"))
     }
 
-    /// The value's own kind, for error messages.
-    var kind: String {
+    /// One member/field path segment appended to a (possibly empty) parent path.
+    private static func appending(_ name: String, to path: String) -> String {
+        path.isEmpty ? name : "\(path).\(name)"
+    }
+
+    /// JSON keys are strings; integer-keyed wire maps take their keys as
+    /// decimal text.
+    private static func validateMapKey(
+        _ name: String,
+        against keySchema: TypeSchema,
+        path: String
+    ) -> Result<Void, SchemaValueError> {
+        switch keySchema {
+            case .string:
+                return .success(())
+            case .int, .uint:
+                return Int64(name) != nil
+                    ? .success(())
+                    : .failure(SchemaValueError(path: path, problem: "key is not an integer"))
+            default:
+                return .failure(
+                    SchemaValueError(
+                        path: path, problem: "unsupported map key schema for dynamic values")
+                )
+        }
+    }
+
+    /// The value's own kind, for error messages and renderers.
+    public var kind: String {
         switch self {
             case .null: return "null"
             case .bool: return "bool"
@@ -297,12 +309,15 @@ extension SchemaValue {
     }
 
     public static func encodeBase64(_ bytes: [UInt8]) -> String {
-        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".utf8)
+        let alphabet = Array(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".utf8
+        )
         var out: [UInt8] = []
         out.reserveCapacity((bytes.count + 2) / 3 * 4)
         var index = 0
         while index + 3 <= bytes.count {
-            let chunk = (UInt32(bytes[index]) << 16) | (UInt32(bytes[index + 1]) << 8)
+            let chunk =
+                (UInt32(bytes[index]) << 16) | (UInt32(bytes[index + 1]) << 8)
                 | UInt32(bytes[index + 2])
             out.append(alphabet[Int((chunk >> 18) & 63)])
             out.append(alphabet[Int((chunk >> 12) & 63)])

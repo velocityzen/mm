@@ -36,12 +36,12 @@ struct EnvelopeGoldenVectorTests {
             MMEnvelope.decode(from: mpBytes("9307a3657674810102")) == .failure(.unknownEnvelope))
     }
 
-    @Test("response with error object [-32601, \"no\"] and nil result")
+    @Test("response with error [-32601, \"no\"] and nil result")
     func responseErrorVector() {
         let vector = "94000792d180a7a26e6fc0"
         let envelope = MMEnvelope.response(
             msgid: 7,
-            error: MMErrorObject(code: -32601, message: "no"),
+            error: MMError(code: -32601, message: "no"),
             result: nil
         )
         #expect(envelope.encoded().mpSuccess.map(mpHex) == vector)
@@ -53,7 +53,7 @@ struct EnvelopeGoldenVectorTests {
         let vector = "9400079301a165920102c0"
         let envelope = MMEnvelope.response(
             msgid: 7,
-            error: MMErrorObject(code: 1, message: "e", payload: mpBytes("920102")),
+            error: MMError(code: 1, message: "e", payload: mpBytes("920102")),
             result: nil
         )
         #expect(envelope.encoded().mpSuccess.map(mpHex) == vector)
@@ -495,7 +495,7 @@ struct EnvelopeSliceExtentTests {
                 == .success(
                     .response(
                         msgid: 1,
-                        error: MMErrorObject(code: 1, message: "e", payload: mpBytes("920102")),
+                        error: MMError(code: 1, message: "e", payload: mpBytes("920102")),
                         result: nil
                     )
                 )
@@ -503,14 +503,14 @@ struct EnvelopeSliceExtentTests {
     }
 }
 
-@Suite("MMErrorObject wire form")
+@Suite("MMError wire form")
 struct ErrorObjectTests {
     @Test("two-element form decodes with nil payload")
     func twoElementForm() {
         var buffer = mpBytes("92d180a7a26e6f")
         #expect(
-            MMErrorObject.decode(from: &buffer)
-                == .success(MMErrorObject(code: -32601, message: "no", payload: nil))
+            MMError.decode(from: &buffer)
+                == .success(MMError(code: -32601, message: "no", payload: nil))
         )
         #expect(buffer.readableBytes == 0)
     }
@@ -519,8 +519,8 @@ struct ErrorObjectTests {
     func explicitNilPayload() {
         var buffer = mpBytes("9301a165c0")
         #expect(
-            MMErrorObject.decode(from: &buffer)
-                == .success(MMErrorObject(code: 1, message: "e", payload: nil))
+            MMError.decode(from: &buffer)
+                == .success(MMError(code: 1, message: "e", payload: nil))
         )
     }
 
@@ -529,8 +529,8 @@ struct ErrorObjectTests {
         // [1, "e", nil, 99, "ex"] followed by an unrelated byte that must remain.
         var buffer = mpBytes("9501a165c063a2657859")
         #expect(
-            MMErrorObject.decode(from: &buffer)
-                == .success(MMErrorObject(code: 1, message: "e", payload: nil))
+            MMError.decode(from: &buffer)
+                == .success(MMError(code: 1, message: "e", payload: nil))
         )
         #expect(mpHex(buffer) == "59")
     }
@@ -539,12 +539,12 @@ struct ErrorObjectTests {
     func shortErrorObject() {
         var oneElement = mpBytes("9101")
         #expect(
-            MMErrorObject.decode(from: &oneElement)
+            MMError.decode(from: &oneElement)
                 == .failure(.invalidArity(expected: 2, got: 1))
         )
         var empty = mpBytes("90")
         #expect(
-            MMErrorObject.decode(from: &empty) == .failure(.invalidArity(expected: 2, got: 0))
+            MMError.decode(from: &empty) == .failure(.invalidArity(expected: 2, got: 0))
         )
     }
 
@@ -552,7 +552,7 @@ struct ErrorObjectTests {
     func failureRestoresIndex() {
         var buffer = mpBytes("9101")
         let before = buffer.readerIndex
-        _ = MMErrorObject.decode(from: &buffer)
+        _ = MMError.decode(from: &buffer)
         #expect(buffer.readerIndex == before)
     }
 }
@@ -703,7 +703,7 @@ struct EnvelopeEncodeValidationTests {
     func invalidErrorPayloadWritesNothing() {
         let envelope = MMEnvelope.response(
             msgid: 1,
-            error: MMErrorObject(code: 1, message: "e", payload: mpBytes("c1")),
+            error: MMError(code: 1, message: "e", payload: mpBytes("c1")),
             result: nil
         )
         var buffer = ByteBuffer()

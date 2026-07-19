@@ -1,5 +1,6 @@
 import Logging
 import MMSchema
+import MMTestSupport
 import MMWire
 import NIOConcurrencyHelpers
 import Testing
@@ -55,7 +56,7 @@ struct ServerBuilderTests {
         // The namespace cross-check accepted both routes; builtins registered.
         #expect(service.router.signatures.map(\.name).contains("box.echo"))
         #expect(service.router.signatures.map(\.name).contains("box.bump"))
-        #expect(service.router.signatures.map(\.name).contains("rpc.schema"))
+        #expect(service.router.signatures.map(\.name).contains("server.schema"))
         // On(...) puts the CONTEXT first; verify dispatch reaches the handler
         // with the decoded request intact through the reordering shim.
         let reply = await service.router.dispatch(

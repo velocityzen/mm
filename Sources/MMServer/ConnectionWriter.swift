@@ -1,3 +1,4 @@
+import FP
 import MMWire
 import Metrics
 import NIOCore
@@ -44,22 +45,19 @@ actor ConnectionWriter: WriterFunnel {
         guard !self.closed else {
             return .failure(.connectionClosed)
         }
-        let buffer: ByteBuffer
-        switch envelope.encoded() {
-        case .failure(let error):
-            return .failure(.encodingFailed(error))
-        case .success(let encoded):
-            buffer = encoded
-        }
-        do {
-            // Seam adapter: the writer's untyped throw collapses to the
-            // coarse transport case — the channel is gone either way.
-            try await self.outbound.write(buffer)
-            self.framesOut.increment()
-            return .success(())
-        } catch {
-            self.closed = true
-            return .failure(.connectionClosed)
-        }
+
+        return await envelope.encoded()
+            .mapError { ServerError.encodingFailed($0) }
+            .flatMapAsync { @Sendable buffer in await self.write(buffer) }
+    }
+
+    /// Seam adapter: the writer's untyped throw collapses to the coarse
+    /// transport case — the channel is gone either way, and the closed latch
+    /// makes every later send short-circuit.
+    private func write(_ buffer: ByteBuffer) async -> Result<Void, ServerError> {
+        await Result.fromAsync { @Sendable in try await self.outbound.write(buffer) }
+            .tap { self.framesOut.increment() }
+            .tapError { _ in self.closed = true }
+            .mapError { _ in ServerError.connectionClosed }
     }
 }

@@ -111,7 +111,7 @@ public enum Journal: MethodNamespace {
 }
 ```
 
-Method names are dotted like entity paths, and the name's prefix matters: `rpc.schema` treats the prefix (`journal.append` → `journal`) as an entity when filtering discovery by traversal rights, and the router's namespace cross-check owns routes by prefix. Name methods so their prefix is the entity subtree they operate on.
+Method names are dotted like entity paths, and the name's prefix matters: `server.schema` treats the prefix (`journal.append` → `journal`) as an entity when filtering discovery by traversal rights, and the router's namespace cross-check owns routes by prefix. Name methods so their prefix is the entity subtree they operate on.
 
 `@SchemaBuilder` supports the same conditional forms as `@RouterBuilder` — `if`, `if`/`else`, `for`, and splicing another namespace's list by naming it — so a feature-flagged method can be compiled out of both the schema and the router in one place:
 
@@ -416,7 +416,7 @@ Caching notes, in order of how much they matter:
 
 ## 3. Declaring the server inside the existing `ServiceGroup`
 
-`MMService` is a swift-service-lifecycle `Service`: eyed does not get a new lifecycle mechanism, it gets one more entry in the `ServiceGroup` it already runs. The declarative form assembles everything — configuration, authorization, logging, and the handlers — in one builder; underneath it constructs the `Router` (with `registerBuiltins: true`, so `rpc.schema` and `entity.stat` exist without user code), computes the hello fingerprint from every registered signature, and prepares metrics, all before `run()` is ever called.
+`MMService` is a swift-service-lifecycle `Service`: eyed does not get a new lifecycle mechanism, it gets one more entry in the `ServiceGroup` it already runs. The declarative form assembles everything — configuration, authorization, logging, and the handlers — in one builder; underneath it constructs the `Router` (with `registerBuiltins: true`, so `server.schema` and `server.entity` exist without user code), computes the hello fingerprint from every registered signature, and prepares metrics, all before `run()` is ever called.
 
 ```swift
 import Logging
@@ -438,8 +438,8 @@ let server = MMService {
     For(Journal.self) {
         // Inline, right in the definition. `On` puts the authorized
         // connection context first, then the decoded request; handlers
-        // return Result<Response, MMErrorObject> — domain failures go to the
-        // peer verbatim as wire error objects, codes >= 64.
+        // return Result<Response, MMError> — domain failures go to the
+        // peer verbatim as `MMError` values, codes >= 64.
         On(Journal.append) { auth, request in
             switch await store.append(request.line, tag: request.tag, to: auth.entity) {
             case .success(let sequence):
@@ -448,9 +448,9 @@ let server = MMService {
                 await store.broadcast(ChangeEvent(entity: auth.entity, sequence: sequence))
                 return .success(AppendResponse(sequence: sequence))
             case .failure(.journalSealed):
-                return .failure(MMErrorObject(code: 64, message: "journal is sealed"))
+                return .failure(MMError(code: 64, message: "journal is sealed"))
             case .failure:
-                return .failure(MMErrorObject(code: 65, message: "store failure"))
+                return .failure(MMError(code: 65, message: "store failure"))
             }
         }
         // — or a reusable group declared in its own file (see below).
@@ -471,7 +471,7 @@ struct JournalReadHandlers: RouteGroup {
         On(Journal.read) { auth, request in
             await store.read(from: request.fromSequence, in: auth.entity)
                 .map(ReadResponse.init(lines:))
-                .mapError { _ in MMErrorObject(code: 65, message: "store failure") }
+                .mapError { _ in MMError(code: 65, message: "store failure") }
         }
         // Server-streaming: (auth, request, sink). See §5.
         On(Journal.follow) { auth, request, sink in
@@ -575,7 +575,7 @@ TCP endpoints exist (`.tcp(host:port:)`, port 0 + the `onBind` callback for ephe
 
 ## 5. Streaming from handlers
 
-Server push is an ordinary method with a `ResponseStream`, not a side channel. A server-streaming handler takes `(req, sink, ctx)`: it pushes response elements through the credit-gated `MMResponseSink<Element>` and closes the call by returning its terminal `Result<Response, MMErrorObject>`. A client-streaming handler takes `(req, elements, ctx)`, where `elements` is an `MMRequestStream<Element>` — a backpressured `AsyncSequence` whose normal end is the client's graceful END; a bidirectional handler takes `(req, elements, sink, ctx)`. Authorization runs once, at open, on the request's entity, exactly like a unary call.
+Server push is an ordinary method with a `ResponseStream`, not a side channel. A server-streaming handler takes `(req, sink, ctx)`: it pushes response elements through the credit-gated `MMResponseSink<Element>` and closes the call by returning its terminal `Result<Response, MMError>`. A client-streaming handler takes `(req, elements, ctx)`, where `elements` is an `MMRequestStream<Element>` — a backpressured `AsyncSequence` whose normal end is the client's graceful END; a bidirectional handler takes `(req, elements, sink, ctx)`. Authorization runs once, at open, on the request's entity, exactly like a unary call.
 
 `sink.send(_:)` is the whole outbound surface. It encodes the element, spends one credit, and returns a `StreamSendOutcome` — all three cases are *graceful*, none is an error:
 
@@ -627,7 +627,7 @@ Semantics to design around:
 
 - **Cross-connection fan-out is host logic.** Each `follow` call gets one correlated response stream; wiring appends on *any* connection to every interested follower is the store's job (the registry the handler above registers with). The library gives you the per-call stream, not pub/sub.
 - **Flow control is automatic and bounded.** The window starts at 8 items per direction; a lagging consumer parks the producer at zero credit rather than growing memory, and a stalled stream never blocks sibling calls (no head-of-line blocking).
-- **Streaming methods *are* fingerprinted and discoverable.** Unlike the removed notification mechanism, a response stream is a normal part of the method signature (`rpc.schema` reports its element shape), so a client detects a reshape through the hello fingerprint and discovery like any other contract change. Stream element payloads still evolve append-only (new fields optional).
+- **Streaming methods *are* fingerprinted and discoverable.** Unlike the removed notification mechanism, a response stream is a normal part of the method signature (`server.schema` reports its element shape), so a client detects a reshape through the hello fingerprint and discovery like any other contract change. Stream element payloads still evolve append-only (new fields optional).
 - **Termination is graceful by default.** END finishes a direction, STOP asks the peer to (surfaced as `.peerStopped`), and the terminal is always the last frame; CANCEL and connection death arrive as `.callEnded` / task cancellation. The full matrix is in the [wire protocol specification](https://swiftpackageindex.com/velocityzen/mm/documentation/mmwire/wireprotocol) §4.2.
 
 ## 6. The client side: a companion process
@@ -644,7 +644,7 @@ import ServiceLifecycle
 // Shape 1 — daemons: the ServiceGroup adapter.
 let connection = try await MMClientConnection.connect(
     to: .unix(path: "/var/run/eyed/rpc.sock"),
-    configuration: MMClientConfiguration(expectedFingerprint: eyedFingerprint)
+    configuration: MMClientConfiguration(schema: .complete([Eye.contract]))
 ).get()
 let group = ServiceGroup(configuration: .init(
     services: [.init(service: MMClientConnectionService(connection: connection))],
@@ -675,7 +675,7 @@ case .success(let response):
     render(response.lines)
 case .failure(.denied):
     fail("permission denied — check the entity ACL and the socket group")
-case .failure(.remote(let errorObject)) where errorObject.code == 64:
+case .failure(.remote(let error)) where error.code == 64:
     fail("journal is sealed")
 case .failure(let other):
     fail("call failed: \(other)")
@@ -722,32 +722,38 @@ A bidirectional `call` returns a `BidirectionalStreamHandle` with independent `.
 
 **The head-of-line caveat, which is intended semantics:** the inbound element buffer is bounded by the credit window. When a consumer lags and its buffer fills, the connection's inbound loop *suspends before reading more frames*, so the lag propagates to the socket and suspends the server's writes for *that stream* — but credits are per-stream, so a stalled stream starves only itself; sibling calls and streams keep flowing. Still, iterate an inbound stream from a task that does **not** also await other traffic on this connection, and hand elements to your own pipeline instead of doing slow work inside the `for await` body.
 
-**Fingerprint mismatch → discovery → deliberate degradation.** Set `expectedFingerprint` to the server fingerprint this build was compiled against (capture `server.router.fingerprint` at build/CI time — it covers *all* registered methods including the builtins, sorted by name). A mismatch is never a disconnect; it is data on `helloInfo.fingerprintMatched` and the trigger for discovery:
+**Schema verification is automatic — declare contracts, never a fingerprint.** Give the client configuration the contracts this build was compiled against and the connection verifies itself right after `run()` starts. A mismatch is never a disconnect; the verdict is data:
 
 ```swift
-let localSignatures = (Journal.all + Builtins.all).compactMap { try? $0.signature().get() }
+let connection = try await MMClientConnection.connect(
+    to: .unix(path: socketPath),
+    // .complete when this client knows the server's whole composition;
+    // .partial([Journal.contract]) when it uses a slice of a bigger server.
+    configuration: MMClientConfiguration(schema: .complete([Journal.contract]))
+).get()
 
-if connection.helloInfo.fingerprintMatched == false {
-    switch await connection.discoverSchema() {
-    case .failure(let error):
-        // Discovery itself failed (transport, denial): fatal or retry,
-        // per application policy.
-        return .failure(.schemaUnavailable(error))
-    case .success(let remote):
-        // remote.methods is filtered by THIS peer's traversal rights;
-        // remote.fingerprint is the server's unfiltered fingerprint.
-        let diff = SchemaDifference(local: localSignatures, remote: remote)
-        guard diff.missingMethods.isEmpty && diff.signatureChanged.isEmpty else {
-            // The methods this build depends on are gone, invisible to this
-            // peer, or reshaped: disable the dependent features, keep the
-            // rest running.
-            return .success(.degraded(disabled: diff.missingMethods.map(\.name)))
-        }
-        // Only additions (remoteOnly) or access changes: full function.
-        return .success(.full)
-    }
+// ... run() as a structured child, then:
+switch await connection.verify() {
+case .success(.ok):
+    // Complete expectation, hello matched: the entire composition is
+    // proven with zero discovery round-trips.
+    break
+case .success(.partial):
+    // Every declared contract is served verbatim; the composition
+    // changed somewhere this build does not use.
+    break
+case .success(.difference(let differences)):
+    // The namespaces this build depends on moved: disable the dependent
+    // features, keep the rest running.
+    disable(differences)
+case .failure(let reason):
+    // .noExpectation / .denied / .failed(callError) — no verdict; act per
+    // application policy.
+    log(reason)
 }
 ```
+
+For custom policy over the raw buckets, the manual flow underneath remains available: `connection.verifyContracts([...])` for a scoped diff, or `discoverSchema()` + `SchemaDifference(local:remote:)` (note `remote.methods` is filtered by *this peer's* traversal rights; `remote.fingerprint` is the server's unfiltered value, comparable with `connection.server.fingerprint`).
 
 `SchemaDifference` buckets: `missingMethods` (absent *or invisible to this peer* — the fix may be an ACL change, not a deploy), `signatureChanged` (the wire contract moved under this build), `accessChanged` (the verb needs a different permission class now), `remoteOnly` (harmless; upgrade planning) — plus the named-type buckets `missingTypes`, `typeChanged` (same qualified name, different shape — treat like `signatureChanged` for features carrying the type), and `remoteOnlyTypes`. Prefer `SchemaDifference(local: contract, remote:)` with a `SchemaDeclaration` so types diff too. All comparisons are description-stripped (doc edits are never drift), all buckets sorted by name for deterministic logs, and the value is `CustomStringConvertible` — `"\(diff)"` renders `in sync` or the non-empty buckets (`missing: a.get; types changed: common.Priority`), so log it directly instead of iterating buckets.
 

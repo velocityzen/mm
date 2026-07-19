@@ -64,25 +64,53 @@ public struct MMHello: Equatable, Sendable {
         else {
             return .failure(.badMagic)
         }
-        guard buffer.readableBytes >= Self.encodedByteCount else { return .failure(.truncated) }
-        // Force-unwraps are safe: readableBytes was bounds-checked above.
-        let protocolVersion = buffer.getInteger(at: base + 2, as: UInt8.self)!
-        let schemaFingerprint = buffer.getInteger(
-            at: base + 3,
+        // One consecutive little-endian read of the whole 15-byte layout
+        // (magic re-read and discarded); nil = not all 15 bytes arrived.
+        guard let fields = buffer.peekMultipleIntegers(
             endianness: .little,
-            as: UInt64.self
-        )!
-        let capabilities = buffer.getInteger(
-            at: base + 11,
-            endianness: .little,
-            as: UInt32.self
-        )!
+            as: (UInt8, UInt8, UInt8, UInt64, UInt32).self
+        ) else {
+            return .failure(.truncated)
+        }
+        
         return .success(
             MMHello(
-                protocolVersion: protocolVersion,
-                schemaFingerprint: schemaFingerprint,
-                capabilities: capabilities
+                protocolVersion: fields.2,
+                schemaFingerprint: fields.3,
+                capabilities: fields.4
             )
+        )
+    }
+}
+
+/// The hello-negotiation math — fixed wire decisions stated once for both
+/// sides: version is **min-wins**, capabilities are the **bitwise
+/// intersection**.
+package enum HelloNegotiation {
+    package struct Negotiated: Sendable, Hashable {
+        package var protocolVersion: UInt8
+        package var capabilities: UInt32
+
+        package init(protocolVersion: UInt8, capabilities: UInt32) {
+            self.protocolVersion = protocolVersion
+            self.capabilities = capabilities
+        }
+    }
+
+    package static func negotiate(
+        localVersion: UInt8, localCapabilities: UInt32, remote: MMHello
+    ) -> Negotiated {
+        Negotiated(
+            protocolVersion: min(localVersion, remote.protocolVersion),
+            capabilities: localCapabilities & remote.capabilities
+        )
+    }
+
+    package static func negotiate(server: MMHello, client: MMHello) -> Negotiated {
+        negotiate(
+            localVersion: server.protocolVersion,
+            localCapabilities: server.capabilities,
+            remote: client
         )
     }
 }

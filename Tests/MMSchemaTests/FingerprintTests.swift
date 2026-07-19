@@ -15,6 +15,9 @@ struct FingerprintTests {
         response: .structure(fields: [.init(key: 0, name: "sequence", type: .uint)])
     )
 
+    // The name is a frozen test-vector string (it predates the builtin
+    // rename and is deliberately NOT kept in sync): changing any fixture
+    // input would invalidate the golden pinned value below.
     static let statSignature = MethodSignature(
         name: "entity.stat",
         access: .read,

@@ -1,4 +1,5 @@
 import Logging
+import MMTestSupport
 import MMWire
 import Metrics
 import NIOCore
@@ -10,9 +11,9 @@ import Testing
 
 @Suite("Idle handling and pipeline assembly")
 struct PipelineTests {
-    @Test("IdleCloseHandler closes the channel on an idle event")
+    @Test("MMIdleCloseHandler closes the channel on an idle event")
     func idleEventCloses() throws {
-        let channel = EmbeddedChannel(handler: IdleCloseHandler())
+        let channel = EmbeddedChannel(handler: MMIdleCloseHandler())
         channel.connect(to: try SocketAddress(unixDomainSocketPath: "/mm-test"), promise: nil)
         channel.embeddedEventLoop.run()
         #expect(channel.isActive)
@@ -21,9 +22,9 @@ struct PipelineTests {
         #expect(channel.isActive == false)
     }
 
-    @Test("IdleCloseHandler forwards unrelated user events")
+    @Test("MMIdleCloseHandler forwards unrelated user events")
     func unrelatedEventsForwarded() throws {
-        let channel = EmbeddedChannel(handler: IdleCloseHandler())
+        let channel = EmbeddedChannel(handler: MMIdleCloseHandler())
         channel.connect(to: try SocketAddress(unixDomainSocketPath: "/mm-test"), promise: nil)
         channel.embeddedEventLoop.run()
         channel.pipeline.fireUserInboundEventTriggered(ChannelEvent.inputClosed)
@@ -49,7 +50,7 @@ struct PipelineTests {
         #expect(idleState.allTimeout == .seconds(30))
         #expect(idleState.readTimeout == nil)
         #expect(idleState.writeTimeout == nil)
-        #expect(throws: Never.self) { try sync.handler(type: IdleCloseHandler.self) }
+        #expect(throws: Never.self) { try sync.handler(type: MMIdleCloseHandler.self) }
         #expect(throws: Never.self) {
             try sync.handler(type: ByteToMessageHandler<MMFrameDecoder>.self)
         }

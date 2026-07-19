@@ -121,7 +121,7 @@ let group = ServiceGroup(configuration: .init(
 try await group.run()
 ```
 
-Handlers can also live in reusable `RouteGroup` types — their own files, their own dependencies — and drop into the `For` block as values. Every server auto-registers the builtins `rpc.schema` (discovery, filtered by the caller's traversal rights) and `entity.stat` (an entity's ACL record).
+Handlers can also live in reusable `RouteGroup` types — their own files, their own dependencies — and drop into the `For` block as values. Every server auto-registers the builtins `server.schema` (discovery, filtered by the caller's traversal rights) and `server.entity` (an entity's ACL record).
 
 ### Client
 
@@ -197,7 +197,7 @@ So the entity is the one argument every command has, always the leading position
 
 Unary calls print their response as JSON (`--output json-pretty` to taste); server-stream commands print elements as JSON lines with SIGINT mapped to a graceful STOP; client-stream commands read stdin. `MMCLI` also ships schema-driven generic commands: `discover` (what the server serves) and `call` (invoke any method by wire name with `--params` JSON).
 
-**Schema verification is automatic — never manual.** Every generated command confirms its own namespace against the live server before dispatching (one scoped discovery diff; drift prints the difference and exits 76; `--no-verify` skips it for one invocation). A purpose-built CLI upgrades that to a free check: install a completeness claim at startup — `MMCLIServerContract.install(.complete([journalContract]))` — and the expected whole-server hello fingerprint is folded at build time from the same declarations the daemon compiled (builtins included), so a matching hello proves the entire composition with zero extra round-trips; on mismatch, commands fall back to the scoped diff of the namespace in use. The same slice-check is available to any client as `connection.verifyContracts([journalContract])`. For humans and scripts there is still the explicit `verify` subcommand per group, and `--expect-fingerprint` remains as an operator-supplied deployment pin (refuses outright, exit 76).
+**Schema verification is automatic — never manual.** Every generated command confirms its own namespace against the live server before dispatching (one scoped discovery diff; drift prints the difference and exits 76; `--no-verify` skips it for one invocation). A purpose-built CLI upgrades that to a free check: install a completeness claim at startup — `MMCLIServerContract.install(.complete([journalContract]))` — and the expected whole-server hello fingerprint is folded at build time from the same declarations the daemon compiled (builtins included), so a matching hello proves the entire composition with zero extra round-trips; on mismatch, commands fall back to the scoped diff of the namespace in use. Embedding clients get the same automation: set `configuration.schema = .complete([journalContract])` (or `.partial` for a client that uses a slice of the server) and the connection verifies itself right after connect — `await connection.verify()` yields `.ok` (whole composition proven from the hello), `.partial` (your contracts are in sync; the composition changed elsewhere), or `.difference(differences)` — never a disconnect. For humans and scripts there is still the explicit `verify` subcommand per group — there is no manual fingerprint anywhere, CLI or library; the fingerprint is build knowledge folded from contracts, never something an operator types.
 
 ## Streaming
 

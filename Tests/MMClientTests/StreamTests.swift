@@ -1,4 +1,5 @@
 import MMSchema
+import MMTestSupport
 import MMWire
 import NIOConcurrencyHelpers
 import NIOCore
@@ -78,7 +79,7 @@ struct StreamTests {
                         granted = credits
                     }
                 }
-                #expect(granted == StreamCredit.initialWindow)
+                #expect(granted == MMStreamFlowControl.initialWindow)
                 // Then finish the call so the consuming task ends.
                 try await client.channel.writeInbound(summaryTerminalFrame(msgid: msgid, count: 9))
                 try await group.waitForAll()
@@ -132,7 +133,7 @@ struct StreamTests {
     @Test("server stream: an error terminal maps code 6 to .streamViolation, code 7 to .cancelled")
     func inboundErrorTerminalMapping() async throws {
         for (code, expected): (Int, MMCallError) in [
-            (6, .streamViolation(MMErrorObject(code: 6, message: "v"))),
+            (6, .streamViolation(MMError(code: 6, message: "v"))),
             (7, .cancelled),
         ] {
             _ = try await withRunningConnection { client in
@@ -140,7 +141,7 @@ struct StreamTests {
                     ClientTestMethods.follow, on: entity("box"), boxRequest(1))
                 let (msgid, _, _) = try await client.readRequestFrame()
                 let terminal = try MMEnvelope.response(
-                    msgid: msgid, error: MMErrorObject(code: code, message: "v"), result: nil
+                    msgid: msgid, error: MMError(code: code, message: "v"), result: nil
                 ).encoded().get()
                 try await client.channel.writeInbound(framed(terminal))
                 // The element sequence finishes (empty), the terminal is the mapped failure.
@@ -432,7 +433,7 @@ struct StreamTests {
             // it does not overwrite the cancelled terminal, and the connection
             // survives for a fresh unary call.
             let code7 = try MMEnvelope.response(
-                msgid: msgid, error: MMErrorObject(code: 7, message: "cancelled"), result: nil
+                msgid: msgid, error: MMError(code: 7, message: "cancelled"), result: nil
             ).encoded().get()
             try await client.channel.writeInbound(framed(code7))
             #expect(await handle.result() == .failure(.cancelled))
@@ -739,7 +740,7 @@ struct StreamTests {
             // The server's code-7 terminal for the retired msgid drops without
             // disturbing the connection.
             let code7 = try MMEnvelope.response(
-                msgid: msgid, error: MMErrorObject(code: 7, message: "cancelled"), result: nil
+                msgid: msgid, error: MMError(code: 7, message: "cancelled"), result: nil
             ).encoded().get()
             try await client.channel.writeInbound(framed(code7))
             #expect(await handle.inbound.result() == .failure(.cancelled))

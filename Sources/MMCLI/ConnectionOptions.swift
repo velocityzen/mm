@@ -34,14 +34,6 @@ public struct MMCLIOptions: ParsableArguments, Sendable {
     @Option(help: ArgumentHelp("Hello-exchange timeout in seconds.", valueName: "seconds"))
     public var helloTimeout: Double?
 
-    @Option(
-        help: ArgumentHelp(
-            "Schema fingerprint this build expects, as hex (0x-prefixed or bare).",
-            valueName: "hex"
-        )
-    )
-    public var expectFingerprint: String?
-
     @Option(help: ArgumentHelp("Output format for results written to stdout."))
     public var output: OutputFormat = .json
 
@@ -50,6 +42,19 @@ public struct MMCLIOptions: ParsableArguments, Sendable {
         help: "Skip automatic schema verification for this invocation."
     )
     public var noVerify: Bool = false
+
+    /// The long option names this type declares — update in lockstep with the
+    /// property wrappers above. `SchemaContractMacro.reservedLongOptionNames`
+    /// restates this list (the macro cannot import MMCLI);
+    /// ReservedOptionsPinTests keeps the two in agreement.
+    public static let declaredLongOptionNames: Set<String> = [
+        "socket",
+        "tcp",
+        "connect-timeout",
+        "hello-timeout",
+        "output",
+        "no-verify",
+    ]
 
     public init() {}
 
@@ -69,11 +74,6 @@ public struct MMCLIOptions: ParsableArguments, Sendable {
                         "--tcp expects <host:port> with a non-empty host and a port in 1...65535, got '\(address)'"
                     )
                 }
-        }
-        if let raw = self.expectFingerprint, Self.parseFingerprint(raw) == nil {
-            throw ValidationError(
-                "--expect-fingerprint expects a hex fingerprint (0x-prefixed or bare), got '\(raw)'"
-            )
         }
         if let seconds = self.connectTimeout, Self.timeAmount(fromSeconds: seconds) == nil {
             throw ValidationError("--connect-timeout must be a positive number of seconds")
@@ -107,31 +107,23 @@ public struct MMCLIOptions: ParsableArguments, Sendable {
         if let seconds = self.helloTimeout {
             configuration.helloTimeout = Self.timeAmount(fromSeconds: seconds)
         }
-        if let raw = self.expectFingerprint {
-            configuration.expectedFingerprint = Self.parseFingerprint(raw)
-        }
         return configuration
     }
 
     /// Splits `host:port` on the **last** colon: host non-empty, port in
     /// 1...65535. `nil` when the string has neither shape.
     static func parseTCP(_ address: String) -> (host: String, port: UInt16)? {
-        guard let lastColon = address.lastIndex(of: ":") else { return nil }
+        guard let lastColon = address.lastIndex(of: ":") else {
+            return nil
+        }
+
         let host = String(address[..<lastColon])
         let portText = String(address[address.index(after: lastColon)...])
-        guard !host.isEmpty, let port = UInt16(portText), port > 0 else { return nil }
-        return (host: host, port: port)
-    }
-
-    /// Parses a fingerprint as hex, tolerating a `0x`/`0X` prefix. `nil` on
-    /// anything that is not pure hex digits (or that overflows 64 bits).
-    static func parseFingerprint(_ raw: String) -> UInt64? {
-        var digits = Substring(raw)
-        if digits.hasPrefix("0x") || digits.hasPrefix("0X") {
-            digits = digits.dropFirst(2)
+        guard !host.isEmpty, let port = UInt16(portText), port > 0 else {
+            return nil
         }
-        guard !digits.isEmpty, digits.allSatisfy(\.isHexDigit) else { return nil }
-        return UInt64(digits, radix: 16)
+
+        return (host: host, port: port)
     }
 
     /// Converts positive, finite seconds to a monotonic `TimeAmount`; `nil`

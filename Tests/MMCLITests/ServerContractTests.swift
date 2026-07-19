@@ -1,34 +1,46 @@
 import ArgumentParser
-import Foundation
 import Logging
 import MMClient
 import MMSchema
 import MMServer
+import MMTestSupport
 import NIOCore
 import ServiceLifecycle
 import Testing
 
 @testable import MMCLI
 
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
+
 /// Boots a server serving exactly the `Ledger` namespace (the CLI fixture in
 /// GeneratedCommandTests.swift) — the composition a completeness claim can be
 /// folded for. `ledgerMode` shapes the denial fixtures: `0o300` (`-wx`) keeps
 /// calls authorized while denying the `read` that scoped discovery needs.
-private func withLedgerServer<T: Sendable>(
+func withLedgerServer<T: Sendable>(
     ledgerMode: UInt16 = 0o700,
     _ body: @escaping @Sendable (MMCLIOptions) async throws -> T
 ) async throws -> T {
-    let directory = NSTemporaryDirectory() + "mm-sc-" + UUID().uuidString.prefix(8)
-    try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(atPath: directory) }
-    let path = directory + "/s"
+    try await withTempSocketPath(prefix: "mm-sc-") { path in
+        try await withLedgerServer(at: path, ledgerMode: ledgerMode, body)
+    }
+}
 
+func withLedgerServer<T: Sendable>(
+    at path: String,
+    ledgerMode: UInt16,
+    _ body: @escaping @Sendable (MMCLIOptions) async throws -> T
+) async throws -> T {
     let uid = getuid()
     let gid = getgid()
     let acls: [EntityName: EntityACL] = [
         cliTestEntity("ledger"): EntityACL(owner: uid, group: gid, mode: ledgerMode),
-        cliTestEntity("rpc"): EntityACL(owner: uid, group: gid, mode: 0o700),
-        cliTestEntity("entity"): EntityACL(owner: uid, group: gid, mode: 0o700),
+        cliTestEntity("server"): EntityACL(owner: uid, group: gid, mode: 0o700),
     ]
     var logger = Logger(label: "mm.servercontract.server")
     logger.logLevel = .warning
@@ -53,28 +65,12 @@ private func withLedgerServer<T: Sendable>(
             .success(Ledger.ImportAllResponse(lines: []))
         }
     }
-    var groupLogger = Logger(label: "mm.servercontract.group")
-    groupLogger.logLevel = .error
-    let group = ServiceGroup(
-        configuration: .init(services: [.init(service: service)], logger: groupLogger)
-    )
-    return try await withThrowingTaskGroup(of: Void.self) { tasks in
-        tasks.addTask {
-            try await withCLIDeadline(seconds: 60) { try await group.run() }
-        }
-        _ = try await withCLIDeadline { await bound.first(where: { _ in true }) }
+    return try await withServiceGroup(
+        service,
+        ready: { _ = await bound.first(where: { _ in true }) }
+    ) { _ in
         let options = try MMCLIOptions.parse(["--socket", path])
-        let result: T
-        do {
-            result = try await withCLIDeadline(seconds: 30) { try await body(options) }
-        } catch {
-            await group.triggerGracefulShutdown()
-            try? await tasks.waitForAll()
-            throw error
-        }
-        await group.triggerGracefulShutdown()
-        try await tasks.waitForAll()
-        return result
+        return try await withDeadline(seconds: 30) { try await body(options) }
     }
 }
 
@@ -101,7 +97,7 @@ struct ServerContractTests {
         let claim = MMCLIServerContract.complete([Ledger.contract])
         let served = try await withLedgerServer { options in
             try await MMCLIRunner.invoke(options) { client in
-                client.helloInfo.serverFingerprint
+                client.server.fingerprint
             }
         }
         #expect(served == claim.expectedFingerprint)
@@ -182,10 +178,10 @@ struct ServerContractTests {
             try await MMCLIRunner.invoke(options) { client in
                 let clean = try MMCLIFailure.unwrap(
                     await client.verifyContracts([Ledger.contract]),
-                    method: "rpc.schema", entity: "ledger")
+                    method: "server.schema", entity: "ledger")
                 let dirty = try MMCLIFailure.unwrap(
                     await client.verifyContracts([driftedContract]),
-                    method: "rpc.schema", entity: "ledger")
+                    method: "server.schema", entity: "ledger")
                 return (clean.count, dirty.count)
             }
         }

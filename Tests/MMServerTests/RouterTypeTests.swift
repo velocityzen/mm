@@ -1,5 +1,6 @@
 import MMSchema
 import MMServer
+import MMTestSupport
 import MMWire
 import Testing
 
@@ -128,8 +129,7 @@ struct RouterTypeTests {
     static let world: [EntityName: EntityACL] = [
         entity("journal"): acl(0o555),
         entity("admin"): acl(0o550),
-        entity("rpc"): acl(0o555),
-        entity("entity"): acl(0o555),
+        entity("server"): acl(0o555),
     ]
 
     private func makeRouter() -> Router {
@@ -149,7 +149,7 @@ struct RouterTypeTests {
         peer: PeerIdentity
     ) async throws -> SchemaResponse {
         let reply = await router.dispatch(
-            envelope: request(method: "rpc.schema", entity: .root, SchemaRequest()),
+            envelope: request(method: "server.schema", entity: .root, SchemaRequest()),
             context: makeContext(peer: peer)
         )
         let buffer = try #require(resultBuffer(of: reply))

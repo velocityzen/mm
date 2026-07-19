@@ -3,7 +3,7 @@ import MMClient
 import MMSchema
 
 /// The generic discovery command: asks the connected server what it actually
-/// serves (`rpc.schema`, filtered by this peer's traversal rights) and prints
+/// serves (`server.schema`, filtered by this peer's traversal rights) and prints
 /// the full `SchemaResponse` — fingerprint, method signatures, and named-type
 /// definitions. `SchemaResponse` is `Codable` with named-`stringValue`
 /// integer `CodingKeys`, so `JSONEncoder` prints named keys.
@@ -30,22 +30,24 @@ public struct MMCLIDiscover: AsyncParsableCommand {
         let target = try MMCLIFailure.entity(scopeArgument)  // "" parses to .root
         let format = connection.output
         let response = try await MMCLIRunner.invoke(connection) { client in
-            let hello = client.helloInfo
+            let hello = client.server
+            // The verdict comes from the build-time completeness claim when
+            // one is installed — verification is never manual.
             let verdict: String
-            switch hello.fingerprintMatched {
-                case .some(true):
-                    verdict = "matches the expected fingerprint"
-                case .some(false):
-                    verdict = "does NOT match the expected fingerprint"
-                case .none:
-                    verdict = "not checked (no --expect-fingerprint)"
+            if let claim = MMCLIServerContract.current() {
+                verdict =
+                    hello.fingerprint == claim.expectedFingerprint
+                    ? " — matches this build's contracts"
+                    : " — differs from this build's contracts (\(claim.fingerprintHex) expected)"
+            } else {
+                verdict = ""
             }
             MMCLIOutput.note(
-                "hello: protocol v\(hello.negotiatedVersion), server fingerprint 0x\(String(hello.serverFingerprint, radix: 16)) — \(verdict)"
+                "hello: protocol v\(hello.protocolVersion), server fingerprint \(fingerprintHexString(hello.fingerprint))\(verdict)"
             )
             return try MMCLIFailure.unwrap(
                 await client.discoverSchema(scope: target),
-                method: "rpc.schema",
+                method: "server.schema",
                 entity: scopeArgument
             )
         }

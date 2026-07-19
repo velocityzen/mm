@@ -42,7 +42,7 @@ public struct MMCLIServerContract: Sendable {
     /// The expected hello fingerprint, `0x`-prefixed — for release notes and
     /// deploy scripts, no connection required.
     public var fingerprintHex: String {
-        "0x" + String(self.expectedFingerprint, radix: 16)
+        fingerprintHexString(self.expectedFingerprint)
     }
 
     /// Installs the claim process-wide. Call once from `main()` before
@@ -56,4 +56,9 @@ public struct MMCLIServerContract: Sendable {
     }
 
     private static let installed = Mutex<MMCLIServerContract?>(nil)
+}
+
+/// The one spelling of a fingerprint for human eyes: `0x` + lowercase hex.
+func fingerprintHexString(_ value: UInt64) -> String {
+    "0x" + String(value, radix: 16)
 }
