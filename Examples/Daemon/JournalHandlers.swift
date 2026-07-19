@@ -75,7 +75,10 @@ struct JournalHandlers: RouteGroup {
             loop: for await element in elements {
                 let count = await store.append(element.line, to: auth.entity)
                 let event = ChangeEvent(
-                    entity: auth.entity.rawValue, line: element.line, count: count)
+                    entity: auth.entity.rawValue,
+                    line: element.line,
+                    count: count
+                )
                 switch await sink.send(event) {
                     case .sent:
                         synced += 1
@@ -84,7 +87,8 @@ struct JournalHandlers: RouteGroup {
                 }
             }
             return .success(
-                SyncSummary(synced: synced, total: await store.count(of: auth.entity)))
+                SyncSummary(synced: synced, total: await store.count(of: auth.entity))
+            )
         }
     }
 }

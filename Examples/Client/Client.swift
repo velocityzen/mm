@@ -207,14 +207,17 @@ struct ExampleClient {
         print("\nfollow \(journal.rawValue) (server -> client stream):")
         let follow = await connection.call(Journal.follow, on: journal, FollowRequest())
 
-        await withStream(follow, each: { event in
-            // The consumer, stopping on its own criterion — here, once the
-            // line it was waiting for arrives.
-            print("  follow delivered: \"\(event.line)\" (count \(event.count))")
-            if event.line == "second change" {
-                await follow.stop()
+        await withStream(
+            follow,
+            each: { event in
+                // The consumer, stopping on its own criterion — here, once the
+                // line it was waiting for arrives.
+                print("  follow delivered: \"\(event.line)\" (count \(event.count))")
+                if event.line == "second change" {
+                    await follow.stop()
+                }
             }
-        }) {
+        ) {
             // The producer. (In-process caveat: the follow open is
             // fire-and-forget by protocol design, so in principle an append
             // can race the handler's follower registration; each append is a
@@ -225,7 +228,9 @@ struct ExampleClient {
             print("append twice to \(journal.rawValue) (each drives a change to the follower):")
             for line in ["first change", "second change"] {
                 if case .failure(let error) = await connection.call(
-                    Journal.append, on: journal, AppendRequest(line: line, meta: nil)
+                    Journal.append,
+                    on: journal,
+                    AppendRequest(line: line, meta: nil)
                 ) {
                     print("  append failed: \(error)")
                 }
@@ -246,7 +251,8 @@ struct ExampleClient {
     /// typed outcomes, not errors), `finish()` to END the request direction,
     /// then await the terminal.
     private static func importLines(
-        _ connection: MMClientConnection, into journal: EntityName
+        _ connection: MMClientConnection,
+        into journal: EntityName
     ) async {
         print("\nimport into \(journal.rawValue) (client -> server stream):")
         let importCall = await connection.call(Journal.import, on: journal, ImportRequest())
@@ -283,9 +289,12 @@ struct ExampleClient {
     private static func sync(_ connection: MMClientConnection, into journal: EntityName) async {
         print("\nsync into \(journal.rawValue) (duplex stream: lines up, changes back):")
         let sync = await connection.call(Journal.sync, on: journal, SyncRequest())
-        await withStream(sync.inbound, each: { event in
-            print("  change echoed back: \"\(event.line)\" (count \(event.count))")
-        }) {
+        await withStream(
+            sync.inbound,
+            each: { event in
+                print("  change echoed back: \"\(event.line)\" (count \(event.count))")
+            }
+        ) {
             for line in ["synced line one", "synced line two"] {
                 switch await sync.outbound.send(SyncLine(line: line)) {
                     case .sent:
@@ -313,7 +322,8 @@ struct ExampleClient {
     /// and other has no bits — the router denies before ever decoding the
     /// full request payload: the entity is call metadata, not payload.
     private static func appendDenied(
-        _ connection: MMClientConnection, to journal: EntityName
+        _ connection: MMClientConnection,
+        to journal: EntityName
     ) async {
         print("\nappend to \(journal.rawValue) (root-owned, mode 0o700):")
         switch await connection.call(

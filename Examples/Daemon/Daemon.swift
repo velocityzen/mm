@@ -45,16 +45,16 @@ struct ExampleDaemon {
         // the other half — it cross-checks that every declared method has a
         // handler.)
         switch journalContract.verify(against: Journal.self) {
-        case .failure(let error):
-            logger.critical("schema probe failed", metadata: ["error": "\(error)"])
-            return
-        case .success(let breaks) where !breaks.isEmpty:
-            for line in breaks {
-                logger.critical("contract violation", metadata: ["detail": "\(line)"])
-            }
-            return
-        case .success:
-            logger.info("contract verified", metadata: ["namespace": "journal"])
+            case .failure(let error):
+                logger.critical("schema probe failed", metadata: ["error": "\(error)"])
+                return
+            case .success(let breaks) where !breaks.isEmpty:
+                for line in breaks {
+                    logger.critical("contract violation", metadata: ["detail": "\(line)"])
+                }
+                return
+            case .success:
+                logger.info("contract verified", metadata: ["namespace": "journal"])
         }
 
         let uid = getuid()

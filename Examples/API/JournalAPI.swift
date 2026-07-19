@@ -55,8 +55,10 @@ public enum Journal: MethodNamespace {
             Request {
                 Field("line", .string, description: "The line text", cli: .argument)
                 Field(
-                    "meta", .optional(.reference("LineMeta")),
-                    description: "Optional attribution")
+                    "meta",
+                    .optional(.reference("LineMeta")),
+                    description: "Optional attribution"
+                )
             }
             Response {
                 Field("count", .int, description: "Lines now in the journal")

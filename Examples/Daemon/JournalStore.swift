@@ -31,7 +31,9 @@ actor JournalStore {
         journals[entity, default: []].append(line)
         let count = journals[entity, default: []].count
         followers.broadcast(
-            ChangeEvent(entity: entity.rawValue, line: line, count: count), to: entity)
+            ChangeEvent(entity: entity.rawValue, line: line, count: count),
+            to: entity
+        )
         return count
     }
 
