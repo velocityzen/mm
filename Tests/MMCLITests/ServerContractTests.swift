@@ -22,6 +22,7 @@ import Musl
 /// GeneratedCommandTests.swift) — the composition a completeness claim can be
 /// folded for. `ledgerMode` shapes the denial fixtures: `0o300` (`-wx`) keeps
 /// calls authorized while denying the `read` that scoped discovery needs.
+@discardableResult
 func withLedgerServer<T: Sendable>(
     ledgerMode: UInt16 = 0o700,
     _ body: @escaping @Sendable (MMCLIOptions) async throws -> T
@@ -31,6 +32,7 @@ func withLedgerServer<T: Sendable>(
     }
 }
 
+@discardableResult
 func withLedgerServer<T: Sendable>(
     at path: String,
     ledgerMode: UInt16,

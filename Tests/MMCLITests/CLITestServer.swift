@@ -191,6 +191,7 @@ private func makeCLITestService(
 /// bind, hands `body` ready-made `MMCLIOptions` pointing at the socket, then
 /// triggers graceful shutdown and joins — the shared
 /// ``withServiceGroup(_:logger:ready:onBodyError:_:)`` choreography.
+@discardableResult
 func withCLIServer<T: Sendable>(
     _ body: @escaping @Sendable (MMCLIOptions) async throws -> T
 ) async throws -> T {
