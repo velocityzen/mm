@@ -9,7 +9,7 @@ struct JournalHandlers: RouteGroup {
     let store: JournalStore
 
     @RouterBuilder var routes: [Route] {
-        On(Journal.append) { auth, request in
+        On(Journal.append, Accepts("journal.*")) { auth, request in
             // The store broadcasts the change to every follower of this
             // journal (any connection) as part of the append. Cross-connection
             // fan-out is application infrastructure — the library gives each
@@ -17,7 +17,12 @@ struct JournalHandlers: RouteGroup {
             let count = await store.append(request.line, to: auth.entity)
             return .success(AppendResponse(count: count))
         }
-        On(Journal.read) { auth, request in
+        // `Accepts("journal.*")` (on every route in this group): grants are
+        // per-entity-per-mode, never per-method, so without it any entity
+        // the ACL admits for writing could become a "journal". The pattern
+        // keeps journal verbs on journal nouns — an out-of-scope target is
+        // denied before the ACL is even consulted.
+        On(Journal.read, Accepts("journal.*")) { auth, request in
             .success(ReadResponse(lines: await store.read(auth.entity)))
         }
         // Server → client stream: register a follower, relay its change
@@ -30,7 +35,7 @@ struct JournalHandlers: RouteGroup {
         // idempotent (both edges may fire); if this task dies before either,
         // the stream's termination handler unregisters instead (see
         // FollowerHub).
-        On(Journal.follow) { auth, request, sink in
+        On(Journal.follow, Accepts("journal.*")) { auth, request, sink in
             let (token, changes) = store.follow(auth.entity)
             var delivered = 0
             await withTaskGroup(of: Void.self) { watcher in
@@ -57,7 +62,7 @@ struct JournalHandlers: RouteGroup {
         // broadcasts to followers), and answer with how many this call
         // imported plus the journal's total. The `elements` sequence ending
         // is the client's graceful END.
-        On(Journal.import) { auth, request, elements in
+        On(Journal.import, Accepts("journal.*")) { auth, request, elements in
             var imported = 0
             for await element in elements {
                 _ = await store.append(element.line, to: auth.entity)
@@ -70,7 +75,7 @@ struct JournalHandlers: RouteGroup {
         // followers) and echo the resulting ChangeEvent straight back through
         // this call's own credit-gated response sink. The request stream
         // ending is the client's END; the shared terminal totals what landed.
-        On(Journal.sync) { auth, request, elements, sink in
+        On(Journal.sync, Accepts("journal.*")) { auth, request, elements, sink in
             var synced = 0
             loop: for await element in elements {
                 let count = await store.append(element.line, to: auth.entity)

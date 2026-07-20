@@ -190,6 +190,16 @@ enum TestMethods {
     /// Registered nowhere on the server: calling it must yield `unknownMethod`.
     static let unregistered = Method<TargetRequest, PingResponse>(
         name: "nope.method", access: .read)
+    /// Registered with `Accepts("box", "box.*")`: accepts only `box` and its
+    /// descendants, regardless of what the ACL admits. Its own `scoped`
+    /// prefix entity has no ACL record, so these two stay out of discovery
+    /// listings.
+    static let scopedEcho = Method<EchoRequest, EchoResponse>(
+        name: "scoped.echo", access: .read)
+    /// Registered with `Accepts("box.item")`: accepts exactly that entity —
+    /// not `box`, not siblings, not children.
+    static let scopedExact = Method<EchoRequest, EchoResponse>(
+        name: "scoped.exact", access: .read)
 
     // MARK: - Streaming fixtures (S3)
 
@@ -425,6 +435,12 @@ func makeTestServer(
         onBind: { address in bound.fire(address) }
     ) {
         Handle(TestMethods.echo) { request, _ in
+            .success(EchoResponse(value: request.value))
+        }
+        Handle(TestMethods.scopedEcho, Accepts("box", "box.*")) { request, _ in
+            .success(EchoResponse(value: request.value))
+        }
+        Handle(TestMethods.scopedExact, Accepts("box.item")) { request, _ in
             .success(EchoResponse(value: request.value))
         }
         Handle(TestMethods.version) { _, context in

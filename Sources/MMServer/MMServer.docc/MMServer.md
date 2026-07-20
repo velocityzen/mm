@@ -65,16 +65,17 @@ The <doc:IntegrationGuide> walks through embedding all of this in a production d
 
 - ``Router``
 - ``Route``
+- ``Accepts``
 - ``RouterBuilder``
 - ``RouteGroup``
-- ``Handle(_:acceptsRoot:_:)-(Method<Request,Response>,_,_)``
-- ``Handle(_:acceptsRoot:_:)-(ServerStreamMethod<Request,Element,Response>,_,_)``
-- ``Handle(_:acceptsRoot:_:)-(ClientStreamMethod<Request,Element,Response>,_,_)``
-- ``Handle(_:acceptsRoot:_:)-(BidirectionalStreamMethod<Request,RequestElement,ResponseElement,Response>,_,_)``
-- ``On(_:acceptsRoot:_:)-(Method<Request,Response>,_,_)``
-- ``On(_:acceptsRoot:_:)-(ServerStreamMethod<Request,Element,Response>,_,_)``
-- ``On(_:acceptsRoot:_:)-(ClientStreamMethod<Request,Element,Response>,_,_)``
-- ``On(_:acceptsRoot:_:)-(BidirectionalStreamMethod<Request,RequestElement,ResponseElement,Response>,_,_)``
+- ``Handle(_:_:_:)-(Method<Request,Response>,_,_)``
+- ``Handle(_:_:_:)-(ServerStreamMethod<Request,Element,Response>,_,_)``
+- ``Handle(_:_:_:)-(ClientStreamMethod<Request,Element,Response>,_,_)``
+- ``Handle(_:_:_:)-(BidirectionalStreamMethod<Request,RequestElement,ResponseElement,Response>,_,_)``
+- ``On(_:_:_:)-(Method<Request,Response>,_,_)``
+- ``On(_:_:_:)-(ServerStreamMethod<Request,Element,Response>,_,_)``
+- ``On(_:_:_:)-(ClientStreamMethod<Request,Element,Response>,_,_)``
+- ``On(_:_:_:)-(BidirectionalStreamMethod<Request,RequestElement,ResponseElement,Response>,_,_)``
 - ``MMContext``
 
 ### Streaming

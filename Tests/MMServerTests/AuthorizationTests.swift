@@ -139,22 +139,23 @@ struct AuthorizationTests {
 
     @Test("root target is denied by default — no ACL exists that could gate it")
     func rootTargetDeniedByDefault() async {
-        // Routes built with the default `acceptsRoot: false`: an empty target
-        // must never reach the handler, whatever the provider holds.
+        // Routes built with the default `Accepts(.all)` (no `.root` pattern):
+        // an empty target must never reach the handler, whatever the
+        // provider holds.
         let code = await self.dispatchCode(
             access: .read, acls: [:], peer: Peers.other, target: ""
         )
         #expect(code == MMErrorCode.permissionDenied.code)
     }
 
-    @Test("acceptsRoot opts a route into root targets (no traversal, no target ACL)")
+    @Test("Accepts(.root) opts a route into root targets (no traversal, no target ACL)")
     func rootTargetOptIn() async {
         // Empty provider: any ACL consultation would deny, proving the
         // opted-in root dispatch consults none.
         let router = Router(aclProvider: InMemoryACLProvider()) {
             Handle(
                 Method<EchoRequest, EchoResponse>(name: "tree.walk", access: .read),
-                acceptsRoot: true
+                Accepts(.root)
             ) { request, _ in
                 .success(EchoResponse(value: request.value))
             }

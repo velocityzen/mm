@@ -144,15 +144,15 @@ public func Types(_ container: any TypeNamespace.Type) -> ServerPart {
 
 // MARK: - On: builder-native handler registration (authorization first)
 
-/// Registers a unary handler; identical to ``Handle(_:acceptsRoot:_:)-(Method<Request,Response>,_,_)``
+/// Registers a unary handler; identical to ``Handle(_:_:_:)-(Method<Request,Response>,_,_)``
 /// with the closure parameters in builder order — the authorized connection
 /// context first, then the decoded request.
 public func On<Request: Codable & Sendable, Response: Codable & Sendable>(
     _ method: Method<Request, Response>,
-    acceptsRoot: Bool = false,
+    _ accepts: Accepts = Accepts(.all),
     _ body: @escaping @Sendable (MMContext, Request) async -> Result<Response, MMError>
 ) -> Route {
-    Handle(method, acceptsRoot: acceptsRoot) { request, context in
+    Handle(method, accepts) { request, context in
         await body(context, request)
     }
 }
@@ -164,12 +164,12 @@ public func On<
     Response: Codable & Sendable
 >(
     _ method: ServerStreamMethod<Request, Element, Response>,
-    acceptsRoot: Bool = false,
+    _ accepts: Accepts = Accepts(.all),
     _ body:
         @escaping @Sendable (MMContext, Request, MMResponseSink<Element>) async ->
         Result<Response, MMError>
 ) -> Route {
-    Handle(method, acceptsRoot: acceptsRoot) { request, sink, context in
+    Handle(method, accepts) { request, sink, context in
         await body(context, request, sink)
     }
 }
@@ -181,12 +181,12 @@ public func On<
     Response: Codable & Sendable
 >(
     _ method: ClientStreamMethod<Request, Element, Response>,
-    acceptsRoot: Bool = false,
+    _ accepts: Accepts = Accepts(.all),
     _ body:
         @escaping @Sendable (MMContext, Request, MMRequestStream<Element>) async ->
         Result<Response, MMError>
 ) -> Route {
-    Handle(method, acceptsRoot: acceptsRoot) { request, elements, context in
+    Handle(method, accepts) { request, elements, context in
         await body(context, request, elements)
     }
 }
@@ -199,14 +199,14 @@ public func On<
     Response: Codable & Sendable
 >(
     _ method: BidirectionalStreamMethod<Request, RequestElement, ResponseElement, Response>,
-    acceptsRoot: Bool = false,
+    _ accepts: Accepts = Accepts(.all),
     _ body:
         @escaping @Sendable (
             MMContext, Request, MMRequestStream<RequestElement>,
             MMResponseSink<ResponseElement>
         ) async -> Result<Response, MMError>
 ) -> Route {
-    Handle(method, acceptsRoot: acceptsRoot) { request, elements, sink, context in
+    Handle(method, accepts) { request, elements, sink, context in
         await body(context, request, elements, sink)
     }
 }

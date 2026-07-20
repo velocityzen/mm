@@ -414,6 +414,22 @@ Caching notes, in order of how much they matter:
 - **Remember the ACL semantics you are serving**: first-matching-class-wins (a peer classified as owner is judged by owner bits alone, even when group/other bits would grant), uid 0 is not special, and traversal requires `x` on every ancestor prefix. All of that is enforced by the router via `EntityACL.permitted` — the provider only stores and fetches.
 - The library ships `InMemoryACLProvider` (an actor over a dictionary) for tests and small daemons; its `invalidate` is a documented no-op because it never caches.
 
+### Grants are per-entity-per-mode — declare what a route accepts when that's too broad
+
+One mental-model boundary deserves stating outright: a mode bit on an entity gates **every** method with that access class, exactly like the read bit on a file gates every program that opens it. There is no per-method grant — you cannot express "this peer may `server.entity` this target but not `journal.read` it." Methods (verbs) and entities (nouns) are deliberately orthogonal, and the router will happily authorize `journal.read` on `system.something` if the peer can traverse to it and read it.
+
+For a daemon serving one method family over its own subtree that is exactly right. For a daemon serving **several** families over one entity tree, it means an ACL grant made for one family's sake admits every family's verbs of the same class. When that's too broad, declare the route's target vocabulary with `Accepts` — the optional second argument of `On`/`Handle`:
+
+```swift
+On(Journal.read, Accepts("journal.*")) { auth, request in ... }      // journal's descendants
+On(System.rotate, Accepts("system.log", "system.audit")) { ... }     // exactly these entities
+On(Tree.walk, Accepts(.root, .all)) { ... }                          // root AND any entity
+```
+
+The patterns compose (any match admits): `"*"` / `.all` is any non-root entity (the default), `"journal.*"` is strict descendants (glob discipline — list `"journal"` too when the namespace entity is itself a target), a bare name is an exact entity, and `.root` opts into root-targeted dispatches — the only way to accept them, since root carries no ACL; it replaces the old `acceptsRoot:` flag and is reserved for methods with documented tree-wide semantics whose handlers enforce their own authorization (as the builtin `server.schema` does).
+
+`Accepts` is checked immediately after the target parses — before any ACL lookup — and an unaccepted target answers with the same wire error as a denial, so a caller cannot distinguish "outside this method's world" from "no access". It is routing policy, not contract: never fingerprinted, never served by discovery. Entity-agnostic methods (the builtin `server.entity`, a backup verb that targets any subtree) simply keep the default.
+
 ## 3. Declaring the server inside the existing `ServiceGroup`
 
 `MMService` is a swift-service-lifecycle `Service`: eyed does not get a new lifecycle mechanism, it gets one more entry in the `ServiceGroup` it already runs. The declarative form assembles everything — configuration, authorization, logging, and the handlers — in one builder; underneath it constructs the `Router` (with `registerBuiltins: true`, so `server.schema` and `server.entity` exist without user code), computes the hello fingerprint from every registered signature, and prepares metrics, all before `run()` is ever called.

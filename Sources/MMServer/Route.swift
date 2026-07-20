@@ -50,14 +50,11 @@ public struct Route: Sendable {
     public let name: String
     /// The rwx class required on the target entity, from the descriptor.
     public let access: AccessMode
-    /// Whether the route accepts `EntityName.root` as its target. Root carries
-    /// no ACL, so nothing gates a root-targeted dispatch; the router therefore
-    /// denies such requests with `permissionDenied` unless the route opted in
-    /// via `Handle(method, acceptsRoot: true)`. Opting in is a declaration
-    /// that the handler has documented tree-wide semantics and enforces its
-    /// own authorization (as the builtin `server.schema` does by filtering its
-    /// response by traversal rights).
-    public let acceptsRoot: Bool
+    /// What targets this route accepts — see ``Accepts``. The default,
+    /// `Accepts(.all)`, is any non-root entity the ACL admits; root always
+    /// requires the explicit `.root` pattern because it carries no ACL to
+    /// authorize against.
+    public let accepts: Accepts
 
     /// Probes the descriptor's request/response types lazily; memoized per
     /// type by the schema probe cache.
@@ -79,6 +76,123 @@ public struct Route: Sendable {
     }
 }
 
+/// What targets a route accepts — one declarative vocabulary for both the
+/// root opt-in and entity scoping, passed as the second argument of `On` /
+/// `Handle`. The router checks it immediately after the target parses —
+/// **before any ACL lookup** — and answers an unaccepted target with the
+/// same wire error as an authorization denial, so a caller cannot
+/// distinguish "outside this method's world" from "no access", and the ACL
+/// provider is never consulted for it.
+///
+/// Patterns are variadic; a target is accepted when **any** pattern admits
+/// it:
+///
+/// - `Accepts(.all)` or `Accepts("*")` — any entity (the default; root still
+///   excluded).
+/// - `Accepts("journal.*")` — strict descendants of `journal`, at any depth.
+///   Glob discipline: the prefix entity itself is NOT included — list it
+///   explicitly (`Accepts("journal", "journal.*")`) when the namespace
+///   entity is also a valid target.
+/// - `Accepts("system.log", "system.audit")` — exactly these entities.
+/// - `Accepts(.root)` — `EntityName.root`. Root carries no ACL, so nothing
+///   else gates a root-targeted dispatch: accept it only for methods with
+///   documented tree-wide semantics whose handlers enforce their own
+///   authorization (the builtin `server.schema` does, by filtering its
+///   response by traversal rights). Combine when the route serves both:
+///   `Accepts(.root, .all)`.
+///
+/// Why this exists: ACL grants are per-entity-per-mode, never per-method
+/// (Unix discipline — the read bit on a file gates every program that opens
+/// it). In a daemon serving several method families over one entity tree,
+/// `Accepts` keeps a family's verbs on its own nouns even when the ACL would
+/// admit the peer. It is routing policy, not contract: never fingerprinted,
+/// never served by discovery.
+public struct Accepts: Sendable {
+    /// One target pattern; string literals use the grammar in ``Accepts``.
+    /// An invalid pattern is a programmer error caught at construction
+    /// (server boot), not at dispatch.
+    public struct Pattern: Sendable, ExpressibleByStringLiteral {
+        enum Kind: Sendable {
+            case root
+            case all
+            case subtree(EntityName)
+            case entity(EntityName)
+        }
+
+        let kind: Kind
+
+        /// `EntityName.root` as a target.
+        public static let root = Pattern(kind: .root)
+        /// Any non-root entity.
+        public static let all = Pattern(kind: .all)
+
+        /// The explicit spelling of the string grammar:
+        /// `.entity("journal.*")` ≡ `"journal.*"`.
+        public static func entity(_ pattern: String) -> Pattern {
+            Pattern(parsing: pattern)
+        }
+
+        public init(stringLiteral value: String) {
+            self.init(parsing: value)
+        }
+
+        private init(kind: Kind) {
+            self.kind = kind
+        }
+
+        private init(parsing pattern: String) {
+            if pattern == "*" {
+                self.kind = .all
+            } else if pattern.hasSuffix(".*") {
+                self.kind = .subtree(
+                    Self.entityName(String(pattern.dropLast(2)), in: pattern))
+            } else {
+                self.kind = .entity(Self.entityName(pattern, in: pattern))
+            }
+        }
+
+        private static func entityName(_ raw: String, in pattern: String) -> EntityName {
+            EntityName.parse(raw).getOrElse { error in
+                preconditionFailure("Accepts pattern \"\(pattern)\" is not valid: \(error)")
+            }
+        }
+    }
+
+    let patterns: [Pattern]
+
+    public init(_ patterns: Pattern...) {
+        precondition(
+            !patterns.isEmpty,
+            "Accepts() with no patterns would deny every target — declare at least one"
+        )
+        self.patterns = patterns
+    }
+
+    /// Whether root-targeted dispatches are accepted.
+    var admitsRoot: Bool {
+        self.patterns.contains { pattern in
+            if case .root = pattern.kind { return true }
+            return false
+        }
+    }
+
+    /// Whether the (non-root) `entity` is accepted.
+    func admits(_ entity: EntityName) -> Bool {
+        self.patterns.contains { pattern in
+            switch pattern.kind {
+                case .root:
+                    return false
+                case .all:
+                    return true
+                case .subtree(let prefix):
+                    return entity.rawValue.hasPrefix("\(prefix.rawValue).")
+                case .entity(let exact):
+                    return entity == exact
+            }
+        }
+    }
+}
+
 /// Binds a typed handler to a method descriptor — the **single type-erasure
 /// point** of the server.
 ///
@@ -91,20 +205,19 @@ public struct Route: Sendable {
 /// directly, so a domain failure reaches the peer verbatim. Protocol codes
 /// 1–63 are reserved (`MMErrorCode`); application handlers use codes >= 64.
 ///
-/// `acceptsRoot` (default false) opts the route into `EntityName.root`
-/// targets, which the router otherwise denies with `permissionDenied` because
-/// root carries no ACL to authorize against. Opt in only for methods with
-/// documented tree-wide semantics whose handlers enforce their own
-/// authorization — see ``Route/acceptsRoot``.
+/// The optional second argument declares what targets the route accepts —
+/// `Accepts("journal.*")`, `Accepts(.root)`, exact entities — replacing both
+/// a separate root opt-in and any ad-hoc handler-side scoping; see
+/// ``Accepts``. The default accepts any non-root entity the ACL admits.
 public func Handle<Request: Codable & Sendable, Response: Codable & Sendable>(
     _ method: Method<Request, Response>,
-    acceptsRoot: Bool = false,
+    _ accepts: Accepts = Accepts(.all),
     _ body: @escaping @Sendable (Request, MMContext) async -> Result<Response, MMError>
 ) -> Route {
     Route(
         name: method.name,
         access: method.access,
-        acceptsRoot: acceptsRoot,
+        accepts: accepts,
         signatureThunk: { method.signature() },
         kind: .unary { params, context in
             // Three stages, each folding its failure into the outcome that
@@ -154,7 +267,7 @@ private func streamTerminal<Response: Codable & Sendable>(
 private func streamRoute<Request: Codable & Sendable>(
     name: String,
     access: AccessMode,
-    acceptsRoot: Bool,
+    accepts: Accepts,
     signatureThunk: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
     startup:
         @escaping @Sendable (
@@ -164,7 +277,7 @@ private func streamRoute<Request: Codable & Sendable>(
     Route(
         name: name,
         access: access,
-        acceptsRoot: acceptsRoot,
+        accepts: accepts,
         signatureThunk: signatureThunk,
         kind: .stream { params, context, msgid, seams, metrics in
             switch MMPackDecoder().decode(Request.self, from: params) {
@@ -233,7 +346,7 @@ public func Handle<
     Response: Codable & Sendable
 >(
     _ method: ServerStreamMethod<Request, Element, Response>,
-    acceptsRoot: Bool = false,
+    _ accepts: Accepts = Accepts(.all),
     _ body:
         @escaping @Sendable (Request, MMResponseSink<Element>, MMContext) async ->
         Result<Response, MMError>
@@ -241,7 +354,7 @@ public func Handle<
     streamRoute(
         name: method.name,
         access: method.access,
-        acceptsRoot: acceptsRoot,
+        accepts: accepts,
         signatureThunk: { method.signature() }
     ) { (request: Request, context, msgid, seams, metrics) in
         let sinkState = MMResponseSinkState(
@@ -271,7 +384,7 @@ public func Handle<
     Response: Codable & Sendable
 >(
     _ method: ClientStreamMethod<Request, Element, Response>,
-    acceptsRoot: Bool = false,
+    _ accepts: Accepts = Accepts(.all),
     _ body:
         @escaping @Sendable (Request, MMRequestStream<Element>, MMContext) async ->
         Result<Response, MMError>
@@ -279,7 +392,7 @@ public func Handle<
     streamRoute(
         name: method.name,
         access: method.access,
-        acceptsRoot: acceptsRoot,
+        accepts: accepts,
         signatureThunk: { method.signature() }
     ) { (request: Request, context, msgid, seams, metrics) in
         let (source, stream) = makeRequestStream(
@@ -312,7 +425,7 @@ public func Handle<
     Response: Codable & Sendable
 >(
     _ method: BidirectionalStreamMethod<Request, RequestElement, ResponseElement, Response>,
-    acceptsRoot: Bool = false,
+    _ accepts: Accepts = Accepts(.all),
     _ body:
         @escaping @Sendable (
             Request, MMRequestStream<RequestElement>, MMResponseSink<ResponseElement>, MMContext
@@ -321,7 +434,7 @@ public func Handle<
     streamRoute(
         name: method.name,
         access: method.access,
-        acceptsRoot: acceptsRoot,
+        accepts: accepts,
         signatureThunk: { method.signature() }
     ) { (request: Request, context, msgid, seams, metrics) in
         let (source, stream) = makeRequestStream(

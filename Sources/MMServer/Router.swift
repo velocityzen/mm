@@ -38,11 +38,12 @@ import NIOCore
 /// An unchecked dispatch would mean any peer — including an anonymous TCP
 /// peer — could run any handler by sending an empty target, so root-targeted
 /// envelopes are **denied with `permissionDenied` by default**. Only routes
-/// registered with `Handle(method, acceptsRoot: true)` accept them: methods
-/// with documented tree-wide semantics whose handlers enforce their own
-/// authorization. The builtin `server.schema` opts in (its response is filtered
-/// by per-method traversal rights); `server.entity` does not (root carries no
-/// ACL to report, so a root stat is denied like any absent record).
+/// registered with the `.root` pattern — `Handle(method, Accepts(.root, ...))`
+/// — accept them: methods with documented tree-wide semantics whose handlers
+/// enforce their own authorization. The builtin `server.schema` opts in (its
+/// response is filtered by per-method traversal rights); `server.entity` does
+/// not (root carries no ACL to report, so a root stat is denied like any
+/// absent record).
 public struct Router: Sendable {
     /// `SchemaFingerprint.compute` over **all** registered signatures and
     /// type definitions, memoized at init. This is the hello-preamble
@@ -249,10 +250,11 @@ public struct Router: Sendable {
         logger: Logger
     ) -> [Route] {
         [
-            // acceptsRoot: discovery scoped to root is the method's
-            // documented tree-wide semantics; the handler filters its
-            // response by per-method traversal rights.
-            Handle(Builtins.schema, acceptsRoot: true) { _, context in
+            // Accepts(.root, .all): discovery targets any entity as its
+            // scope, and root — the whole tree — is its documented
+            // tree-wide semantics; the handler filters its response by
+            // per-method traversal rights.
+            Handle(Builtins.schema, Accepts(.root, .all)) { _, context in
                 await Self.filteredSchema(
                     scope: context.entity,
                     peer: context.peer,
@@ -425,15 +427,30 @@ public struct Router: Sendable {
             }
             .mapError { _ in Self.error(.malformedParams) }
             .flatMapAsync { entity in
-                // Root targets: root has no ancestors and carries no ACL, so
-                // nothing below would gate the dispatch — deny unless the
-                // route opted in via `acceptsRoot` (see the type docs).
-                if entity.isRoot && !route.acceptsRoot {
+                // The route's target vocabulary (``Accepts``): checked before
+                // any ACL lookup — an unaccepted target answers exactly like
+                // a denial, and the provider is never consulted for it. Root
+                // is gated here too: it carries no ACL, so nothing below
+                // would gate a root dispatch — only routes declaring `.root`
+                // (documented tree-wide semantics, handler-enforced
+                // authorization) ever see one.
+                if entity.isRoot {
+                    if !route.accepts.admitsRoot {
+                        return .failure(
+                            self.authorizationDenied(
+                                method: method,
+                                entity: entity,
+                                reason: "root_target",
+                                context: context
+                            )
+                        )
+                    }
+                } else if !route.accepts.admits(entity) {
                     return .failure(
                         self.authorizationDenied(
                             method: method,
                             entity: entity,
-                            reason: "root_target",
+                            reason: "out_of_scope",
                             context: context
                         )
                     )

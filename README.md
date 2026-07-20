@@ -224,7 +224,8 @@ Entities are dotted paths (`box.item`) forming a tree. Each entity carries an `E
 - Peer identity comes from kernel credentials on Unix sockets; TCP peers are `anonymous` in v1 and match only the _other_ class. uid 0 is not special.
 - Classes resolve **first-matching-class-wins**: an owner match is judged by the owner bits alone, even when group or other bits would grant more.
 - Dispatch requires `.execute` on **every ancestor prefix** of the target entity (like directory x bits, outermost first), then the method's declared access class (r, w, or x) on the target itself.
-- An entity with no ACL record is `permissionDenied` — existence is never leaked. Root-targeted requests are denied unless the route explicitly opts in.
+- An entity with no ACL record is `permissionDenied` — existence is never leaked. Root-targeted requests are denied unless the route accepts them via the `.root` pattern.
+- Grants are per-entity-per-mode, never per-method (the read bit on a file gates every program that opens it). When a daemon serves several method families over one tree, declare a route's target vocabulary: `On(Journal.read, Accepts("journal.*")) { ... }` (a subtree), `Accepts("system.log", "system.audit")` (exact entities), `Accepts(.root, .all)` (root plus everything, for tree-wide methods like discovery). Unaccepted targets are denied before the ACL is even consulted, indistinguishably from any other denial.
 
 Authorization runs before the request payload is touched at all: the target entity rides the open envelope, and no params byte is interpreted until every check passes.
 

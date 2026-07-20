@@ -153,7 +153,7 @@ Server facts to design around:
 - Handlers return `Result<Response, MMError>`; error codes 1–63 are reserved for the protocol — application errors start at 64.
 - Every server auto-registers the builtins `server.schema` (discovery, filtered by the caller's traversal rights) and `server.entity`.
 - Cross-connection fan-out (broadcasting one connection's append to another's `follow` stream) is application infrastructure — see `Examples/Daemon/FollowerHub.swift` for the safe registry pattern (synchronous `onTermination`, idempotent removal, never finish under the lock).
-- Root-targeted requests (empty entity) are denied unless the route opts in with `acceptsRoot: true` on `Handle`/`On`.
+- Root-targeted requests (empty entity) are denied unless the route accepts them: `On(method, Accepts(.root, .all)) { ... }`.
 - Dynamic authorization (SQLite etc.): implement `EntityACLProvider` and pass the instance — `ACLProvider(provider)`. The builder tree is sugar over `InMemoryACLProvider`.
 - Startup ordering (ServiceLifecycle starts everything concurrently): `Ready(readiness)` in the builder fires a `ServiceReadiness` at bind; wrap dependents in `GatedService` to start after it. `OnBind { address in }` gives you ephemeral TCP ports.
 
@@ -243,6 +243,7 @@ A hello fingerprint mismatch is a signal to run discovery and degrade deliberate
 - Entities are dotted paths forming a tree. Dispatch needs `.execute` on **every ancestor** of the target (like directory x bits), then the method's declared class on the target itself.
 - Classes resolve first-matching-class-wins: an owner match is judged by owner bits alone even if group/other would grant more — exactly POSIX.
 - A missing ACL record means `permissionDenied`, and existence is never leaked. If discovery shows fewer methods than the server defines, that's traversal filtering, not a bug.
+- Grants are per-entity-per-mode, never per-method: a mode bit admits every method of that access class. In multi-family daemons, declare a route's targets — `On(Journal.read, Accepts("journal.*")) { ... }` (subtree), `Accepts("system.log")` (exact), `Accepts(.root, .all)` (root opt-in, replacing the old `acceptsRoot:`); unaccepted targets are denied before any ACL lookup.
 - Authorization runs before a single payload byte is decoded.
 
 ## House rules that apply to any code you write here

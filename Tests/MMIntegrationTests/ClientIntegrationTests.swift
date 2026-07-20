@@ -136,6 +136,50 @@ struct ClientIntegrationTests {
         }
     }
 
+    @Test("Accepts patterns: subtree and exact-entity routes deny out-of-scope targets")
+    func routeEntityScoping() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                let (results, runResult) = try await withConnectedClient(unixPath: path) {
+                    connection -> [Result<EchoResponse, MMCallError>] in
+                    [
+                        // Accepts("box", "box.*") admits the descendants AND
+                        // the explicitly listed prefix entity itself.
+                        await connection.call(
+                            TestMethods.scopedEcho, on: entity("box.item"),
+                            EchoRequest(entity: entity("box.item"), value: 1)),
+                        await connection.call(
+                            TestMethods.scopedEcho, on: entity("box"),
+                            EchoRequest(entity: entity("box"), value: 2)),
+                        // `echo` is in the ACL and readable by this peer —
+                        // only the route's Accepts denies it.
+                        await connection.call(
+                            TestMethods.scopedEcho, on: entity("echo"),
+                            EchoRequest(entity: entity("echo"), value: 3)),
+                        // Accepts("box.item") admits exactly that entity...
+                        await connection.call(
+                            TestMethods.scopedExact, on: entity("box.item"),
+                            EchoRequest(entity: entity("box.item"), value: 4)),
+                        // ...and not its parent, even though the parent is in
+                        // the same subtree and ACL-readable.
+                        await connection.call(
+                            TestMethods.scopedExact, on: entity("box"),
+                            EchoRequest(entity: entity("box"), value: 5)),
+                    ]
+                }
+                #expect(results[0] == .success(EchoResponse(value: 1)))
+                #expect(results[1] == .success(EchoResponse(value: 2)))
+                #expect(results[2] == .failure(.denied))
+                #expect(results[3] == .success(EchoResponse(value: 4)))
+                #expect(results[4] == .failure(.denied))
+                if case .failure(let error) = runResult {
+                    Issue.record("run() must end cleanly, got \(error)")
+                }
+            }
+        }
+    }
+
     @Test("a typed call round-trips: encode, authorize, dispatch, decode")
     func typedEchoRoundTrip() async throws {
         try await withTempSocketPath { path in
