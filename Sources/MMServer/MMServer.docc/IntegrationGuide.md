@@ -800,3 +800,64 @@ Every value verified against the shipped initializers and constants.
 | Entity creation mode | `0o750` (`EntityACL.defaultCreationMode`) | host entity-creation paths | Default `rwxr-x---` for new entities; the host may override umask-style |
 | Stream credit window | 8 items per direction (initial) | `MMStreamFlowControl.initialWindow` | Pre-grant burst per stream direction; a sender at zero credit suspends (§5, §6) |
 | Protocol version | 1 (`MMWireInfo.protocolVersion`) | hello preamble | Min-wins negotiation; a server advertising 0 is unsupported |
+
+## 8. Observability: metrics
+
+Both halves of the library instrument themselves through [swift-metrics](https://github.com/apple/swift-metrics) — a facade, like swift-log. The library only **emits**; it never opens a port, never serves a `/metrics` endpoint, and never bootstraps a backend. Until the host process bootstraps one, every instrument hits the built-in no-op handler: near-zero cost, data discarded. So exposing these numbers is a host decision, made once, before the `ServiceGroup` runs:
+
+```swift
+import Metrics
+import Prometheus   // swift-prometheus
+
+let registry = PrometheusCollectorRegistry()
+MetricsSystem.bootstrap(PrometheusMetricsFactory(registry: registry))
+// Serve the scrape text yourself — a tiny HTTP endpoint returning
+// registry.emit(into:), or write it periodically to a file for
+// node_exporter's textfile collector. Push-style backends (StatsD,
+// an OTel exporter) need no listening port at all.
+```
+
+**Who can see them is your perimeter, not the library's.** Metrics do not ride the RPC socket, are not a builtin method, and are entirely outside the entity-ACL model — whatever surface the backend opens is a *new* surface. And it is an information surface worth treating like one: call rates, denial counts, and connection activity profile the daemon's use. Bind a scrape endpoint to localhost or a mode-restricted Unix socket, or prefer a push backend, with the same deliberateness §4 applies to `unixSocketMode`.
+
+The labels are a stable operational contract (they do not change when internals are refactored). Counters are monotonic and `_total`-suffixed; the two timers record nanoseconds.
+
+**Server — connection lifecycle and frames:**
+
+| Label | Kind | Meaning |
+|---|---|---|
+| `mm_server_connections_accepted_total` | counter | Connections accepted |
+| `mm_server_connections_rejected_total` | counter | Connections closed at accept over `maxConnections` |
+| `mm_server_active_connections` | gauge | Currently open connections |
+| `mm_server_accept_failures_total` | counter | Per-child accept failures absorbed without killing the listener |
+| `mm_server_frames_in_total` / `mm_server_frames_out_total` | counter | Framed messages read / written |
+| `mm_server_protocol_violations_total` | counter | Bad hellos and undecodable/ill-formed frames (connection-fatal) |
+
+**Server — routing and streams:**
+
+| Label | Kind | Meaning |
+|---|---|---|
+| `mm_server_auth_denials_total` | counter | Every denial: missing ACL, failed traversal or target check, root without `.root`, target outside the route's `Accepts` |
+| `mm_server_dispatch_duration_ns` | timer | Unary dispatch, authorization included |
+| `mm_server_inbound_responses_dropped_total` | counter | Response-kind frames from peers (clients never answer calls) |
+| `mm_server_streams_opened_total` / `_ended_total` / `_stopped_total` / `_cancelled_total` | counter | Stream lifecycle: opens, graceful terminals, STOPs observed, client CANCELs |
+| `mm_server_stream_items_in_total` / `_out_total` | counter | Request items delivered to handlers / response items written |
+| `mm_server_stream_credit_stalls_total` | counter | Response sends that parked at zero credit (slow consumers) |
+| `mm_server_stream_credit_grants_out_total` | counter | Additive credit grants written for request streams |
+| `mm_server_stream_stops_out_total` | counter | Server-initiated request-stream STOPs |
+| `mm_server_stream_violations_total` | counter | Stream-contract violations answered with a code-6 terminal |
+| `mm_server_streams_over_cap_total` | counter | Opens rejected over `maxConcurrentStreamsPerConnection` |
+| `mm_server_stream_frames_dropped_total` | counter | Stream frames for unknown/retired msgids, dropped |
+
+**Client:**
+
+| Label | Kind | Meaning |
+|---|---|---|
+| `mm_client_calls_total` / `mm_client_call_failures_total` | counter | Calls issued / calls that resolved `.failure` |
+| `mm_client_call_roundtrip_ns` | timer | Unary round-trip, send to resolved response |
+| `mm_client_responses_unmatched_total` | counter | Responses whose msgid matched no pending call |
+| `mm_client_protocol_violations_total` | counter | Undecodable frames and inbound requests (connection-fatal) |
+| `mm_client_streams_opened_total` | counter | Streaming calls opened |
+| `mm_client_stream_frames_dropped_total` | counter | Stream frames for unknown/retired msgids, dropped |
+| `mm_client_stream_item_decode_failures_total` | counter | Stream elements that failed to decode (dropped with a warning; the stream continues) |
+
+Instruments are process-global by label: bundles like `MMStreamMetrics` are constructed per connection but alias the same counters, so numbers aggregate across connections by design. Tests that need isolation inject a private capturing `MetricsFactory` (`MMStreamMetrics(factory:)`) instead of bootstrapping the global system.

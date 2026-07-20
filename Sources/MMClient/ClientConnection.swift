@@ -783,17 +783,27 @@ public actor MMClientConnection {
             // Seam adapter: writer backpressure suspends here; a throw means
             // the channel is gone — or the task was cancelled mid-write.
             try await writer.write(frame)
-        } catch {
+        } catch is CancellationError {
             // The writer's yield resumes with CancellationError when the
             // awaiting task is cancelled while suspended on outbound
             // backpressure (or was already cancelled); the connection is
             // still alive then, so honor the documented cancellation
-            // contract (.cancelled, never .connectionClosed). Either way a
-            // parked response wins over the write failure, same as the
+            // contract (.cancelled, never .connectionClosed). A parked
+            // response wins over the write failure, same as the
             // `cancel(msgid:)` path.
             return self.calls.withLockedValue { $0.abandon(msgid: msgid) }
                 .map { parked in self.resolve(parked, as: Response.self, start: start) }
-                ?? .failure(error is CancellationError ? .cancelled : .connectionClosed)
+                ?? .failure(.cancelled)
+        } catch {
+            // Any other throw means the channel is gone — but the terminal
+            // transition belongs to finish(): run() observes the same death
+            // and drives it, and finish's ordering guarantees a caller never
+            // sees its failure while `state` still reads `.connected`. So
+            // don't invent a `.connectionClosed` here — fall through and
+            // park: `register` claims the already-parked close failure when
+            // finish won the race, and finish resumes the park (state
+            // first) when it hasn't run yet. Answering directly from this
+            // path lost exactly that race on loaded CI runners.
         }
         let outcome: CallTable.Outcome = await withParkedContinuation(
             register: { continuation in
@@ -939,10 +949,10 @@ public actor MMClientConnection {
     ) async -> ClientStreamState<Inbound, Outbound, Response> {
         do {
             try await writer.write(frame)
-        } catch {
-            // The open request never reached the wire. Reclaim the reservation
-            // (claiming a parked terminal if one somehow raced) and fail the
-            // handle. Cancellation and death both land here.
+        } catch is CancellationError {
+            // The task was cancelled mid-write; the connection is still
+            // alive. Reclaim the reservation (claiming a parked terminal if
+            // one somehow raced) and fail the handle locally.
             let parked = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
             let reason: MMCallError
             switch parked {
@@ -953,15 +963,22 @@ public actor MMClientConnection {
                     // The connection closed and parked the reservation as a failure.
                     reason = closeReason
                 case .some(.success), .none:
-                    // No terminal raced (or a nil-error terminal, impossible for an
-                    // un-installed stream): the write failed on cancellation or death.
-                    reason = error is CancellationError ? .cancelled : .connectionClosed
+                    reason = .cancelled
             }
             return self.failedStream(
                 hasResponseStream: hasResponseStream,
                 hasRequestStream: hasRequestStream,
                 error: reason
             )
+        } catch {
+            // Any other throw means the channel is gone — but the terminal
+            // transition belongs to finish(): run() observes the same death
+            // and drives it, and finish's ordering guarantees no handle
+            // fails while `state` still reads `.connected`. Fall through:
+            // the install below claims the parked close failure when finish
+            // won the race, and finish fails the terminal (state first)
+            // when it hasn't run yet — same discipline as the unary write
+            // path.
         }
 
         // The open request is on the wire. Build the state with its wire sinks,

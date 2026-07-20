@@ -316,6 +316,32 @@ struct ClientIntegrationTests {
         }
     }
 
+    @Test("a call failing .connectionClosed never observes a still-connected state")
+    func closeFailureObservesClosedState() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                // The tight window: close() then an immediate call, so the
+                // call's write races run()'s teardown. Whichever way it
+                // lands, a .connectionClosed outcome must imply an
+                // already-closed state — the finish() state-before-resume
+                // invariant. (The write-failure path used to answer
+                // .connectionClosed directly, losing exactly this race on
+                // loaded CI runners; the loop widens the window.)
+                for _ in 0..<25 {
+                    _ = try await withConnectedClient(unixPath: path) { connection in
+                        await connection.close()
+                        let outcome = await connection.call(
+                            TestMethods.echo, on: entity("box.item"),
+                            EchoRequest(entity: entity("box.item"), value: 1))
+                        #expect(outcome == .failure(.connectionClosed))
+                        #expect(connection.state == .closed(reason: nil))
+                    }
+                }
+            }
+        }
+    }
+
     @Test("graceful server shutdown completes the in-flight call, then the client closes cleanly")
     func gracefulShutdownCompletesInFlightCall() async throws {
         try await withTempSocketPath { path in

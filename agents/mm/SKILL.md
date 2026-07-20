@@ -245,6 +245,7 @@ A hello fingerprint mismatch is a signal to run discovery and degrade deliberate
 - A missing ACL record means `permissionDenied`, and existence is never leaked. If discovery shows fewer methods than the server defines, that's traversal filtering, not a bug.
 - Grants are per-entity-per-mode, never per-method: a mode bit admits every method of that access class. In multi-family daemons, declare a route's targets — `On(Journal.read, Accepts("journal.*")) { ... }` (subtree), `Accepts("system.log")` (exact), `Accepts(.root, .all)` (root opt-in, replacing the old `acceptsRoot:`); unaccepted targets are denied before any ACL lookup.
 - Authorization runs before a single payload byte is decoded.
+- Metrics: the library emits swift-metrics instruments (stable `mm_server_*`/`mm_client_*` labels — never rename them) but bootstraps no backend and opens no port; the host calls `MetricsSystem.bootstrap(...)` once, or everything is a no-op. Label inventory lives in the IntegrationGuide's Observability section.
 
 ## House rules that apply to any code you write here
 

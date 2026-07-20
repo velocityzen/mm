@@ -229,6 +229,10 @@ Entities are dotted paths (`box.item`) forming a tree. Each entity carries an `E
 
 Authorization runs before the request payload is touched at all: the target entity rides the open envelope, and no params byte is interpreted until every check passes.
 
+## Observability
+
+Both halves emit [swift-metrics](https://github.com/apple/swift-metrics) instruments under stable `mm_server_*` / `mm_client_*` labels — connection lifecycle, frames, denials, dispatch latency, per-direction stream items and credit stalls. The library never opens a metrics port: bootstrap the backend of your choice (Prometheus, StatsD, OTel) once in the host process, or the built-in no-op handler discards everything at near-zero cost. The full label inventory, wiring sketch, and exposure-security notes are in the integration guide's Observability section.
+
 ## Requirements
 
 - Swift 6 (strict concurrency), macOS 15+ or Linux.
