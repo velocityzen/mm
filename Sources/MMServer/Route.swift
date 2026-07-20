@@ -93,6 +93,11 @@ public struct Route: Sendable {
 ///   Glob discipline: the prefix entity itself is NOT included — list it
 ///   explicitly (`Accepts("journal", "journal.*")`) when the namespace
 ///   entity is also a valid target.
+/// - `Accepts("tenants.*.journal")` — a `*` **segment** matches exactly one
+///   segment: `tenants.acme.journal` yes, `tenants.a.b.journal` no. Only a
+///   whole segment may be a wildcard (`"jour*"` is invalid), and segment
+///   wildcards compose with the trailing form —
+///   `"tenants.*.journal.*"` is any tenant's journal subtree.
 /// - `Accepts("system.log", "system.audit")` — exactly these entities.
 /// - `Accepts(.root)` — `EntityName.root`. Root carries no ACL, so nothing
 ///   else gates a root-targeted dispatch: accept it only for methods with
@@ -100,6 +105,11 @@ public struct Route: Sendable {
 ///   authorization (the builtin `server.schema` does, by filtering its
 ///   response by traversal rights). Combine when the route serves both:
 ///   `Accepts(.root, .all)`.
+///
+/// One grammar rule underneath: a pattern is dot-separated segments, each a
+/// literal or `*` (exactly one segment); a **trailing** `.*` means one or
+/// more further segments (any depth). Bare `"*"` is that rule's degenerate
+/// case — no prefix, any depth — which is why it means "everything".
 ///
 /// Why this exists: ACL grants are per-entity-per-mode, never per-method
 /// (Unix discipline — the read bit on a file gates every program that opens
@@ -112,11 +122,19 @@ public struct Accepts: Sendable {
     /// An invalid pattern is a programmer error caught at construction
     /// (server boot), not at dispatch.
     public struct Pattern: Sendable, ExpressibleByStringLiteral {
+        enum Segment: Sendable, Equatable {
+            /// Matches this segment text exactly.
+            case literal(String)
+            /// `*` — matches exactly one segment, whatever its text.
+            case anyOne
+        }
+
         enum Kind: Sendable {
             case root
-            case all
-            case subtree(EntityName)
-            case entity(EntityName)
+            /// The one grammar rule: match `segments` position-for-position;
+            /// with `descendants`, one or more further segments must follow
+            /// (so `[]` + descendants = any non-root entity).
+            case entities(segments: [Segment], descendants: Bool)
         }
 
         let kind: Kind
@@ -124,10 +142,10 @@ public struct Accepts: Sendable {
         /// `EntityName.root` as a target.
         public static let root = Pattern(kind: .root)
         /// Any non-root entity.
-        public static let all = Pattern(kind: .all)
+        public static let all = Pattern(kind: .entities(segments: [], descendants: true))
 
         /// The explicit spelling of the string grammar:
-        /// `.entity("journal.*")` ≡ `"journal.*"`.
+        /// `.entity("tenants.*.journal")` ≡ `"tenants.*.journal"`.
         public static func entity(_ pattern: String) -> Pattern {
             Pattern(parsing: pattern)
         }
@@ -141,20 +159,36 @@ public struct Accepts: Sendable {
         }
 
         private init(parsing pattern: String) {
-            if pattern == "*" {
-                self.kind = .all
-            } else if pattern.hasSuffix(".*") {
-                self.kind = .subtree(
-                    Self.entityName(String(pattern.dropLast(2)), in: pattern))
-            } else {
-                self.kind = .entity(Self.entityName(pattern, in: pattern))
+            var raw = pattern.split(separator: ".", omittingEmptySubsequences: false)
+            precondition(
+                raw.allSatisfy { !$0.isEmpty },
+                "Accepts pattern \"\(pattern)\" is not valid: empty segment"
+            )
+            var descendants = false
+            if raw.last == "*" {
+                raw.removeLast()
+                descendants = true
             }
-        }
-
-        private static func entityName(_ raw: String, in pattern: String) -> EntityName {
-            EntityName.parse(raw).getOrElse { error in
-                preconditionFailure("Accepts pattern \"\(pattern)\" is not valid: \(error)")
+            let segments = raw.map { segment -> Segment in
+                if segment == "*" {
+                    return .anyOne
+                }
+                // A lone segment is itself a valid entity name; parsing it
+                // enforces the character rules (and rejects `*` mixed into
+                // a segment, like "jour*al").
+                return EntityName.parse(String(segment)).match(
+                    { _ in Segment.literal(String(segment)) },
+                    { error -> Segment in
+                        preconditionFailure(
+                            "Accepts pattern \"\(pattern)\" is not valid: \(error)")
+                    }
+                )
             }
+            precondition(
+                !segments.isEmpty || descendants,
+                "Accepts pattern \"\(pattern)\" is not valid: empty pattern"
+            )
+            self.kind = .entities(segments: segments, descendants: descendants)
         }
     }
 
@@ -178,16 +212,27 @@ public struct Accepts: Sendable {
 
     /// Whether the (non-root) `entity` is accepted.
     func admits(_ entity: EntityName) -> Bool {
-        self.patterns.contains { pattern in
+        let entitySegments = entity.rawValue.split(separator: ".")
+        return self.patterns.contains { pattern in
             switch pattern.kind {
                 case .root:
                     return false
-                case .all:
-                    return true
-                case .subtree(let prefix):
-                    return entity.rawValue.hasPrefix("\(prefix.rawValue).")
-                case .entity(let exact):
-                    return entity == exact
+                case .entities(let segments, let descendants):
+                    guard
+                        descendants
+                            ? entitySegments.count > segments.count
+                            : entitySegments.count == segments.count
+                    else {
+                        return false
+                    }
+                    return zip(segments, entitySegments).allSatisfy { pattern, actual in
+                        switch pattern {
+                            case .anyOne:
+                                return true
+                            case .literal(let text):
+                                return text == actual
+                        }
+                    }
             }
         }
     }
