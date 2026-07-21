@@ -10,8 +10,14 @@ extension MMClientConnection {
     /// fingerprint covers the server's whole method set and cannot vouch for
     /// a slice, but a scoped diff can. Run it after the inbound loop is
     /// started (discovery rides the normal call path).
+    ///
+    /// `sharing` carries the server's shared `Types(...)` declarations: a
+    /// shared definition a contract references is served by scoped discovery
+    /// (reachability), so without the local twin it would falsely diff as a
+    /// server-only type.
     public nonisolated func verifyContracts(
-        _ contracts: [SchemaDeclaration]
+        _ contracts: [SchemaDeclaration],
+        sharing sharedTypes: [TypeNamespaceDeclaration] = []
     ) async -> Result<[SchemaDifference], MMCallError> {
         var differences: [SchemaDifference] = []
         for contract in contracts {
@@ -30,7 +36,11 @@ extension MMClientConnection {
                 case .failure(let error):
                     return .failure(error)
                 case .success(let response):
-                    let difference = SchemaDifference(local: contract, remote: response)
+                    let difference = SchemaDifference(
+                        local: contract.signatures,
+                        localTypes: contract.types(sharing: sharedTypes),
+                        remote: response
+                    )
                     if !difference.isEmpty {
                         differences.append(difference)
                     }

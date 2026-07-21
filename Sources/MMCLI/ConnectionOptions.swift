@@ -18,9 +18,12 @@ public enum OutputFormat: String, ExpressibleByArgument, CaseIterable, Sendable 
 /// `@OptionGroup`: where the daemon listens, connection tunables, and the
 /// output format.
 ///
-/// Exactly one of `--socket` / `--tcp` must be given; ``validate()`` enforces
-/// that plus the shape of every parsed value, so the computed ``endpoint`` and
-/// ``clientConfiguration`` are only read after a successful parse.
+/// Exactly one of `--socket` / `--tcp` must be given — unless the tool bound
+/// a default endpoint via ``MMCLIDefaults``, in which case both may be
+/// omitted and the default applies (explicit flags always win).
+/// ``validate()`` enforces that plus the shape of every parsed value, so the
+/// computed ``endpoint`` and ``clientConfiguration`` are only read after a
+/// successful parse.
 public struct MMCLIOptions: ParsableArguments, Sendable {
     @Option(help: ArgumentHelp("Unix domain socket path of the daemon.", valueName: "path"))
     public var socket: String?
@@ -61,7 +64,9 @@ public struct MMCLIOptions: ParsableArguments, Sendable {
     public mutating func validate() throws {
         switch (self.socket, self.tcp) {
             case (nil, nil):
-                throw ValidationError("one of --socket or --tcp is required")
+                if MMCLIDefaults.current.endpoint == nil {
+                    throw ValidationError("one of --socket or --tcp is required")
+                }
             case (.some, .some):
                 throw ValidationError("--socket and --tcp are mutually exclusive; give one")
             case (.some(let path), nil):
@@ -92,6 +97,9 @@ public struct MMCLIOptions: ParsableArguments, Sendable {
         }
         if let address = self.tcp, let parsed = Self.parseTCP(address) {
             return .tcp(host: parsed.host, port: Int(parsed.port))
+        }
+        if let bound = MMCLIDefaults.current.endpoint {
+            return bound
         }
         preconditionFailure("MMCLIOptions.endpoint read before validate() passed")
     }

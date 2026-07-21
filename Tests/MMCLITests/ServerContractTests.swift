@@ -25,10 +25,12 @@ import Musl
 @discardableResult
 func withLedgerServer<T: Sendable>(
     ledgerMode: UInt16 = 0o700,
+    sharedTypes: [any TypeNamespace.Type] = [],
     _ body: @escaping @Sendable (MMCLIOptions) async throws -> T
 ) async throws -> T {
     try await withTempSocketPath(prefix: "mm-sc-") { path in
-        try await withLedgerServer(at: path, ledgerMode: ledgerMode, body)
+        try await withLedgerServer(
+            at: path, ledgerMode: ledgerMode, sharedTypes: sharedTypes, body)
     }
 }
 
@@ -36,6 +38,7 @@ func withLedgerServer<T: Sendable>(
 func withLedgerServer<T: Sendable>(
     at path: String,
     ledgerMode: UInt16,
+    sharedTypes: [any TypeNamespace.Type] = [],
     _ body: @escaping @Sendable (MMCLIOptions) async throws -> T
 ) async throws -> T {
     let uid = getuid()
@@ -50,6 +53,7 @@ func withLedgerServer<T: Sendable>(
     let service = MMService(
         configuration: MMServerConfiguration(endpoint: .unix(path: path)),
         namespaces: [Ledger.self],
+        sharedTypes: sharedTypes,
         aclProvider: InMemoryACLProvider(acls),
         logger: logger,
         onBind: { address in

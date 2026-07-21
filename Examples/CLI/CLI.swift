@@ -25,7 +25,6 @@ import MMExampleAPI
 /// difference between the two. The two `journal`s in `journal add
 /// journal.notes` are unrelated spellings: the command group is the method
 /// namespace; the entity path shares that prefix only by convention.
-@main
 struct MMExampleCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mm-example-cli",
@@ -38,23 +37,27 @@ struct MMExampleCLI: AsyncParsableCommand {
             MMCLIRawCall.self,
         ]
     )
+}
 
-    /// Custom entry point installing the build-time server claim: the example
-    /// daemon serves exactly the journal contract, so every invocation
-    /// verifies the whole composition for free from the hello fingerprint —
-    /// nothing manual. Were the daemon to grow, commands fall back to a
-    /// scoped discovery diff of the journal namespace automatically.
+/// The entry point: the build-time defaults bound around the root command's
+/// own `main()`. `@main` lives on a plain struct — not the command — so
+/// ArgumentParser's parse/dispatch/exit choreography runs unchanged inside
+/// the binding; there is no boilerplate to hide. The defaults are a
+/// task-local, never installed: the example daemon serves exactly the
+/// journal contract (every invocation verifies the whole composition for
+/// free from the hello fingerprint; a grown daemon falls back to a scoped
+/// discovery diff automatically), and the daemon's well-known socket fills
+/// in when `--socket`/`--tcp` are omitted.
+@main
+struct Main {
     static func main() async {
-        MMCLIServerContract.install(.complete([journalContract]))
-        do {
-            var command = try parseAsRoot()
-            if var asyncCommand = command as? any AsyncParsableCommand {
-                try await asyncCommand.run()
-            } else {
-                try command.run()
-            }
-        } catch {
-            exit(withError: error)
+        await withCLI(
+            MMCLIDefaults(
+                serverContract: .complete([journalContract]),
+                endpoint: .unix(path: "/tmp/mm-example.sock")
+            )
+        ) {
+            await MMExampleCLI.main()
         }
     }
 }

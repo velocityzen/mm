@@ -487,7 +487,9 @@ public actor MMClientConnection {
             return
         }
 
-        switch await self.verifyContracts(expectation.contracts) {
+        switch await self.verifyContracts(
+            expectation.contracts, sharing: expectation.sharedTypes
+        ) {
             case .success(let differences) where differences.isEmpty:
                 self.verification.success(.partial)
 

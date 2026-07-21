@@ -11,8 +11,14 @@ extension SchemaFingerprint {
     /// discovery instead (`SchemaDifference`), scoped to its namespaces.
     /// (`compute` sorts canonically, so fold order never affects the value;
     /// the builtins seed the fold because every server serves them.)
+    ///
+    /// `sharedTypes` mirrors the server's `Types(...)` registrations: shared
+    /// `TypeNamespace` containers contribute their definitions to the
+    /// router's fold, so a completeness claim over a server that registers
+    /// any must fold the same declarations or it can never hello-match.
     public static func expected(
-        serving contracts: [SchemaDeclaration]
+        serving contracts: [SchemaDeclaration],
+        sharedTypes: [TypeNamespaceDeclaration] = []
     ) -> Result<UInt64, SchemaError> {
         Builtins.all
             .reduce(Result<[MethodSignature], SchemaError>.success([])) { collected, builtin in
@@ -22,7 +28,10 @@ extension SchemaFingerprint {
             }
             .map { builtins in
                 contracts.reduce(
-                    into: (signatures: builtins, types: [TypeDefinition]())
+                    into: (
+                        signatures: builtins,
+                        types: sharedTypes.flatMap(\.types)
+                    )
                 ) { folded, contract in
                     folded.signatures.append(contentsOf: contract.signatures)
                     folded.types.append(contentsOf: contract.types)

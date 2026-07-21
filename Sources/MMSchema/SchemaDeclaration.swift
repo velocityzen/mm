@@ -1041,6 +1041,43 @@ public struct TypeNamespaceDeclaration: Sendable, Hashable {
     }
 }
 
+extension SchemaDeclaration {
+    /// This declaration's own types plus every shared definition its
+    /// signatures reference, transitively — the local twin of discovery's
+    /// reachability filter (a scoped discovery response lists exactly the
+    /// types reachable through the scope's methods). Use as the local side
+    /// of a `SchemaDifference` when the server also registers shared
+    /// `Types(...)` containers, so shared definitions neither surface as
+    /// server-only nor flag as missing when unreferenced.
+    public func types(sharing shared: [TypeNamespaceDeclaration]) -> [TypeDefinition] {
+        guard !shared.isEmpty else { return self.types }
+        var referenced = Set<String>()
+        for signature in self.signatures {
+            signature.collectReferencedTypeNames(into: &referenced)
+        }
+        // Transitive closure over both tables: a referenced shared type may
+        // itself reference further shared types.
+        let definitionsByName = Dictionary(
+            (self.types + shared.flatMap(\.types)).map { ($0.name, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var frontier = referenced
+        while !frontier.isEmpty {
+            var next = Set<String>()
+            for name in frontier {
+                definitionsByName[name]?.schema.collectReferencedTypeNames(into: &next)
+            }
+            frontier = next.subtracting(referenced)
+            referenced.formUnion(next)
+        }
+        let ownNames = Set(self.types.map(\.name))
+        let reachableShared = shared.flatMap(\.types).filter { definition in
+            referenced.contains(definition.name) && !ownNames.contains(definition.name)
+        }
+        return self.types + reachableShared
+    }
+}
+
 @resultBuilder
 public enum SchemaTypesBuilder: MMListBuilding {
     public typealias Element = TypeDeclaration

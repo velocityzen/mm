@@ -88,7 +88,11 @@ public enum MMCLIRunner {
     private static func verify(
         _ contract: SchemaDeclaration, on connection: MMClientConnection
     ) async throws {
-        switch await connection.verifyContracts([contract]) {
+        // Shared `Types(...)` declarations come from the installed claim, when
+        // there is one — the generated command only knows its own namespace.
+        switch await connection.verifyContracts(
+            [contract], sharing: MMCLIServerContract.current()?.sharedTypes ?? []
+        ) {
             case .success(let differences):
                 guard let difference = differences.first else { return }
                 MMCLIOutput.note("\(contract.namespace): contract drift — \(difference)")

@@ -9,14 +9,26 @@ public struct MMClientSchema: Sendable {
     /// The contracts this client was compiled against.
     public let contracts: [SchemaDeclaration]
 
+    /// The shared `Types(...)` declarations the server registers alongside
+    /// the contracts. They ride the fingerprint fold (a server registering
+    /// shared containers can never hello-match without them) and the scoped
+    /// diffs (a shared definition a contract references is local, not
+    /// server-only).
+    public let sharedTypes: [TypeNamespaceDeclaration]
+
     /// The folded whole-server hello expectation (contracts plus the
     /// builtins every server adds), or nil when `contracts` is only a slice
     /// of what the server serves — a slice can never vouch for the whole
     /// composition, so it carries no hello expectation.
     let serverFingerprint: UInt64?
 
-    init(contracts: [SchemaDeclaration], serverFingerprint: UInt64?) {
+    init(
+        contracts: [SchemaDeclaration],
+        sharedTypes: [TypeNamespaceDeclaration] = [],
+        serverFingerprint: UInt64?
+    ) {
         self.contracts = contracts
+        self.sharedTypes = sharedTypes
         self.serverFingerprint = serverFingerprint
     }
 
@@ -24,11 +36,19 @@ public struct MMClientSchema: Sendable {
     /// from the same set of contracts the server compiled). The expected
     /// hello fingerprint is folded here, at build time — a matching hello
     /// proves every namespace with zero discovery round-trips.
-    public static func complete(_ contracts: [SchemaDeclaration]) -> Self {
-        switch SchemaFingerprint.expected(serving: contracts) {
+    ///
+    /// A server that also registers shared containers (`Types(...)`) folds
+    /// their definitions into its fingerprint — pass the same declarations
+    /// as `sharedTypes` or the claim can never match.
+    public static func complete(
+        _ contracts: [SchemaDeclaration],
+        sharedTypes: [TypeNamespaceDeclaration] = []
+    ) -> Self {
+        switch SchemaFingerprint.expected(serving: contracts, sharedTypes: sharedTypes) {
             case .success(let fingerprint):
                 return MMClientSchema(
                     contracts: contracts,
+                    sharedTypes: sharedTypes,
                     serverFingerprint: fingerprint
                 )
 
@@ -42,9 +62,14 @@ public struct MMClientSchema: Sendable {
 
     /// This client uses a *slice* of the server. The hello fingerprint
     /// cannot vouch for a slice, so verification is one scoped discovery
-    /// diff per contract, run automatically after connect.
-    public static func partial(_ contracts: [SchemaDeclaration]) -> Self {
-        MMClientSchema(contracts: contracts, serverFingerprint: nil)
+    /// diff per contract, run automatically after connect. Pass the server's
+    /// shared `Types(...)` declarations so shared definitions the contracts
+    /// reference diff as local, not as server-only drift.
+    public static func partial(
+        _ contracts: [SchemaDeclaration],
+        sharedTypes: [TypeNamespaceDeclaration] = []
+    ) -> Self {
+        MMClientSchema(contracts: contracts, sharedTypes: sharedTypes, serverFingerprint: nil)
     }
 }
 

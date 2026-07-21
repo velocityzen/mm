@@ -19,7 +19,10 @@ public enum MMCLIVerify {
         let verdict = try await MMCLIRunner.invoke(options) {
             client -> (inSync: Bool, description: String) in
             let differences = try MMCLIFailure.unwrap(
-                await client.verifyContracts([contract]),
+                await client.verifyContracts(
+                    [contract],
+                    sharing: MMCLIServerContract.current()?.sharedTypes ?? []
+                ),
                 method: "server.schema", entity: contract.namespace)
             guard let difference = differences.first else { return (true, "in sync") }
             return (false, "\(difference)")

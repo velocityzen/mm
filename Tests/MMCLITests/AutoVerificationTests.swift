@@ -12,6 +12,29 @@ private let phantomContract = Schema("ledger") {
     }
 }
 
+/// A shared types-only container the ledger server registers via
+/// `sharedTypes:` — the fixture for folding `Types(...)` into completeness
+/// claims (a server registering shared containers folds their definitions
+/// into its hello fingerprint).
+private enum LedgerSharedTypes: TypeNamespace {
+    static var types: [TypeDefinition] {
+        [
+            TypeDefinition(
+                name: "shared.Badge",
+                schema: .structure(fields: [.init(key: 0, name: "label", type: .string)])
+            )
+        ]
+    }
+}
+
+/// The declaration twin of ``LedgerSharedTypes`` — what a client passes as
+/// `sharedTypes:`.
+private let ledgerSharedDeclaration = Types("shared") {
+    Type("Badge") {
+        Field("label", .string)
+    }
+}
+
 /// The library-side automatic verification: `schema` in the client
 /// configuration, verdict awaited via `verify()` — the embedding client's
 /// twin of the CLI's claim + scoped-diff flow, against the same live ledger
@@ -41,6 +64,36 @@ struct AutoVerificationTests {
                 options: options, expectation: .complete([Ledger.contract]))
             guard case .success(.ok) = verdict else {
                 Issue.record("expected .success(.ok), got \(verdict)")
+                return
+            }
+        }
+    }
+
+    @Test("a complete claim over a Types(...) server hello-matches when sharedTypes are folded")
+    func completeWithSharedTypes() async throws {
+        try await withLedgerServer(sharedTypes: [LedgerSharedTypes.self]) { options in
+            let verdict = try await self.verdict(
+                options: options,
+                expectation: .complete(
+                    [Ledger.contract], sharedTypes: [ledgerSharedDeclaration]))
+            guard case .success(.ok) = verdict else {
+                Issue.record("expected .success(.ok), got \(verdict)")
+                return
+            }
+        }
+    }
+
+    @Test("omitting sharedTypes from the claim degrades to the scoped diff, never a false verdict")
+    func completeWithoutSharedTypesDegrades() async throws {
+        try await withLedgerServer(sharedTypes: [LedgerSharedTypes.self]) { options in
+            // The hello cannot match — the server folds shared.Badge — but
+            // the ledger namespace is served compatibly, so the fallback
+            // scoped diff is clean: .partial, never .ok and never a false
+            // .difference.
+            let verdict = try await self.verdict(
+                options: options, expectation: .complete([Ledger.contract]))
+            guard case .success(.partial) = verdict else {
+                Issue.record("expected .success(.partial), got \(verdict)")
                 return
             }
         }

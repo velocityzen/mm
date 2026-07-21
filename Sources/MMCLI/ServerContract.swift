@@ -1,20 +1,15 @@
 import MMSchema
-import Synchronization
 
 /// A companion CLI's build-time claim that the listed contracts are its
-/// server's **entire** surface. Install it once at startup and every
-/// invocation verifies the whole composition for free: the expected hello
-/// fingerprint is folded from the contracts (builtins included), so a
+/// server's **entire** surface. Bind it once via ``MMCLIDefaults`` and
+/// every invocation verifies the whole composition for free: the expected
+/// hello fingerprint is folded from the contracts (builtins included), so a
 /// matching hello proves every namespace — including the one being called —
 /// with zero extra round-trips.
 ///
 /// ```swift
-/// @main
-/// struct MM: AsyncParsableCommand {
-///     static func main() async {
-///         MMCLIServerContract.install(.complete([journalContract]))
-///         // ... ArgumentParser custom-main pattern ...
-///     }
+/// await withCLI(MMCLIDefaults(serverContract: .complete([journalContract]))) {
+///     await MM.main()
 /// }
 /// ```
 ///
@@ -25,15 +20,28 @@ import Synchronization
 /// manual either way.
 public struct MMCLIServerContract: Sendable {
     public let contracts: [SchemaDeclaration]
+    /// The shared `Types(...)` declarations the companion server registers —
+    /// folded into ``expectedFingerprint`` and merged into scoped diffs (a
+    /// shared definition a contract references is local, never drift).
+    public let sharedTypes: [TypeNamespaceDeclaration]
     /// The folded whole-server hello fingerprint the claim expects.
     public let expectedFingerprint: UInt64
 
-    /// Asserts completeness: these contracts (plus the builtins) are
-    /// everything the companion server serves.
-    public static func complete(_ contracts: [SchemaDeclaration]) -> MMCLIServerContract {
-        switch SchemaFingerprint.expected(serving: contracts) {
+    /// Asserts completeness: these contracts (plus the builtins, plus any
+    /// shared `Types(...)` declarations) are everything the companion server
+    /// serves. A server registering shared containers can never hello-match
+    /// a claim that omits them.
+    public static func complete(
+        _ contracts: [SchemaDeclaration],
+        sharedTypes: [TypeNamespaceDeclaration] = []
+    ) -> MMCLIServerContract {
+        switch SchemaFingerprint.expected(serving: contracts, sharedTypes: sharedTypes) {
             case .success(let fingerprint):
-                return MMCLIServerContract(contracts: contracts, expectedFingerprint: fingerprint)
+                return MMCLIServerContract(
+                    contracts: contracts,
+                    sharedTypes: sharedTypes,
+                    expectedFingerprint: fingerprint
+                )
             case .failure(let error):
                 preconditionFailure("MMCLIServerContract: schema probe failed: \(error)")
         }
@@ -45,17 +53,11 @@ public struct MMCLIServerContract: Sendable {
         fingerprintHexString(self.expectedFingerprint)
     }
 
-    /// Installs the claim process-wide. Call once from `main()` before
-    /// parsing; ``MMCLIRunner`` reads it on every invocation.
-    public static func install(_ claim: MMCLIServerContract) {
-        Self.installed.withLock { $0 = claim }
-    }
-
+    /// The bound claim, if the tool's `main()` provided one — sugar over
+    /// ``MMCLIDefaults/current``.
     static func current() -> MMCLIServerContract? {
-        Self.installed.withLock { $0 }
+        MMCLIDefaults.current.serverContract
     }
-
-    private static let installed = Mutex<MMCLIServerContract?>(nil)
 }
 
 /// The one spelling of a fingerprint for human eyes: `0x` + lowercase hex.

@@ -8,6 +8,22 @@ import Testing
 
 @Suite("MMCLIOptions: parsing and validation")
 struct MMCLIOptionsTests {
+    @Test("a bound default endpoint fills in for omitted flags; explicit flags win")
+    func boundDefaultEndpoint() throws {
+        // A task-local binding, not a process-global: no other test can
+        // observe it, no serialization needed.
+        try MMCLIDefaults.$current.withValue(
+            MMCLIDefaults(endpoint: .unix(path: "/tmp/mm-default.sock"))
+        ) {
+            let defaulted = try MMCLIOptions.parse([])
+            #expect(defaulted.endpoint == .unix(path: "/tmp/mm-default.sock"))
+            let explicit = try MMCLIOptions.parse(["--socket", "/tmp/mm-explicit.sock"])
+            #expect(explicit.endpoint == .unix(path: "/tmp/mm-explicit.sock"))
+            let tcp = try MMCLIOptions.parse(["--tcp", "localhost:9000"])
+            #expect(tcp.endpoint == .tcp(host: "localhost", port: 9000))
+        }
+    }
+
     @Test("--socket maps to a unix endpoint")
     func socketEndpoint() throws {
         let options = try MMCLIOptions.parse(["--socket", "/tmp/x.sock"])
