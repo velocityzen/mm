@@ -64,7 +64,10 @@ public struct MMCLIRawCall: AsyncParsableCommand {
                 throw ExitCode(64)
             }
             let request = try MMCLIDynamicRequest(
-                schema: signature.request, definitions: schema.types, json: json)
+                schema: signature.request,
+                definitions: schema.types,
+                json: json
+            )
             // The client-side access mode is descriptive metadata only (the
             // server authorizes from its own registration), so .read is fine
             // for a descriptor assembled from a name.
@@ -72,7 +75,9 @@ public struct MMCLIRawCall: AsyncParsableCommand {
                 await MMCLIDynamicResponse.$schema.withValue((signature.response, schema.types)) {
                     await client.call(
                         Method<MMCLIDynamicRequest, MMCLIDynamicResponse>(
-                            name: methodName, access: .read),
+                            name: methodName,
+                            access: .read
+                        ),
                         on: target,
                         request
                     )
