@@ -6,6 +6,11 @@ import MMWire
 /// cap, writer wait) and returns a typed handle; server-side authorization
 /// failures, and any local pre-send failure, surface uniformly through the
 /// handle's `result()` terminal (with an empty element sequence).
+///
+/// `on:` defaults to `EntityName.root` — an entity-less open, valid only
+/// against a route whose server-side `Accepts` names exactly one concrete
+/// entity (the server infers and authorizes it); any other route answers
+/// with `.denied` through the terminal.
 extension MMClientConnection {
     /// Opens a **server-streaming** call: the server streams `Element` values
     /// then a terminal `Response`. Returns an ``InboundStreamHandle`` — a
@@ -20,7 +25,7 @@ extension MMClientConnection {
         Response: Codable & Sendable
     >(
         _ method: ServerStreamMethod<Request, Element, Response>,
-        on entity: EntityName,
+        on entity: EntityName = .root,
         _ request: Request
     ) async -> InboundStreamHandle<Element, Never, Response> {
         let state = await self.openStream(
@@ -46,7 +51,7 @@ extension MMClientConnection {
         Response: Codable & Sendable
     >(
         _ method: ClientStreamMethod<Request, Element, Response>,
-        on entity: EntityName,
+        on entity: EntityName = .root,
         _ request: Request
     ) async -> OutboundStreamHandle<Element, Never, Response> {
         let state = await self.openStream(
@@ -74,7 +79,7 @@ extension MMClientConnection {
         Response: Codable & Sendable
     >(
         _ method: BidirectionalStreamMethod<Request, RequestElement, ResponseElement, Response>,
-        on entity: EntityName,
+        on entity: EntityName = .root,
         _ request: Request
     ) async -> BidirectionalStreamHandle<RequestElement, ResponseElement, Response> {
         let state = await self.openStream(

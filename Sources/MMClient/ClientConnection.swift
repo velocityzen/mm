@@ -726,9 +726,17 @@ public actor MMClientConnection {
     /// dropped with a debug log. **The request may still execute
     /// server-side** — cancellation is local abandonment, not a remote abort;
     /// only its response delivery is cut.
+    ///
+    /// ## Omitting the target
+    ///
+    /// `on:` defaults to `EntityName.root` — an entity-less request. Omit it
+    /// only when the daemon's route declares exactly one concrete entity
+    /// (`Accepts("system.log")` server-side): the server infers the target
+    /// and authorizes it as if spelled out. Any other route answers an
+    /// entity-less call with `.denied`.
     public nonisolated func call<Request: Codable & Sendable, Response: Codable & Sendable>(
         _ method: Method<Request, Response>,
-        on entity: EntityName,
+        on entity: EntityName = .root,
         _ request: Request
     ) async -> Result<Response, MMCallError> {
         self.metrics.calls.increment()

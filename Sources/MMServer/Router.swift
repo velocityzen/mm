@@ -426,7 +426,16 @@ public struct Router: Sendable {
                 )
             }
             .mapError { _ in Self.error(.malformedParams) }
-            .flatMapAsync { entity in
+            .flatMapAsync { requested in
+                // Entity inference: a route whose vocabulary names exactly
+                // one concrete entity accepts an entity-less (root) request
+                // as targeting it — the caller may omit what the route
+                // already determines. Traversal and the target check below
+                // run on the inferred entity, so authorization is identical
+                // to the caller having spelled it out.
+                let entity =
+                    (requested.isRoot ? route.accepts.soleEntity : nil) ?? requested
+
                 // The route's target vocabulary (``Accepts``): checked before
                 // any ACL lookup — an unaccepted target answers exactly like
                 // a denial, and the provider is never consulted for it. Root

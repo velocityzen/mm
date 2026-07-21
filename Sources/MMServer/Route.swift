@@ -111,6 +111,17 @@ public struct Route: Sendable {
 /// more further segments (any depth). Bare `"*"` is that rule's degenerate
 /// case — no prefix, any depth — which is why it means "everything".
 ///
+/// ## Entity inference
+///
+/// A vocabulary that names **exactly one concrete entity** — one pattern,
+/// all-literal, no trailing depth (`Accepts("system.log")`) — additionally
+/// lets callers omit the target: an entity-less request (the wire's root
+/// target, which such a route could never otherwise accept) is inferred to
+/// mean that entity, and traversal plus the target ACL check run on the
+/// inferred value exactly as if the caller had spelled it. Any wider
+/// vocabulary denies an entity-less request like any other unaccepted
+/// target, so omission never becomes ambiguous.
+///
 /// Why this exists: ACL grants are per-entity-per-mode, never per-method
 /// (Unix discipline — the read bit on a file gates every program that opens
 /// it). In a daemon serving several method families over one entity tree,
@@ -193,6 +204,10 @@ public struct Accepts: Sendable {
     }
 
     let patterns: [Pattern]
+    /// The single concrete entity this vocabulary names, when it names
+    /// exactly one — the router infers it for entity-less requests (see
+    /// ``Accepts`` § Entity inference); nil for any wider vocabulary.
+    let soleEntity: EntityName?
 
     public init(_ patterns: Pattern...) {
         precondition(
@@ -200,6 +215,26 @@ public struct Accepts: Sendable {
             "Accepts() with no patterns would deny every target — declare at least one"
         )
         self.patterns = patterns
+        self.soleEntity = Self.soleEntity(of: patterns)
+    }
+
+    private static func soleEntity(of patterns: [Pattern]) -> EntityName? {
+        guard
+            patterns.count == 1,
+            case .entities(let segments, descendants: false) = patterns[0].kind,
+            !segments.isEmpty
+        else {
+            return nil
+        }
+        var literals: [String] = []
+        for segment in segments {
+            guard case .literal(let text) = segment else { return nil }
+            literals.append(text)
+        }
+        // Reassembling validated segments cannot fail.
+        return EntityName.parse(literals.joined(separator: ".")).getOrElse { error in
+            preconditionFailure("Accepts sole-entity reassembly failed: \(error)")
+        }
     }
 
     /// Whether root-targeted dispatches are accepted.

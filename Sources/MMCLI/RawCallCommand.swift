@@ -24,8 +24,10 @@ public struct MMCLIRawCall: AsyncParsableCommand {
     @Argument(help: "Wire method name (dotted, e.g. journal.append)")
     public var method: String
 
-    @Argument(help: "Target entity (dotted path)")
-    public var entity: String
+    @Argument(
+        help: "Target entity (dotted path); omit when the daemon's route accepts exactly one entity"
+    )
+    public var entity: String?
 
     @Option(help: ArgumentHelp("Request payload as a JSON object.", valueName: "json"))
     public var params: String = "{}"
@@ -36,7 +38,7 @@ public struct MMCLIRawCall: AsyncParsableCommand {
         // Locals only inside the call closure: it is @Sendable, and
         // referencing a property would capture non-Sendable self.
         let methodName = method
-        let entityArgument = entity
+        let entityArgument = entity ?? ""
         let target = try MMCLIFailure.entity(entityArgument)
         let json: MMCLIDynamicTree
         do {

@@ -39,6 +39,9 @@ public enum MMCLIFailure {
     /// The one-line stderr message for a call error. Pure, like
     /// ``code(for:)``.
     static func message(for error: MMCallError, method: String, entity: String) -> String {
+        // An omitted entity (server-side inference) reads as such, not as a
+        // dangling "on ".
+        let entity = entity.isEmpty ? "(inferred entity)" : entity
         switch error {
             case .denied:
                 return "denied: \(method) on \(entity)"

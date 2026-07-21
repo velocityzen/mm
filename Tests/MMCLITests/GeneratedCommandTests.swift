@@ -69,6 +69,17 @@ struct GeneratedCommandTests {
         #expect(Ledger.ImportAllCommand.configuration.commandName == "import-all")
     }
 
+    @Test("the entity argument is optional: omitted parses as nil (server-side inference)")
+    func entityOmitted() throws {
+        let command = try Ledger.ImportAllCommand.parse(["--socket", "/tmp/ledger.sock"])
+        #expect(command.entity == nil)
+        // Spelled, it still binds as the first positional.
+        let spelled = try Ledger.ImportAllCommand.parse([
+            "--socket", "/tmp/ledger.sock", "ledger.main",
+        ])
+        #expect(spelled.entity == "ledger.main")
+    }
+
     @Test("the full surface parses: entity, positional, enum, flag, short rename")
     func fullParse() throws {
         let command = try Ledger.AppendCommand.parse([

@@ -166,6 +166,17 @@ struct ClientIntegrationTests {
                         await connection.call(
                             TestMethods.scopedExact, on: entity("box"),
                             EchoRequest(entity: entity("box"), value: 5)),
+                        // Entity inference: an entity-less call (on: omitted →
+                        // root) on the single-entity route targets box.item —
+                        // authorized as if spelled out.
+                        await connection.call(
+                            TestMethods.scopedExact,
+                            EchoRequest(entity: entity("box.item"), value: 6)),
+                        // A wider vocabulary infers nothing: entity-less is
+                        // denied like any unaccepted target.
+                        await connection.call(
+                            TestMethods.scopedEcho,
+                            EchoRequest(entity: entity("box.item"), value: 7)),
                     ]
                 }
                 #expect(results[0] == .success(EchoResponse(value: 1)))
@@ -173,6 +184,8 @@ struct ClientIntegrationTests {
                 #expect(results[2] == .failure(.denied))
                 #expect(results[3] == .success(EchoResponse(value: 4)))
                 #expect(results[4] == .failure(.denied))
+                #expect(results[5] == .success(EchoResponse(value: 6)))
+                #expect(results[6] == .failure(.denied))
                 if case .failure(let error) = runResult {
                     Issue.record("run() must end cleanly, got \(error)")
                 }

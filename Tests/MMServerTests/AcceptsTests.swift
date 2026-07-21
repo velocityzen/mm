@@ -79,4 +79,17 @@ struct AcceptsTests {
         #expect(accepts.admits(entity("tenants.acme.journal")))
         #expect(!accepts.admits(entity("tenants.acme.ledger")))
     }
+
+    @Test("soleEntity: exactly one all-literal pattern, and nothing else")
+    func soleEntity() {
+        #expect(Accepts("box.item").soleEntity == entity("box.item"))
+        #expect(Accepts("box").soleEntity == entity("box"))
+        // Anything wider infers nothing.
+        #expect(Accepts("box.*").soleEntity == nil)
+        #expect(Accepts("tenants.*.journal").soleEntity == nil)
+        #expect(Accepts("box.item", "box.other").soleEntity == nil)
+        #expect(Accepts(.all).soleEntity == nil)
+        #expect(Accepts(.root).soleEntity == nil)
+        #expect(Accepts(.root, "box.item").soleEntity == nil)
+    }
 }

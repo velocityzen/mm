@@ -1685,7 +1685,10 @@ private func commandDeclaration(
     lines.append("        \(configuration.joined(separator: ",\n        ")))")
     lines.append("    @OptionGroup public var connection: MMCLIOptions")
     lines.append(
-        "    @Argument(help: \"Target entity (dotted path)\") public var entity: String")
+        """
+            @Argument(help: "Target entity (dotted path); omit when the daemon's route \
+        accepts exactly one entity") public var entity: String?
+        """)
 
     var preludes: [String] = []
     var requestArguments: [String] = []
@@ -1730,7 +1733,7 @@ private func commandDeclaration(
     lines.append("    public func run() async throws {")
     // Locals only inside the call closure: it is @Sendable, and referencing a
     // property would capture non-Sendable self.
-    lines.append("        let entityArgument = entity")
+    lines.append("        let entityArgument = entity ?? \"\"")
     lines.append("        let target = try MMCLIFailure.entity(entityArgument)")
     for prelude in preludes {
         lines.append("        \(prelude)")
