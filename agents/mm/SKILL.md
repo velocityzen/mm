@@ -243,13 +243,13 @@ A hello fingerprint mismatch is a signal to run discovery and degrade deliberate
 - Entities are dotted paths forming a tree. Dispatch needs `.execute` on **every ancestor** of the target (like directory x bits), then the method's declared class on the target itself.
 - Classes resolve first-matching-class-wins: an owner match is judged by owner bits alone even if group/other would grant more — exactly POSIX.
 - A missing ACL record means `permissionDenied`, and existence is never leaked. If discovery shows fewer methods than the server defines, that's traversal filtering, not a bug.
-- Grants are per-entity-per-mode, never per-method: a mode bit admits every method of that access class. In multi-family daemons, declare a route's targets — `On(Journal.read, Accepts("journal.*")) { ... }` (subtree), `Accepts("system.log")` (exact), `Accepts("tenants.*.journal.*")` (a `*` segment = exactly one segment; trailing `.*` = any depth), `Accepts(.root, .all)` (root opt-in, replacing the old `acceptsRoot:`); unaccepted targets are denied before any ACL lookup.
+- Grants are per-entity-per-mode, never per-method: a mode bit admits every method of that access class. In multi-family daemons, declare a route's targets — `On(Journal.read, Accepts("journal.*")) { ... }` (subtree), `Accepts("system.log")` (exact), `Accepts("tenants.*.journal.*")` (a `*` segment = exactly one segment; trailing `.*` = any depth), `Accepts(.root, .all)` (root opt-in); unaccepted targets are denied before any ACL lookup. A route naming exactly one concrete entity also accepts an entity-less call — the server infers the target.
 - Authorization runs before a single payload byte is decoded.
 - Metrics: the library emits swift-metrics instruments (stable `mm_server_*`/`mm_client_*` labels — never rename them) but bootstraps no backend and opens no port; the host calls `MetricsSystem.bootstrap(...)` once, or everything is a no-op. Label inventory lives in the IntegrationGuide's Observability section.
 
 ## House rules that apply to any code you write here
 
-Swift 6 strict concurrency, macOS 15+/Linux. No Dispatch/GCD, no free-floating `Task {}`, no `.wait()`, no `print()`, no `Date()`, no `@unchecked Sendable`. Public APIs surface failures as typed `Result`s (`MMCallError`, `MMWireError`, `MMError`), not thrown errors. Tests use Swift Testing (`@Test`/`#expect`), in the repo's three tiers: `EmbeddedChannel` for handlers, plain value tests for domain logic, real temp-dir Unix sockets for integration. Read `CLAUDE.md` before deviating from anything.
+Swift 6 strict concurrency, macOS 15+/Linux. No Dispatch/GCD, no free-floating `Task {}`, no `.wait()`, no `print()`, no `Date()`, no `@unchecked Sendable`. Public APIs surface failures as typed `Result`s (`MMCallError`, `MMWireError`, `MMError`), not thrown errors. Tests use Swift Testing (`@Test`/`#expect`), in the repo's three tiers: `EmbeddedChannel` for handlers, plain value tests for domain logic, real temp-dir Unix sockets for integration. Read this skill and the integration guide (`Sources/MMServer/MMServer.docc/IntegrationGuide.md`) before deviating from anything.
 
 ## Verify your work
 
