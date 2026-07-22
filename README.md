@@ -10,13 +10,13 @@ A Swift library implementing a binary RPC protocol over Unix domain sockets and 
 
 One package, `MatterInMotion`, four library products:
 
-- `MMWire` — MessagePack coder over `ByteBuffer`, `[u32 LE length][payload]` framing, the RPC envelope, the hello preamble. Depends on NIOCore only.
+- `MMWire` — MessagePack coder over `ByteBuffer`, `[u32 LE length][payload]` framing, the RPC envelope, the hello preamble. Depends on NIOCore and `MMSchema` only.
 - `MMSchema` — Method descriptors, `TypeSchema` and the schema fingerprint, `EntityACL`, `PeerIdentity`. Pure values: no NIO import, no IO.
 - `MMServer` — `Router` with a result-builder DSL, authorization, peer-credential capture, streaming handlers, `MMService` bootstrap.
 - `MMClient` — `MMClientConnection`: typed unary and streaming calls with msgid multiplexing, credit-based flow control, schema discovery.
 - `MMCLI` — the runtime behind schema-generated command-line tools (swift-argument-parser): connection options, exit-code mapping, stream drivers, `discover` and raw `call` commands.
 
-Dependency direction: `MMWire` and `MMSchema` depend on nothing internal; `MMServer` and `MMClient` depend on both; `MMCLI` sits on `MMClient`. `MMSchema` stays importable by client-only processes.
+Dependency direction: `MMSchema` depends on nothing internal; `MMWire` depends on `MMSchema` (the wire time kinds' VPTS codec lives there); `MMServer` and `MMClient` depend on both; `MMCLI` sits on `MMClient`. `MMSchema` stays importable by client-only processes.
 
 ## Design principles
 
@@ -271,6 +271,7 @@ The API reference is DocC, generated from the catalogs in `Sources/<Target>/<Tar
 The long-form guides ship as DocC articles inside those catalogs (hosted with the reference, readable in-repo too):
 
 - [Wire protocol specification](Sources/MMWire/MMWire.docc/WireProtocol.md) — the normative byte-level spec: framing, hello, envelope, ACL semantics, fingerprint, conformance vectors (under MMWire).
+- [VPTS specification](Sources/MMWire/MMWire.docc/VPTS.md) — the variable-precision timestamp codec the wire time kinds ride as (under MMWire).
 - [Integration guide](Sources/MMServer/MMServer.docc/IntegrationGuide.md) — embedding the router and an `EntityACLProvider` in a host daemon (under MMServer).
 - [Remote access](Sources/MMServer/MMServer.docc/RemoteAccess.md) — SSH Unix-socket forwarding, socket-permission and systemd/launchd recipes, troubleshooting (under MMServer).
 - [Examples](Examples/README.md) — a runnable daemon + client pair exercising the full story.

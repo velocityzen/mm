@@ -1,4 +1,50 @@
+import MMSchema
 import NIOCore
+
+/// The decode twin of `vptsBinary(for:)`: the wire time kinds arrive as
+/// MessagePack `bin` holding a VPTS encoding, decoded and constrained per
+/// kind — a date field only accepts date precision, a datetime a full wall
+/// clock without offset, a timestamp one with. The spec's null timestamp is
+/// rejected wherever a value is required (payload optionality is MessagePack
+/// nil, never VPTS null). Returns nil when `type` is not a wire time kind.
+func vptsValue<T>(
+    _ type: T.Type, from buffer: inout ByteBuffer
+) throws -> T? {
+    let isDate = type == MMDate.self
+    let isDateTime = type == MMDateTime.self
+    let isTimestamp = type == MMTimestamp.self
+    guard isDate || isDateTime || isTimestamp else { return nil }
+    let bin = try buffer.readMessagePackBinary().get()
+    let decoded: MMVPTS?
+    switch MMVPTS.decode(bin.readableBytesView) {
+        case .success(let value):
+            decoded = value
+        case .failure(let failure):
+            throw MMWireError.decodingFailed(description: "invalid VPTS: \(failure)")
+    }
+    guard let vpts = decoded else {
+        throw MMWireError.decodingFailed(description: "null VPTS where a value is required")
+    }
+    // Guarded force casts: the identity checks above prove T (the standard
+    // Codable short-circuit idiom, as with ByteBuffer).
+    if isDate {
+        guard let value = vpts.dateValue else {
+            throw MMWireError.decodingFailed(description: "VPTS precision is not a date")
+        }
+        return (value as! T)
+    }
+    if isDateTime {
+        guard let value = vpts.dateTimeValue else {
+            throw MMWireError.decodingFailed(
+                description: "VPTS is not an offset-free wall-clock datetime")
+        }
+        return (value as! T)
+    }
+    guard let value = vpts.timestampValue else {
+        throw MMWireError.decodingFailed(description: "VPTS is not a datetime with offset")
+    }
+    return (value as! T)
+}
 
 /// Decodes MessagePack from `ByteBuffer` into `Decodable` values.
 ///
@@ -110,6 +156,9 @@ final class MPDecoderImplementation: Decoder {
             // the type system cannot carry a metatype comparison into the
             // generic (the standard Codable short-circuit idiom).
             return try buffer.readMessagePackBinary().get() as! T
+        }
+        if let value = try vptsValue(type, from: &buffer) {
+            return value
         }
         let impl = MPDecoderImplementation(
             buffer: buffer, depth: depth, cap: cap, codingPath: codingPath)
@@ -328,6 +377,9 @@ extension MPDecoderImplementation: SingleValueDecodingContainer {
         if type == ByteBuffer.self {
             // Guarded force cast — see decodeValue's short-circuit.
             return try self.buffer.readMessagePackBinary().get() as! T
+        }
+        if let value = try vptsValue(type, from: &self.buffer) {
+            return value
         }
         return try T(from: self)
     }

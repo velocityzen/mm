@@ -1,10 +1,32 @@
+import MMSchema
 import NIOCore
+
+/// The wire time kinds ride as MessagePack `bin` holding a VPTS encoding
+/// (the VPTS article in this catalog) — a coder-level short-circuit like `ByteBuffer`'s, so
+/// the types' own `Codable` (canonical ISO strings) keeps serving JSON
+/// coders, display, and tests, while the wire gets the compact,
+/// byte-sortable binary form. Returns nil for every other type.
+func vptsBinary<T: Encodable>(for value: T) -> ByteBuffer? {
+    let encoded: [UInt8]
+    if let date = value as? MMDate {
+        encoded = MMVPTS(date).encoded()
+    } else if let dateTime = value as? MMDateTime {
+        encoded = MMVPTS(dateTime).encoded()
+    } else if let timestamp = value as? MMTimestamp {
+        encoded = MMVPTS(timestamp).encoded()
+    } else {
+        return nil
+    }
+    return ByteBuffer(bytes: encoded)
+}
 
 /// Encodes `Encodable` values as MessagePack directly into `ByteBuffer`.
 ///
 /// Keyed containers encode as maps with integer keys taken from `CodingKeys.intValue`;
 /// keys without an `intValue` fall back to string keys. `ByteBuffer` values encode as
-/// `bin`. Scalars are written straight to bytes — no intermediate `Data`, no boxing.
+/// `bin`; the wire time kinds (`MMDate`, `MMDateTime`, `MMTimestamp`) encode as `bin`
+/// holding their VPTS form. Scalars are written straight to bytes — no intermediate
+/// `Data`, no boxing.
 public struct MMPackEncoder: Sendable {
     public init() {}
 
@@ -21,6 +43,10 @@ public struct MMPackEncoder: Sendable {
     ) -> Result<Void, MMWireError> {
         if let payload = value as? ByteBuffer {
             buffer.writeMessagePackBinary(payload)
+            return .success(())
+        }
+        if let vpts = vptsBinary(for: value) {
+            buffer.writeMessagePackBinary(vpts)
             return .success(())
         }
 
@@ -334,6 +360,10 @@ struct MPKeyedEncoding<Key: CodingKey>: KeyedEncodingContainerProtocol {
             self.container.tail.writeMessagePackBinary(payload)
             return
         }
+        if let vpts = vptsBinary(for: value) {
+            self.container.tail.writeMessagePackBinary(vpts)
+            return
+        }
         let child = MPEncoderImplementation(
             sink: .container(self.container),
             codingPath: self.codingPath + [key]
@@ -479,6 +509,10 @@ struct MPUnkeyedEncoding: UnkeyedEncodingContainer {
             self.container.tail.writeMessagePackBinary(payload)
             return
         }
+        if let vpts = vptsBinary(for: value) {
+            self.container.tail.writeMessagePackBinary(vpts)
+            return
+        }
         let child = MPEncoderImplementation(
             sink: .container(self.container), codingPath: self.codingPath)
         do {
@@ -590,6 +624,10 @@ struct MPSingleValueEncoding: SingleValueEncodingContainer {
     mutating func encode<T: Encodable>(_ value: T) throws {
         if let payload = value as? ByteBuffer {
             self.encoder.emitScalar { $0.writeMessagePackBinary(payload) }
+            return
+        }
+        if let vpts = vptsBinary(for: value) {
+            self.encoder.emitScalar { $0.writeMessagePackBinary(vpts) }
             return
         }
         try value.encode(to: self.encoder)

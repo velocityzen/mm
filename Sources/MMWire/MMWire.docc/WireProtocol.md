@@ -454,20 +454,20 @@ Tag table:
 | 10 | structure | key 1: array of Field |
 | 11 | enumeration | key 1: array of EnumCase |
 | 12 | reference | key 1: qualified type name (string) |
-| 13 | date | — (ISO calendar date string; grammar below) |
-| 14 | datetime | — (ISO wall-clock datetime string, no offset; grammar below) |
-| 15 | timestamp | — (ISO datetime-with-offset string, an absolute instant; grammar below) |
+| 13 | date | — (VPTS binary, calendar-date precision; rules below) |
+| 14 | datetime | — (VPTS binary, wall-clock precision, no offset; rules below) |
+| 15 | timestamp | — (VPTS binary with offset, an absolute instant; rules below) |
 | 255 | unknown | — |
 
-**Calendar and clock values (tags 13–15).** All three encode as MessagePack **strings** in canonical ISO 8601 / RFC 3339 form; they are distinct schema kinds — not strings — because they carry different semantics (a `date` has no time zone by nature; a `datetime` is a floating wall-clock reading; a `timestamp` is an absolute instant). Grammar (normative):
+**Calendar and clock values (tags 13–15).** All three encode as MessagePack **bin** holding one VPTS encoding (the variable-precision timestamp codec; normative spec in <doc:VPTS>). They are distinct schema kinds — not bytes — because they carry different semantics (a `date` has no time zone by nature; a `datetime` is a floating wall-clock reading; a `timestamp` is an absolute instant). Per-kind constraints on the VPTS component mask (normative):
 
-```
-date      := YYYY "-" MM "-" DD                       ; 2026-07-21
-datetime  := date "T" HH ":" MM ":" SS [ "." 1*9DIGIT ] ; 2026-07-21T14:30:00.5
-timestamp := datetime ( "Z" | ("+"/"-") HH ":" MM )    ; ...Z or ...+02:00
-```
+- `date` — exactly YEAR+MONTH+DAY; no time components, no fraction, no offset.
+- `datetime` — YEAR through SECOND, an optional FRACTION, no OFFSET. **Canonical emission** omits the fraction when it is zero.
+- `timestamp` — YEAR through SECOND, an optional FRACTION, OFFSET **required**. Canonical emission omits a zero fraction; offset zero is `OFFSET = 0` (there is no `Z`/`+00:00` distinction in VPTS).
 
-All numeric fields are fixed-width zero-padded; year 0000–9999, proleptic Gregorian (leap years validated); hour 00–23, minute 00–59, second 00–60 (leap second allowed); the fraction is 1–9 digits (nanosecond precision); the offset is within ±18:00. **Canonical emission**: seconds always present, the fraction only when non-zero with trailing zeros trimmed, uppercase `T`/`Z`, and `Z` for offset zero. **Parsers accept** two liberties only: lowercase `t`/`z`, and `±00:00` as an alias of `Z` (both re-emit canonically). A value that does not parse is a decode failure of its payload, answered like any malformed payload (`malformedParams`, code 3, for a request slot).
+Value ranges within those masks: year 0–9999, proleptic Gregorian (leap years validated); hour 00–23, minute 00–59, second 00–60 (leap second allowed); fraction precision is nanoseconds (a receiver accepts the wide/attosecond VPTS form only when the value is nanosecond-divisible); the offset is within ±18:00. The VPTS **null** encoding (`0x00`) is never a value — payload optionality is MessagePack nil via the `optional` schema, and a null VPTS where a value is expected is a decode failure. A bin whose contents violate the VPTS grammar or these per-kind constraints is a decode failure of its payload, answered like any malformed payload (`malformedParams`, code 3, for a request slot).
+
+In **JSON projections** of wire values (discovery tooling, the CLI's parameter and output trees) the three kinds map to canonical ISO 8601 / RFC 3339 strings — `2026-07-21`, `2026-07-21T14:30:00.5`, `2026-07-21T14:30:00Z` — with the fraction only when non-zero (1–9 digits, trailing zeros trimmed), uppercase `T`/`Z`, and `Z` for offset zero. Parsers of that projection accept two liberties only: lowercase `t`/`z`, and `±00:00` as an alias of `Z`. This string form never appears on the wire.
 
 A `structure`'s fields appear in **declaration order** (the order the type's decoder requests them). `Field` is an int-keyed struct: key 0 = `key` (the field's integer wire key, or nil/absent for string-keyed fields), key 1 = `name` (string), key 2 = `type` (TypeSchema), key 3 = `description` (string, **optional**, documentation only).
 

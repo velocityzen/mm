@@ -37,7 +37,8 @@ let package = Package(
         .target(
             name: "MMWire",
             dependencies: [
-                .product(name: "NIOCore", package: "swift-nio")
+                "MMSchema",
+                .product(name: "NIOCore", package: "swift-nio"),
             ]
         ),
         .macro(

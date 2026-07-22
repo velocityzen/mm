@@ -233,12 +233,42 @@ private struct DynamicRequestNode: Encodable {
                 }
                 var single = encoder.singleValueContainer()
                 try single.encode(number)
-            case .string, .enumeration, .date, .datetime, .timestamp:
+            case .string, .enumeration:
                 guard case .string(let text) = self.value else {
                     throw self.invalid(encoder, expected: "string")
                 }
                 var single = encoder.singleValueContainer()
                 try single.encode(text)
+            // The date kinds take ISO strings from the JSON side and ride
+            // the wire as the value types — the pack coder writes their
+            // VPTS binary form. `validated` already proved the grammar.
+            case .date:
+                guard
+                    case .string(let text) = self.value,
+                    case .success(let date) = MMDate.parse(text)
+                else {
+                    throw self.invalid(encoder, expected: "ISO date")
+                }
+                var single = encoder.singleValueContainer()
+                try single.encode(date)
+            case .datetime:
+                guard
+                    case .string(let text) = self.value,
+                    case .success(let dateTime) = MMDateTime.parse(text)
+                else {
+                    throw self.invalid(encoder, expected: "ISO datetime")
+                }
+                var single = encoder.singleValueContainer()
+                try single.encode(dateTime)
+            case .timestamp:
+                guard
+                    case .string(let text) = self.value,
+                    case .success(let timestamp) = MMTimestamp.parse(text)
+                else {
+                    throw self.invalid(encoder, expected: "ISO timestamp")
+                }
+                var single = encoder.singleValueContainer()
+                try single.encode(timestamp)
             case .bytes:
                 guard case .bytes(let bytes) = self.value else {
                     throw self.invalid(encoder, expected: "bytes")

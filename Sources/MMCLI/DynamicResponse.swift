@@ -74,8 +74,17 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                 return .double(Double(try decoder.singleValueContainer().decode(Float.self)))
             case .double:
                 return .double(try decoder.singleValueContainer().decode(Double.self))
-            case .string, .enumeration, .date, .datetime, .timestamp:
+            case .string, .enumeration:
                 return .string(try decoder.singleValueContainer().decode(String.self))
+            case .date:
+                return .string(
+                    try decoder.singleValueContainer().decode(MMDate.self).description)
+            case .datetime:
+                return .string(
+                    try decoder.singleValueContainer().decode(MMDateTime.self).description)
+            case .timestamp:
+                return .string(
+                    try decoder.singleValueContainer().decode(MMTimestamp.self).description)
             case .bytes:
                 return .bytes(
                     Self.rawBytes(try decoder.singleValueContainer().decode(ByteBuffer.self)))
@@ -189,8 +198,14 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                 return .double(Double(try container.decode(Float.self, forKey: key)))
             case .double:
                 return .double(try container.decode(Double.self, forKey: key))
-            case .string, .enumeration, .date, .datetime, .timestamp:
+            case .string, .enumeration:
                 return .string(try container.decode(String.self, forKey: key))
+            case .date:
+                return .string(try container.decode(MMDate.self, forKey: key).description)
+            case .datetime:
+                return .string(try container.decode(MMDateTime.self, forKey: key).description)
+            case .timestamp:
+                return .string(try container.decode(MMTimestamp.self, forKey: key).description)
             case .bytes:
                 return .bytes(Self.rawBytes(try container.decode(ByteBuffer.self, forKey: key)))
             case .optional(let wrapped):
@@ -236,8 +251,14 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                 return .double(Double(try container.decode(Float.self)))
             case .double:
                 return .double(try container.decode(Double.self))
-            case .string, .enumeration, .date, .datetime, .timestamp:
+            case .string, .enumeration:
                 return .string(try container.decode(String.self))
+            case .date:
+                return .string(try container.decode(MMDate.self).description)
+            case .datetime:
+                return .string(try container.decode(MMDateTime.self).description)
+            case .timestamp:
+                return .string(try container.decode(MMTimestamp.self).description)
             case .bytes:
                 return .bytes(Self.rawBytes(try container.decode(ByteBuffer.self)))
             case .optional(let wrapped):
