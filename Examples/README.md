@@ -22,7 +22,7 @@ swift run mm-example-client            # terminal 2
 Or drive the daemon with the generated CLI instead:
 
 ```sh
-swift run mm-example-cli journal add journal.notes "hello"   # Endpoint(...) supplies the socket
+swift run mm-example-cli journal add "hello" journal.notes   # Endpoint(...) supplies the socket
 swift run mm-example-cli journal read journal.notes --output text
 swift run mm-example-cli journal --help
 ```

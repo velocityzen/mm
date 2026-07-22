@@ -1916,16 +1916,16 @@ private func commandDeclaration(
     lines.append("    public static let configuration = CommandConfiguration(")
     lines.append("        \(configuration.joined(separator: ",\n        ")))")
     lines.append("    @OptionGroup public var connection: MMCLIOptions")
-    lines.append(
-        """
+    let entityProperty = """
             @Argument(help: "Target entity (dotted path); omit when the daemon's route \
         accepts exactly one entity") public var entity: String?
-        """)
+        """
 
     var preludes: [String] = []
     var requestArguments: [String] = []
 
     if requestIsExternalReference {
+        lines.append(entityProperty)
         let requestType = call.requestSwiftType
         lines.append(
             "    @Option(name: .customLong(\"request\"), help: \"The request payload as JSON\") public var requestJSON: String"
@@ -1934,16 +1934,26 @@ private func commandDeclaration(
             "let requestValue = try MMCLIJSON.decodeRequired(\(requestType).self, from: requestJSON, option: \"request\")"
         )
     } else {
-        // Positional fields keep declaration order after the entity; options
-        // follow. Emit positionals first so swift-argument-parser assigns
-        // them in the declared order.
-        let ordered = fields.enumerated().sorted { left, right in
-            let leftPositional = isPositional(fields[left.offset])
-            let rightPositional = isPositional(fields[right.offset])
-            if leftPositional != rightPositional { return leftPositional && !rightPositional }
-            return left.offset < right.offset
-        }.map { $0.element }
-        for field in ordered {
+        // Positional layout: required positional fields first, then the
+        // omittable entity, then optional/array positionals — ArgumentParser
+        // fills positionals greedily in declaration order, so a leading
+        // optional entity would starve required fields (`search "query"`
+        // must bind query, not entity). Options follow. Each group keeps
+        // field-declaration order.
+        let requiredPositionals = fields.filter {
+            isPositional($0) && positionalIsRequired($0)
+        }
+        let trailingPositionals = fields.filter {
+            isPositional($0) && !positionalIsRequired($0)
+        }
+        let optionFields = fields.filter { !isPositional($0) }
+        for field in requiredPositionals {
+            emitField(
+                field, call: call, enumNames: enumNames,
+                lines: &lines, preludes: &preludes)
+        }
+        lines.append(entityProperty)
+        for field in trailingPositionals + optionFields {
             emitField(
                 field, call: call, enumNames: enumNames,
                 lines: &lines, preludes: &preludes)
@@ -1954,7 +1964,16 @@ private func commandDeclaration(
                 case .omitted:
                     requestArguments.append("\(field.name): nil")
                 case .direct:
-                    requestArguments.append("\(field.name): \(field.name)")
+                    if case .optional(.array) = field.type {
+                        // The property is `[T] = []`; an untouched option
+                        // means the optional field stays absent. The one
+                        // tradeoff: an explicit empty array cannot be sent
+                        // from the command line.
+                        requestArguments.append(
+                            "\(field.name): \(field.name).isEmpty ? nil : \(field.name)")
+                    } else {
+                        requestArguments.append("\(field.name): \(field.name)")
+                    }
                 case .json:
                     requestArguments.append("\(field.name): \(field.name)Value")
             }
@@ -2054,6 +2073,15 @@ private func isPositional(_ field: ParsedField) -> Bool {
     return false
 }
 
+/// Whether a positional field must be supplied: optional fields parse to nil
+/// and array fields default to empty, so both may trail the omittable entity.
+private func positionalIsRequired(_ field: ParsedField) -> Bool {
+    switch field.type {
+        case .optional, .array: return false
+        default: return true
+    }
+}
+
 /// Emits the property (and any run() prelude) for one request field.
 private func emitField(
     _ field: ParsedField,
@@ -2121,17 +2149,32 @@ private func emitField(
         case .omitted:
             return
         case .direct(let swift):
+            // Array fields are repeatable and never required: the property
+            // defaults to empty (an optional array drops the `?` — its
+            // property is also `[T] = []`, mapped back to nil when empty at
+            // request construction).
+            var propertyType = swift
+            var initializer = propertyInitializer
+            switch field.type {
+                case .array:
+                    initializer = " = []"
+                case .optional(.array):
+                    propertyType = String(swift.dropLast())
+                    initializer = " = []"
+                default:
+                    break
+            }
             if case .flag = field.cliHint {
                 lines.append(
                     "    @Flag\(wrapperArguments([nameArgument, helpArgument])) public var \(field.name): Bool = false"
                 )
             } else if isPositional(field) {
                 lines.append(
-                    "    @Argument\(wrapperArguments([helpArgument])) public var \(field.name): \(swift)"
+                    "    @Argument\(wrapperArguments([helpArgument])) public var \(field.name): \(propertyType)\(initializer)"
                 )
             } else {
                 lines.append(
-                    "    @Option\(wrapperArguments([nameArgument, defaultAsFlagArgument, helpArgument])) public var \(field.name): \(swift)\(propertyInitializer)"
+                    "    @Option\(wrapperArguments([nameArgument, defaultAsFlagArgument, helpArgument])) public var \(field.name): \(propertyType)\(initializer)"
                 )
             }
         case .json(let swift):

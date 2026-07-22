@@ -32,6 +32,8 @@ enum Ledger: MethodNamespace {
                 Field("tint", .optional(.string), cli: .option("color", short: .auto))
                 Field("format", .optional(.string), default: "json")
                 Field("when", .optional(.timestamp), default: .now)
+                Field("exclude", .array(.string))
+                Field("only", .optional(.array(.string)))
             }
             Response { Field("total", .int) }
         }
@@ -130,11 +132,34 @@ struct GeneratedCommandTests {
         #expect(spelled.entity == "ledger.main")
     }
 
+    @Test("a required positional binds before the omittable entity")
+    func requiredPositionalBeforeEntity() throws {
+        // One bare value is the required field, never the entity — the
+        // layout is `<line> [<entity>]`.
+        let command = try Ledger.AppendCommand.parse([
+            "--socket", "/tmp/ledger.sock", "just a line", "--kind", "credit",
+        ])
+        #expect(command.line == "just a line")
+        #expect(command.entity == nil)
+    }
+
+    @Test("array fields are repeatable options defaulting to empty, never required")
+    func arrayOptions() throws {
+        let base = ["--socket", "/tmp/ledger.sock", "x", "--kind", "credit"]
+        let bare = try Ledger.AppendCommand.parse(base)
+        #expect(bare.exclude == [])
+        #expect(bare.only == [])
+        let filled = try Ledger.AppendCommand.parse(
+            base + ["--exclude", "a", "--exclude", "b", "--only", "c"])
+        #expect(filled.exclude == ["a", "b"])
+        #expect(filled.only == ["c"])
+    }
+
     @Test("the full surface parses: entity, positional, enum, flag, short rename")
     func fullParse() throws {
         let command = try Ledger.AppendCommand.parse([
             "--socket", "/tmp/ledger.sock",
-            "ledger.main", "hello world",
+            "hello world", "ledger.main",
             "--kind", "credit",
             "--force",
             "-l", "urgent",
@@ -150,7 +175,7 @@ struct GeneratedCommandTests {
 
     @Test("Field default: bare flag means the default, a value overrides, absent is nil")
     func defaultAsFlag() throws {
-        let base = ["--socket", "/tmp/ledger.sock", "ledger.main", "x", "--kind", "credit"]
+        let base = ["--socket", "/tmp/ledger.sock", "x", "ledger.main", "--kind", "credit"]
         #expect(try Ledger.AppendCommand.parse(base).format == nil)
         #expect(try Ledger.AppendCommand.parse(base + ["--format"]).format == "json")
         #expect(try Ledger.AppendCommand.parse(base + ["--format", "yaml"]).format == "yaml")
@@ -162,7 +187,7 @@ struct GeneratedCommandTests {
 
     @Test("default: .now on a timestamp field means the moment of invocation")
     func nowDefault() throws {
-        let base = ["--socket", "/tmp/ledger.sock", "ledger.main", "x", "--kind", "credit"]
+        let base = ["--socket", "/tmp/ledger.sock", "x", "ledger.main", "--kind", "credit"]
         #expect(try Ledger.AppendCommand.parse(base).when == nil)
         let explicit = try Ledger.AppendCommand.parse(base + ["--when", "2026-01-01T00:00:00Z"])
         #expect(explicit.when == MMTimestamp("2026-01-01T00:00:00Z"))
@@ -175,14 +200,14 @@ struct GeneratedCommandTests {
     @Test("short: .auto derives the short from the long name, renamed or not")
     func derivedShorts() throws {
         let command = try Ledger.AppendCommand.parse([
-            "--socket", "/tmp/ledger.sock", "ledger.main", "x", "--kind", "credit",
+            "--socket", "/tmp/ledger.sock", "x", "ledger.main", "--kind", "credit",
             "-o", "today", "-c", "blue",
         ])
         #expect(command.origin == "today")
         #expect(command.tint == "blue")
         // The long forms still answer.
         let spelled = try Ledger.AppendCommand.parse([
-            "--socket", "/tmp/ledger.sock", "ledger.main", "x", "--kind", "credit",
+            "--socket", "/tmp/ledger.sock", "x", "ledger.main", "--kind", "credit",
             "--origin", "today", "--color", "blue",
         ])
         #expect(spelled.origin == "today")
@@ -192,7 +217,7 @@ struct GeneratedCommandTests {
     @Test("the renamed option answers to its long form")
     func renamedLongForm() throws {
         let command = try Ledger.AppendCommand.parse([
-            "--socket", "/tmp/ledger.sock", "ledger.main", "x", "--kind", "debit",
+            "--socket", "/tmp/ledger.sock", "x", "ledger.main", "--kind", "debit",
             "--label", "later",
         ])
         #expect(command.tag == "later")
@@ -202,7 +227,7 @@ struct GeneratedCommandTests {
     func unknownEnumValueRefused() {
         #expect(throws: (any Error).self) {
             _ = try Ledger.AppendCommand.parse([
-                "--socket", "/tmp/ledger.sock", "ledger.main", "x", "--kind", "unknown",
+                "--socket", "/tmp/ledger.sock", "x", "ledger.main", "--kind", "unknown",
             ])
         }
     }
@@ -222,7 +247,7 @@ struct GeneratedCommandTests {
     @Test("a JSON option is a plain string at parse time")
     func jsonOptionParses() throws {
         let command = try Ledger.AppendCommand.parse([
-            "--socket", "/tmp/ledger.sock", "ledger.main", "x", "--kind", "credit",
+            "--socket", "/tmp/ledger.sock", "x", "ledger.main", "--kind", "credit",
             "--meta", #"{"note":"from tests"}"#,
         ])
         #expect(command.meta == #"{"note":"from tests"}"#)
@@ -266,6 +291,8 @@ struct GeneratedCommandTests {
                     Field("tint", .optional(.string))
                     Field("format", .optional(.string), default: "json")
                     Field("when", .optional(.timestamp), default: .now)
+                    Field("exclude", .array(.string))
+                    Field("only", .optional(.array(.string)))
                 }
                 Response { Field("total", .int) }
             }

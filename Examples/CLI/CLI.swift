@@ -10,7 +10,7 @@ import MMExampleAPI
 ///
 /// ```sh
 /// swift run mm-example-daemon                       # terminal 1
-/// swift run mm-example-cli journal add journal.notes "hello"   # terminal 2
+/// swift run mm-example-cli journal add "hello" journal.notes   # terminal 2
 /// swift run mm-example-cli journal read journal.notes --output text
 /// ```
 ///
@@ -30,7 +30,7 @@ import MMExampleAPI
 /// (Daemon.swift: `Entity("journal") { Entity("notes"); Entity("system") }`),
 /// NOT from the schema: the schema declares the verbs and payload shapes, the
 /// entity tree is runtime state — syscall table versus file paths. That is
-/// why `journal add journal.system "x"` is denied (root-owned entity) while
+/// why `journal add "x" journal.system` is denied (root-owned entity) while
 /// the identical verb on `journal.notes` succeeds, with zero schema
 /// difference between the two.
 @main
