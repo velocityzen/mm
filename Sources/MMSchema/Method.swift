@@ -234,4 +234,13 @@ public struct AnyMethod: Sendable {
 public protocol MethodNamespace: TypeNamespace {
     /// Every method in the namespace, type-erased.
     static var all: [AnyMethod] { get }
+    /// Human-readable namespace documentation, doc-only: a router serves it
+    /// in discovery's `namespaces` list (never fingerprinted). Defaults to
+    /// nil; `#schema(description:)` emits it, hand-written namespaces
+    /// override it.
+    static var namespaceDescription: String? { get }
+}
+
+extension MethodNamespace {
+    public static var namespaceDescription: String? { nil }
 }

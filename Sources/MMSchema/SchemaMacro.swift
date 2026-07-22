@@ -45,20 +45,24 @@
 /// - `static let contract: SchemaDeclaration` — the runtime declaration,
 ///   re-emitted verbatim, so `contract.verify(against: Self.self)` doubles as
 ///   a macro-fidelity check.
+/// - `static let namespaceDescription: String?` — only when `description:`
+///   is given (a literal string): doc-only namespace documentation, served
+///   by discovery and used as the generated command group's abstract.
 ///
 /// The macro consumes the DSL's **static subset**: literal names and keys, no
 /// runtime conditionals, and no `payload:`/`.bytes` shapes (those need
 /// hand-written types with the runtime DSL). Expansion happens at member
 /// scope; `#schema` cannot be used at file scope.
-/// CLI generation (`cli: .enabled`) additionally emits one
-/// swift-argument-parser command per non-omitted call plus a namespace command
-/// group (`Journal.Command`), shaped by the declaration's `CLI(...)` parts and
-/// `Field(..., cli:)` hints. The expanding file must import `ArgumentParser`
-/// and `MMCLI` — the generated commands reference both.
+/// CLI generation (a top-level `CLI(.enabled)` entry in the block)
+/// additionally emits one swift-argument-parser command per non-omitted call
+/// plus a namespace command group (`Journal.Command`), shaped by the
+/// declaration's per-call `CLI(...)` parts and `Field(..., cli:)` hints. The
+/// expanding file must import `ArgumentParser` and `MMCLI` — the generated
+/// commands reference both.
 @freestanding(declaration, names: arbitrary)
 public macro schema(
     _ namespace: String,
-    cli: SchemaCLIMode = .disabled,
+    description: String? = nil,
     @SchemaDeclarationBuilder _ content: () -> [SchemaEntry]
 ) = #externalMacro(module: "MMSchemaMacros", type: "SchemaContractMacro")
 

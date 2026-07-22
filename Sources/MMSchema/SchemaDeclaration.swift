@@ -55,6 +55,10 @@ public struct SchemaDeclaration: Sendable, Hashable {
     /// The namespace prefix — also the entity whose traversal rights gate
     /// discovery of these methods.
     public let namespace: String
+    /// Human-readable namespace documentation — doc-only, like every other
+    /// description: served by discovery (the response's `namespaces` list),
+    /// used by generated CLI groups for their abstract, never fingerprinted.
+    public let description: String?
     /// The declared method signatures, full wire names (`journal.append`),
     /// in declaration order.
     public let signatures: [MethodSignature]
@@ -63,8 +67,14 @@ public struct SchemaDeclaration: Sendable, Hashable {
     /// order.
     public let types: [TypeDefinition]
 
-    public init(namespace: String, signatures: [MethodSignature], types: [TypeDefinition] = []) {
+    public init(
+        namespace: String,
+        description: String? = nil,
+        signatures: [MethodSignature],
+        types: [TypeDefinition] = []
+    ) {
         self.namespace = namespace
+        self.description = description
         self.signatures = signatures
         self.types = types
     }
@@ -502,16 +512,46 @@ private func validTypeName(_ name: String) -> String {
     return name
 }
 
+/// The literal behind a field's `default:` — written directly as a string,
+/// integer, float, or boolean literal, matching the field's wire type.
+public struct FieldDefault: Sendable, Hashable,
+    ExpressibleByStringLiteral, ExpressibleByIntegerLiteral,
+    ExpressibleByFloatLiteral, ExpressibleByBooleanLiteral
+{
+    enum Kind: Sendable, Hashable {
+        case string(String)
+        case integer(Int64)
+        case floating(Double)
+        case boolean(Bool)
+    }
+
+    let kind: Kind
+
+    public init(stringLiteral value: String) { self.kind = .string(value) }
+    public init(integerLiteral value: Int64) { self.kind = .integer(value) }
+    public init(floatLiteral value: Double) { self.kind = .floating(value) }
+    public init(booleanLiteral value: Bool) { self.kind = .boolean(value) }
+}
+
 /// One declared field of a request, response, or nested structure. Unpinned
 /// fields take their integer key from declaration order; pinned fields keep
 /// the pin (see ``SchemaDeclaration`` — Keys). Every form takes an optional
 /// trailing `description:` — served by discovery, never part of the
 /// fingerprint or of compatibility comparisons.
+///
+/// An optional field may declare a `default:` literal — declaration-level
+/// metadata like the description: never on the wire (an absent field still
+/// decodes as nil), but generators apply it. `#schema`'s CLI generation
+/// turns it into a hybrid option automatically (ArgumentParser's
+/// `defaultAsFlag`): bare `--format` means the default, `--format yaml`
+/// parses the value, absent stays nil.
 public struct Field: Sendable, Hashable {
     let pinnedKey: Int?
     let name: String
     let type: TypeSchema
     let description: String?
+    /// The declared default; see the type-level note.
+    let defaultValue: FieldDefault?
     /// CLI presentation hint, consumed by `#schema`'s CLI generation; never
     /// part of the wire contract (dropped when the declaration's shapes are
     /// assembled).
@@ -523,12 +563,14 @@ public struct Field: Sendable, Hashable {
         _ name: String,
         _ type: TypeSchema,
         description: String? = nil,
+        default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
         self.pinnedKey = nil
         self.name = name
         self.type = type
         self.description = description
+        self.defaultValue = defaultValue
         self.cli = cli
     }
 
@@ -538,6 +580,7 @@ public struct Field: Sendable, Hashable {
         _ name: String,
         _ type: TypeSchema,
         description: String? = nil,
+        default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
         precondition(key >= 0, "field keys are non-negative integers (\(name) pinned \(key))")
@@ -545,6 +588,7 @@ public struct Field: Sendable, Hashable {
         self.name = name
         self.type = type
         self.description = description
+        self.defaultValue = defaultValue
         self.cli = cli
     }
 
@@ -557,9 +601,12 @@ public struct Field: Sendable, Hashable {
         _ name: String,
         _ typeName: String,
         description: String? = nil,
+        default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
-        self.init(name, .reference(typeName), description: description, cli: cli)
+        self.init(
+            name, .reference(typeName), description: description,
+            default: defaultValue, cli: cli)
     }
 
     /// A key-pinned named-type reference.
@@ -568,9 +615,12 @@ public struct Field: Sendable, Hashable {
         _ name: String,
         _ typeName: String,
         description: String? = nil,
+        default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
-        self.init(key, name, .reference(typeName), description: description, cli: cli)
+        self.init(
+            key, name, .reference(typeName), description: description,
+            default: defaultValue, cli: cli)
     }
 
     /// A field referencing a named type through its generated Swift type —
@@ -581,9 +631,10 @@ public struct Field: Sendable, Hashable {
         _ name: String,
         _ type: (some SchemaDescribable).Type,
         description: String? = nil,
+        default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
-        self.init(name, type.schema, description: description, cli: cli)
+        self.init(name, type.schema, description: description, default: defaultValue, cli: cli)
     }
 
     /// A key-pinned Swift-type reference.
@@ -592,9 +643,11 @@ public struct Field: Sendable, Hashable {
         _ name: String,
         _ type: (some SchemaDescribable).Type,
         description: String? = nil,
+        default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
-        self.init(key, name, type.schema, description: description, cli: cli)
+        self.init(
+            key, name, type.schema, description: description, default: defaultValue, cli: cli)
     }
 
     /// An auto-keyed nested structure: `Field("owner") { Field("uid", .uint) }`.
@@ -604,7 +657,7 @@ public struct Field: Sendable, Hashable {
         cli: CLIArgument? = nil,
         @SchemaFieldsBuilder _ fields: () -> [Field]
     ) {
-        self.init(name, Fields(fields), description: description, cli: cli)
+        self.init(name, Fields(fields), description: description, default: nil, cli: cli)
     }
 
     /// A key-pinned nested structure.
@@ -615,7 +668,7 @@ public struct Field: Sendable, Hashable {
         cli: CLIArgument? = nil,
         @SchemaFieldsBuilder _ fields: () -> [Field]
     ) {
-        self.init(key, name, Fields(fields), description: description, cli: cli)
+        self.init(key, name, Fields(fields), description: description, default: nil, cli: cli)
     }
 }
 
@@ -906,6 +959,9 @@ public struct SchemaEntry: Sendable {
     enum Kind {
         case method(MethodDeclaration)
         case type(TypeDeclaration)
+        /// The schema-level CLI mode — presentation-only; the runtime
+        /// declaration ignores it (the `#schema` macro is its one consumer).
+        case cli(SchemaCLIMode)
     }
 
     let kind: Kind
@@ -920,6 +976,9 @@ public enum SchemaDeclarationBuilder: MMListBuilding {
     }
     public static func buildExpression(_ type: TypeDeclaration) -> [SchemaEntry] {
         [SchemaEntry(kind: .type(type))]
+    }
+    public static func buildExpression(_ entry: SchemaEntry) -> [SchemaEntry] {
+        [entry]
     }
 }
 
@@ -937,6 +996,7 @@ public enum SchemaDeclarationBuilder: MMListBuilding {
 /// registered namespace's table is known.
 public func Schema(
     _ namespace: String,
+    description: String? = nil,
     @SchemaDeclarationBuilder _ content: () -> [SchemaEntry]
 ) -> SchemaDeclaration {
     guard case .success(let prefix) = EntityName.parse(namespace), !prefix.isRoot else {
@@ -991,6 +1051,7 @@ public func Schema(
     }
     return SchemaDeclaration(
         namespace: prefix.rawValue,
+        description: description,
         signatures: signatures,
         types: types
     )

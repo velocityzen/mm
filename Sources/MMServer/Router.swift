@@ -122,11 +122,15 @@ public struct Router: Sendable {
 
         let fingerprint = SchemaFingerprint.compute(signatures, types: types)
         let prefixByName = Self.prefixTable(names: names)
+        let namespaceSignatures = Self.namespaceSignatures(
+            of: namespaces + (registerBuiltins ? [Builtins.self] : [])
+        )
         let allRoutes =
             applicationRoutes
             + (registerBuiltins
                 ? Self.builtinRoutes(
                     signatures: signatures,
+                    namespaceSignatures: namespaceSignatures,
                     prefixByName: prefixByName,
                     types: types,
                     typesByName: typesByName,
@@ -245,8 +249,42 @@ public struct Router: Sendable {
     /// The two builtin routes, closing over the validated tables so the
     /// handlers never rebuild what init already proved (`typesByName` rides
     /// the capture for the reachability filter).
+    /// The described namespaces, as discovery serves them: one entry per
+    /// registered namespace with a non-nil `namespaceDescription`, named by
+    /// the single method-name prefix its `all` list spans (dropping the verb
+    /// segment; a root call is its own prefix). A described namespace whose
+    /// descriptors span multiple prefixes is a programmer error — the
+    /// description would have no single entity to describe.
+    private static func namespaceSignatures(
+        of namespaces: [any MethodNamespace.Type]
+    ) -> [NamespaceSignature] {
+        var described: [NamespaceSignature] = []
+        for namespace in namespaces {
+            guard let description = namespace.namespaceDescription else { continue }
+            let prefixes = Set(
+                namespace.all.map { descriptor -> String in
+                    let name = descriptor.name
+                    guard let lastDot = name.lastIndex(of: ".") else { return name }
+                    return String(name[..<lastDot])
+                }
+            )
+            guard prefixes.count == 1, let prefix = prefixes.first else {
+                preconditionFailure(
+                    """
+                    Router: \(namespace) declares a namespaceDescription but its \
+                    methods span \(prefixes.count) prefixes — a description \
+                    documents exactly one namespace entity
+                    """
+                )
+            }
+            described.append(NamespaceSignature(name: prefix, description: description))
+        }
+        return described.sorted { $0.name < $1.name }
+    }
+
     private static func builtinRoutes(
         signatures: [MethodSignature],
+        namespaceSignatures: [NamespaceSignature],
         prefixByName: [String: EntityName],
         types: [TypeDefinition],
         typesByName: [String: TypeDefinition],
@@ -264,6 +302,7 @@ public struct Router: Sendable {
                     scope: context.entity,
                     peer: context.peer,
                     signatures: signatures,
+                    namespaceSignatures: namespaceSignatures,
                     prefixByName: prefixByName,
                     types: types,
                     typesByName: typesByName,
@@ -651,6 +690,7 @@ public struct Router: Sendable {
         scope: EntityName,
         peer: PeerIdentity,
         signatures: [MethodSignature],
+        namespaceSignatures: [NamespaceSignature],
         prefixByName: [String: EntityName],
         types: [TypeDefinition],
         typesByName: [String: TypeDefinition],
@@ -719,8 +759,20 @@ public struct Router: Sendable {
             reachableTypeNames.formUnion(frontier)
         }
         let visibleTypes = types.filter { reachableTypeNames.contains($0.name) }
+        // Namespace descriptions mirror the method filter: a namespace is
+        // listed iff at least one of its methods is — discovery never names
+        // a namespace the peer cannot see into.
+        let visiblePrefixes = Set(visible.compactMap { prefixByName[$0.name]?.rawValue })
+        let visibleNamespaces = namespaceSignatures.filter {
+            visiblePrefixes.contains($0.name)
+        }
         return .success(
-            SchemaResponse(fingerprint: fingerprint, methods: visible, types: visibleTypes)
+            SchemaResponse(
+                fingerprint: fingerprint,
+                methods: visible,
+                types: visibleTypes,
+                namespaces: visibleNamespaces
+            )
         )
     }
 

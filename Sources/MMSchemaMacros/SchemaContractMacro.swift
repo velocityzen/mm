@@ -55,8 +55,13 @@ public struct SchemaContractMacro: DeclarationMacro {
     ) throws -> [DeclSyntax] {
         let (namespace, closure) = try macroArguments(node, name: "#schema")
         var contract = try parseContract(namespace: namespace, closure: closure)
-        contract.cliMode = try parsedCLIMode(node)
-        try validateCLI(calls: contract.calls)
+        contract.descriptionLiteral = try parsedDescriptionLiteral(node)
+        let enumNames = Set(
+            contract.types.compactMap { type -> String? in
+                if case .enumeration = type.payload { return type.name }
+                return nil
+            })
+        try validateCLI(calls: contract.calls, enumNames: enumNames)
         var declarations: [String] = []
         for type in contract.types {
             declarations.append(
@@ -72,7 +77,15 @@ public struct SchemaContractMacro: DeclarationMacro {
             declarations.append(try generateTypesTable(contract.types, namespace: namespace))
             declarations.append(generateProbedTypes(contract.types, namespace: namespace))
         }
-        declarations.append(generateContract(namespace: namespace, closure: closure))
+        declarations.append(
+            generateContract(
+                namespace: namespace, closure: closure,
+                descriptionLiteral: contract.descriptionLiteral))
+        if let literal = contract.descriptionLiteral {
+            // Satisfies MethodNamespace.namespaceDescription (default nil):
+            // the router serves it in discovery's namespaces list.
+            declarations.append("public static let namespaceDescription: String? = \(literal)")
+        }
         if contract.cliMode.enabled {
             // The generated verify command references `<Type>.contract`; the
             // enclosing type's name comes from the expansion's lexical
@@ -81,7 +94,7 @@ public struct SchemaContractMacro: DeclarationMacro {
             guard let enclosingType = enclosingTypeName(context.lexicalContext) else {
                 throw SchemaMacroError(
                     description:
-                        "#schema(cli:) requires expansion inside a named type declaration")
+                        "#schema with CLI(.enabled) requires expansion inside a named type declaration")
             }
             declarations.append(
                 contentsOf: generateCommands(for: contract, enclosingType: enclosingType))
@@ -153,31 +166,33 @@ public struct SchemaTypesMacro: DeclarationMacro {
     }
 }
 
-/// Parses the optional `cli:` macro argument (static subset: `.disabled`,
+/// Parses the top-level `CLI(...)` schema entry (static subset: `.disabled`,
 /// `.enabled`, or `.enabled(command: "name")`).
-private func parsedCLIMode(
-    _ node: some FreestandingMacroExpansionSyntax
-) throws -> ParsedCLIMode {
-    for argument in node.arguments where argument.label?.text == "cli" {
-        switch baseSpec(argument.expression) {
-            case ("disabled", nil)?:
-                return .disabled
-            case ("enabled", nil)?:
-                return ParsedCLIMode(enabled: true, commandName: nil)
-            case ("enabled", .some(let call))?
-            where call.arguments.count == 1 && call.arguments.first?.label?.text == "command":
-                let name = try requireCommandNameLiteral(
-                    call.arguments.first?.expression ?? argument.expression,
-                    context: "#schema cli command name")
-                return ParsedCLIMode(enabled: true, commandName: name)
-            default:
-                throw SchemaMacroError(
-                    description:
-                        "#schema cli: must be .disabled, .enabled, or .enabled(command: \"name\") (static subset)"
-                )
-        }
+private func parseSchemaCLIMode(_ call: FunctionCallExprSyntax) throws -> ParsedCLIMode {
+    let failure = SchemaMacroError(
+        description:
+            "#schema CLI(...) must be .disabled, .enabled, or .enabled(command: \"name\") (static subset)"
+    )
+    guard call.arguments.count == 1, let argument = call.arguments.first,
+        argument.label == nil
+    else {
+        throw failure
     }
-    return .disabled
+    switch baseSpec(argument.expression) {
+        case ("disabled", nil)?:
+            return .disabled
+        case ("enabled", nil)?:
+            return ParsedCLIMode(enabled: true, commandName: nil)
+        case ("enabled", .some(let modeCall))?
+        where modeCall.arguments.count == 1
+            && modeCall.arguments.first?.label?.text == "command":
+            let name = try requireCommandNameLiteral(
+                modeCall.arguments.first?.expression ?? argument.expression,
+                context: "#schema CLI command name")
+            return ParsedCLIMode(enabled: true, commandName: name)
+        default:
+            throw failure
+    }
 }
 
 /// Splits a `.name` / `.name(...)` spec expression — the shape every
@@ -242,6 +257,26 @@ private struct ParsedContract {
     var types: [ParsedTypeDecl]
     var calls: [ParsedCall]
     var cliMode: ParsedCLIMode = .disabled
+    /// The `description:` macro argument, kept as its literal source text
+    /// (quotes and escapes intact) so re-emission is exact.
+    var descriptionLiteral: String?
+}
+
+/// Parses the optional `description:` macro argument — a literal string (or
+/// an explicit `nil`), returned as its exact source text for re-emission.
+private func parsedDescriptionLiteral(
+    _ node: some FreestandingMacroExpansionSyntax
+) throws -> String? {
+    for argument in node.arguments where argument.label?.text == "description" {
+        if argument.expression.is(NilLiteralExprSyntax.self) { return nil }
+        guard stringLiteral(argument.expression) != nil else {
+            throw SchemaMacroError(
+                description:
+                    "#schema description: must be a literal string (static subset)")
+        }
+        return argument.expression.trimmedDescription
+    }
+    return nil
 }
 
 /// The parsed `cli:` macro argument: `.disabled`, `.enabled`, or
@@ -261,8 +296,25 @@ private struct ParsedCLIOverlay {
 }
 
 /// The parsed `cli:` hint on one field.
+/// The short form of a parsed option hint: an explicit character or `.auto`
+/// (derive from the long name's first character).
+private enum ParsedShort {
+    case character(String)
+    case derived
+}
+
+/// The parsed `default:` literal — kind-tagged so validation can match it
+/// against the field's wire type; numerics and booleans keep their exact
+/// source text for re-emission.
+private enum ParsedFieldDefault {
+    case string(String)
+    case integer(String)
+    case floating(String)
+    case boolean(String)
+}
+
 private enum ParsedCLIArgument {
-    case option(name: String?, short: String?)
+    case option(name: String?, short: ParsedShort?)
     case argument
     case flag
     case omitted
@@ -359,6 +411,7 @@ private struct ParsedField {
     var name: String
     var type: ParsedType
     var description: String?
+    var defaultValue: ParsedFieldDefault?
     var cliHint: ParsedCLIArgument?
 }
 
@@ -419,6 +472,7 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
     }
     var types: [ParsedTypeDecl] = []
     var calls: [ParsedCall] = []
+    var cliMode: ParsedCLIMode?
     var seen: Set<String> = []
     for item in closure.statements {
         guard let call = item.item.as(FunctionCallExprSyntax.self),
@@ -426,7 +480,7 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
         else {
             throw SchemaMacroError(
                 description:
-                    "#schema supports only Call, Enum, and Type declarations at the top level (the macro form is the DSL's static subset — no conditionals)"
+                    "#schema supports only Call, Enum, Type, and CLI declarations at the top level (the macro form is the DSL's static subset — no conditionals)"
             )
         }
         switch callee {
@@ -439,10 +493,15 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
                 calls.append(parsed)
             case "Enum", "Type":
                 types.append(try parseTypeDecl(call, kind: callee))
+            case "CLI":
+                guard cliMode == nil else {
+                    throw SchemaMacroError(description: "#schema declares CLI(...) twice")
+                }
+                cliMode = try parseSchemaCLIMode(call)
             default:
                 throw SchemaMacroError(
                     description:
-                        "#schema supports only Call, Enum, and Type declarations at the top level (got \(callee))"
+                        "#schema supports only Call, Enum, Type, and CLI declarations at the top level (got \(callee))"
                 )
         }
     }
@@ -450,14 +509,15 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
         throw SchemaMacroError(description: "#schema declares no calls")
     }
     try validate(types: types, calls: calls)
-    return ParsedContract(namespace: namespace, types: types, calls: calls)
+    return ParsedContract(
+        namespace: namespace, types: types, calls: calls, cliMode: cliMode ?? .disabled)
 }
 
 /// CLI-overlay validation, run whether or not generation is enabled — a bad
 /// hint is an authoring mistake either way. Checks command-name uniqueness
 /// (including aliases), reserved names, option/short collisions per command,
 /// `.flag` on non-bool fields, and `.omitted` on required fields.
-private func validateCLI(calls: [ParsedCall]) throws {
+private func validateCLI(calls: [ParsedCall], enumNames: Set<String>) throws {
     // Option names claimed by every generated command: the shared connection
     // OptionGroup plus swift-argument-parser's own flags.
     let reservedOptions = SchemaContractMacro.reservedLongOptionNames
@@ -479,6 +539,18 @@ private func validateCLI(calls: [ParsedCall]) throws {
         var optionNames = reservedOptions
         var shortNames: Set<String> = []
         for field in call.request {
+            if let fieldDefault = field.defaultValue {
+                switch field.cliHint {
+                    case nil, .option:
+                        try validateFieldDefault(
+                            fieldDefault, field: field, call: call, enumNames: enumNames)
+                    default:
+                        throw SchemaMacroError(
+                            description:
+                                "Call(\"\(call.name)\"): field \"\(field.name)\" declares default: but does not surface as an option — the default has nothing to apply to"
+                        )
+                }
+            }
             switch field.cliHint {
                 case .omitted:
                     guard case .optional = field.type else {
@@ -508,13 +580,79 @@ private func validateCLI(calls: [ParsedCall]) throws {
                 )
             }
             if case .option(_, let short?) = field.cliHint {
-                guard shortNames.insert(short).inserted else {
+                // A derived short is the long name's first character —
+                // resolved here so collisions surface at expansion, not
+                // as an ArgumentParser runtime error.
+                let resolved: String
+                switch short {
+                    case .character(let value): resolved = value
+                    case .derived: resolved = String(optionName.prefix(1))
+                }
+                guard shortNames.insert(resolved).inserted else {
                     throw SchemaMacroError(
                         description:
-                            "Call(\"\(call.name)\"): short flag -\(short) is used twice")
+                            "Call(\"\(call.name)\"): short flag -\(resolved) is used twice")
                 }
             }
         }
+    }
+}
+
+/// Field `default:` rules: the field must be optional (an absent field
+/// still decodes as nil — the default is generator metadata, never wire
+/// behavior), and the literal must match the field's flat shape: string
+/// fields and JSON-literal fields take a string, numeric fields a numeric,
+/// bool fields a boolean. Enum, array, and calendar/clock fields have no
+/// literal spelling in the static subset and are rejected.
+private func validateFieldDefault(
+    _ flagDefault: ParsedFieldDefault,
+    field: ParsedField,
+    call: ParsedCall,
+    enumNames: Set<String>
+) throws {
+    func mismatch(_ expected: String) -> SchemaMacroError {
+        SchemaMacroError(
+            description:
+                "Call(\"\(call.name)\"): field \"\(field.name)\" default must be \(expected)"
+        )
+    }
+    guard case .optional(let inner) = field.type else {
+        throw SchemaMacroError(
+            description:
+                "Call(\"\(call.name)\"): field \"\(field.name)\" declares default: but is not optional — an absent field must stay representable"
+        )
+    }
+    switch inner {
+        case .string:
+            guard case .string = flagDefault else { throw mismatch("a string literal") }
+        case .int, .uint:
+            guard case .integer = flagDefault else { throw mismatch("an integer literal") }
+        case .float, .double:
+            switch flagDefault {
+                case .integer, .floating: break
+                default: throw mismatch("a numeric literal")
+            }
+        case .bool:
+            guard case .boolean = flagDefault else { throw mismatch("a boolean literal") }
+        case .map, .structure, .external:
+            guard case .string = flagDefault else {
+                throw mismatch("a string literal (the option takes JSON text)")
+            }
+        case .reference(let name):
+            guard !enumNames.contains(name) else {
+                throw SchemaMacroError(
+                    description:
+                        "Call(\"\(call.name)\"): field \"\(field.name)\" default: is not supported on enum fields"
+                )
+            }
+            guard case .string = flagDefault else {
+                throw mismatch("a string literal (the option takes JSON text)")
+            }
+        case .optional, .array, .date, .datetime, .timestamp:
+            throw SchemaMacroError(
+                description:
+                    "Call(\"\(call.name)\"): field \"\(field.name)\" default: is not supported for this field type"
+            )
     }
 }
 
@@ -829,6 +967,37 @@ private func parseCLIPart(
     }
 }
 
+/// Parses a field's `default:` literal (string, integer, float, or boolean;
+/// numerics may be negative).
+private func parseFieldDefault(
+    _ expression: ExprSyntax, context: String
+) throws -> ParsedFieldDefault {
+    var body = expression
+    var sign = ""
+    if let prefixed = expression.as(PrefixOperatorExprSyntax.self),
+        prefixed.operator.text == "-"
+    {
+        sign = "-"
+        body = prefixed.expression
+    }
+    if sign.isEmpty, let literal = stringLiteral(body) {
+        return .string(literal)
+    }
+    if body.is(IntegerLiteralExprSyntax.self) {
+        return .integer(sign + body.trimmedDescription)
+    }
+    if body.is(FloatLiteralExprSyntax.self) {
+        return .floating(sign + body.trimmedDescription)
+    }
+    if sign.isEmpty, body.is(BooleanLiteralExprSyntax.self) {
+        return .boolean(body.trimmedDescription)
+    }
+    throw SchemaMacroError(
+        description:
+            "\(context): default must be a string, integer, float, or boolean literal (static subset)"
+    )
+}
+
 /// Parses a field's `cli:` hint (static subset: `.argument`, `.flag`,
 /// `.omitted`, `.option("name", short: "c")`).
 private func parseCLIArgument(
@@ -840,18 +1009,25 @@ private func parseCLIArgument(
         case ("omitted", nil)?: return .omitted
         case ("option", .some(let call))?:
             var name: String?
-            var short: String?
+            var short: ParsedShort?
             for argument in call.arguments {
                 if argument.label == nil {
                     name = try requireCommandNameLiteral(
                         argument.expression, context: "\(context): cli option name")
                 } else if argument.label?.text == "short" {
-                    guard let literal = stringLiteral(argument.expression), literal.count == 1
-                    else {
+                    if let member = argument.expression.as(MemberAccessExprSyntax.self),
+                        member.base == nil, member.declName.baseName.text == "auto"
+                    {
+                        short = .derived
+                    } else if let literal = stringLiteral(argument.expression),
+                        literal.count == 1
+                    {
+                        short = .character(literal)
+                    } else {
                         throw SchemaMacroError(
-                            description: "\(context): cli short flag must be a single character")
+                            description:
+                                "\(context): cli short must be a single character or .auto")
                     }
-                    short = literal
                 } else {
                     throw SchemaMacroError(
                         description:
@@ -863,7 +1039,7 @@ private func parseCLIArgument(
         default:
             throw SchemaMacroError(
                 description:
-                    "\(context): cli must be .argument, .flag, .omitted, or .option(\"name\", short: \"c\") (static subset)"
+                    "\(context): cli must be .argument, .flag, .omitted, or .option(\"name\", short: \"c\" | .auto) (static subset)"
             )
     }
 }
@@ -1057,11 +1233,12 @@ private func parseFields(_ closure: ClosureExprSyntax, context: String) throws -
 private func parseField(_ call: FunctionCallExprSyntax, context: String) throws -> ParsedField {
     var arguments = Array(call.arguments)
     var description: String?
+    var defaultValue: ParsedFieldDefault?
     var cliHint: ParsedCLIArgument?
-    // Peel the trailing labeled presentation arguments (`description:` and
-    // `cli:`), in either order.
+    // Peel the trailing labeled metadata arguments (`description:`,
+    // `default:`, and `cli:`), in any order.
     while let last = arguments.last, let label = last.label?.text,
-        label == "description" || label == "cli"
+        label == "description" || label == "default" || label == "cli"
     {
         if label == "description" {
             guard description == nil else {
@@ -1069,6 +1246,12 @@ private func parseField(_ call: FunctionCallExprSyntax, context: String) throws 
                     description: "\(context): Field declares description twice")
             }
             description = try requireDescriptionLiteral(
+                last.expression, context: "\(context): Field")
+        } else if label == "default" {
+            guard defaultValue == nil else {
+                throw SchemaMacroError(description: "\(context): Field declares default twice")
+            }
+            defaultValue = try parseFieldDefault(
                 last.expression, context: "\(context): Field")
         } else {
             guard cliHint == nil else {
@@ -1111,7 +1294,7 @@ private func parseField(_ call: FunctionCallExprSyntax, context: String) throws 
         return ParsedField(
             pinnedKey: pinnedKey, name: name,
             type: .structure(name: nestedName, fields: nestedFields),
-            description: description, cliHint: cliHint)
+            description: description, defaultValue: defaultValue, cliHint: cliHint)
     }
     guard let typeArgument = arguments.first, arguments.count == 1 else {
         throw SchemaMacroError(
@@ -1120,7 +1303,7 @@ private func parseField(_ call: FunctionCallExprSyntax, context: String) throws 
     return ParsedField(
         pinnedKey: pinnedKey, name: name,
         type: try parseType(typeArgument.expression, context: "\(context).\(name)"),
-        description: description, cliHint: cliHint)
+        description: description, defaultValue: defaultValue, cliHint: cliHint)
 }
 
 private func parseType(_ expr: ExprSyntax, context: String) throws -> ParsedType {
@@ -1627,7 +1810,7 @@ private func generateCommands(for contract: ParsedContract, enclosingType: Strin
         public struct Command: ParsableCommand {
             public static let configuration = CommandConfiguration(
                 commandName: "\(groupName)",
-                abstract: "Commands for the \(contract.namespace) namespace.",
+                abstract: \(contract.descriptionLiteral ?? "\"Commands for the \(contract.namespace) namespace.\""),
                 subcommands: [\(subcommands.joined(separator: ", "))]\(defaultSubcommand))
             public init() {}
         }
@@ -1875,8 +2058,32 @@ private func emitField(
     let defaultName = kebabCased(field.name)
     var nameArgument: String?
     var shortName: String?
-    if case .option(_, let short?) = field.cliHint { shortName = short }
-    if optionName != defaultName || shortName != nil {
+    var derivedShort = false
+    if case .option(_, let short?) = field.cliHint {
+        switch short {
+            case .character(let value): shortName = value
+            case .derived: derivedShort = true
+        }
+    }
+    var defaultAsFlagArgument: String?
+    if let fieldDefault = field.defaultValue {
+        let literal: String
+        switch fieldDefault {
+            case .string(let value): literal = quoted(value)
+            case .integer(let source), .floating(let source), .boolean(let source):
+                literal = source
+        }
+        defaultAsFlagArgument = "defaultAsFlag: \(literal)"
+    }
+    // The hybrid @Option initializer binds through the property's `= nil`.
+    let propertyInitializer = defaultAsFlagArgument == nil ? "" : " = nil"
+    if derivedShort {
+        shortName = String(optionName.prefix(1))
+    }
+    if optionName == defaultName && derivedShort {
+        // No rename: ArgumentParser derives both halves itself.
+        nameArgument = "name: .shortAndLong"
+    } else if optionName != defaultName || shortName != nil {
         var names = [".customLong(\(quoted(optionName)))"]
         if let shortName {
             names.append(".customShort(\"\(shortName)\")")
@@ -1904,7 +2111,7 @@ private func emitField(
                 )
             } else {
                 lines.append(
-                    "    @Option\(wrapperArguments([nameArgument, helpArgument])) public var \(field.name): \(swift)"
+                    "    @Option\(wrapperArguments([nameArgument, defaultAsFlagArgument, helpArgument])) public var \(field.name): \(swift)\(propertyInitializer)"
                 )
             }
         case .json(let swift):
@@ -1913,7 +2120,7 @@ private func emitField(
             let jsonHelp = field.description.map { "\($0) (JSON)" } ?? "JSON value"
             let property = isOptional ? "String?" : "String"
             lines.append(
-                "    @Option\(wrapperArguments([nameArgument, "help: \(quoted(jsonHelp))"])) public var \(field.name): \(property)"
+                "    @Option\(wrapperArguments([nameArgument, defaultAsFlagArgument, "help: \(quoted(jsonHelp))"])) public var \(field.name): \(property)\(propertyInitializer)"
             )
             if isOptional {
                 preludes.append(
@@ -1931,15 +2138,17 @@ private func generateContract(
     namespace: String,
     closure: ClosureExprSyntax,
     declarationType: String = "SchemaDeclaration",
-    builder: String = "Schema"
+    builder: String = "Schema",
+    descriptionLiteral: String? = nil
 ) -> String {
     // Re-emit the DSL verbatim as the runtime declaration: the generated types
     // above and this value share one source, so `contract.verify(against:)`
     // becomes a macro-fidelity check rather than a drift check. `#schemaTypes`
     // shares this emission with its own declaration type and builder.
     let body = closure.statements.trimmedDescription
+    let descriptionArgument = descriptionLiteral.map { ", description: \($0)" } ?? ""
     return """
-        public static let contract: \(declarationType) = \(builder)("\(namespace)") {
+        public static let contract: \(declarationType) = \(builder)("\(namespace)"\(descriptionArgument)) {
         \(body)
         }
         """

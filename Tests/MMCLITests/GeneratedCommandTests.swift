@@ -9,7 +9,8 @@ import Testing
 /// enum option, a JSON option for a named-type field, and automatic
 /// kebab-casing of a camelCase call name.
 enum Ledger: MethodNamespace {
-    #schema("ledger", cli: .enabled) {
+    #schema("ledger", description: "Double-entry ledger operations.") {
+        CLI(.enabled)
         Enum("Kind", description: "Which side of the ledger") {
             Case("credit")
             Case("debit")
@@ -27,6 +28,9 @@ enum Ledger: MethodNamespace {
                 Field("count", .optional(.int), cli: .omitted)
                 Field("force", .bool, cli: .flag)
                 Field("tag", .optional(.string), cli: .option("label", short: "l"))
+                Field("origin", .optional(.string), cli: .option(short: .auto))
+                Field("tint", .optional(.string), cli: .option("color", short: .auto))
+                Field("format", .optional(.string), default: "json")
             }
             Response { Field("total", .int) }
         }
@@ -48,6 +52,17 @@ enum Ledger: MethodNamespace {
     }
 }
 
+/// A description-less namespace: the group abstract falls back to the
+/// template and `namespaceDescription` stays the protocol default.
+enum Petty: MethodNamespace {
+    #schema("petty") {
+        CLI(.enabled)
+        Call("poke") {
+            Access { .read }
+        }
+    }
+}
+
 @Suite("Generated CLI commands")
 struct GeneratedCommandTests {
     @Test("the namespace group carries the schema prefix, non-omitted calls, and verify")
@@ -56,6 +71,17 @@ struct GeneratedCommandTests {
         #expect(configuration.commandName == "ledger")
         let names = configuration.subcommands.map { $0.configuration.commandName }
         #expect(names == ["add", "import-all", "root", "verify"])
+    }
+
+    @Test("the schema description becomes the group abstract and the namespace doc")
+    func namespaceDescription() {
+        #expect(Ledger.Command.configuration.abstract == "Double-entry ledger operations.")
+        #expect(Ledger.namespaceDescription == "Double-entry ledger operations.")
+        #expect(Ledger.contract.description == "Double-entry ledger operations.")
+        // Without one: the template abstract, nil everywhere else.
+        #expect(Petty.Command.configuration.abstract == "Commands for the petty namespace.")
+        #expect(Petty.namespaceDescription == nil)
+        #expect(Petty.contract.description == nil)
     }
 
     @Test("Call(\"@\") is the namespace root: wire name, descriptor, default subcommand")
@@ -119,6 +145,35 @@ struct GeneratedCommandTests {
         #expect(command.tag == "urgent")
         #expect(command.meta == nil)
         #expect(command.connection.output == .json)
+    }
+
+    @Test("Field default: bare flag means the default, a value overrides, absent is nil")
+    func defaultAsFlag() throws {
+        let base = ["--socket", "/tmp/ledger.sock", "ledger.main", "x", "--kind", "credit"]
+        #expect(try Ledger.AppendCommand.parse(base).format == nil)
+        #expect(try Ledger.AppendCommand.parse(base + ["--format"]).format == "json")
+        #expect(try Ledger.AppendCommand.parse(base + ["--format", "yaml"]).format == "yaml")
+        // Help renders the hybrid shape: optional value, flag-default note.
+        let help = Ledger.AppendCommand.helpMessage()
+        #expect(help.contains("--format [<format>]"))
+        #expect(help.contains("default as flag: json"))
+    }
+
+    @Test("short: .auto derives the short from the long name, renamed or not")
+    func derivedShorts() throws {
+        let command = try Ledger.AppendCommand.parse([
+            "--socket", "/tmp/ledger.sock", "ledger.main", "x", "--kind", "credit",
+            "-o", "today", "-c", "blue",
+        ])
+        #expect(command.origin == "today")
+        #expect(command.tint == "blue")
+        // The long forms still answer.
+        let spelled = try Ledger.AppendCommand.parse([
+            "--socket", "/tmp/ledger.sock", "ledger.main", "x", "--kind", "credit",
+            "--origin", "today", "--color", "blue",
+        ])
+        #expect(spelled.origin == "today")
+        #expect(spelled.tint == "blue")
     }
 
     @Test("the renamed option answers to its long form")
@@ -194,6 +249,9 @@ struct GeneratedCommandTests {
                     Field("count", .optional(.int))
                     Field("force", .bool)
                     Field("tag", .optional(.string))
+                    Field("origin", .optional(.string))
+                    Field("tint", .optional(.string))
+                    Field("format", .optional(.string), default: "json")
                 }
                 Response { Field("total", .int) }
             }

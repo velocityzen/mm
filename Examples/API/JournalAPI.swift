@@ -34,7 +34,11 @@ import MMSchema
 /// self-documenting — while staying out of the fingerprint and all
 /// compatibility checks: doc edits are never schema drift.
 public enum Journal: MethodNamespace {
-    #schema("journal", cli: .enabled) {
+    #schema(
+        "journal",
+        description: "Append-only journals: write lines, read them back, follow changes live."
+    ) {
+        CLI(.enabled)
         Enum("Priority", description: "How urgent a line is") {
             Case("normal")
             Case("urgent", description: "Surfaces immediately to followers")

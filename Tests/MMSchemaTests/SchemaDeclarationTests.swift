@@ -71,6 +71,17 @@ struct SchemaDeclarationTests {
         #expect(notesContract.signatures.map(\.access) == [.write, .read])
     }
 
+    @Test("Schema(description:) is carried, doc-only, and never fingerprinted")
+    func namespaceDescription() {
+        let bare = Schema("box") { Call("ping") { Access { .read } } }
+        let described = Schema("box", description: "A box of pings.") {
+            Call("ping") { Access { .read } }
+        }
+        #expect(bare.description == nil)
+        #expect(described.description == "A box of pings.")
+        #expect(bare.fingerprint() == described.fingerprint())
+    }
+
     @Test("request fields key from 0 — the entity is envelope metadata, not payload")
     func requestKeysFromZero() {
         let request = notesContract.signatures[0].request

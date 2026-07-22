@@ -24,8 +24,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
         // 2.11 floor: Timer.record(duration:).
         .package(url: "https://github.com/apple/swift-metrics.git", from: "2.11.0"),
-        // 1.7.0 floor: generated commands use CommandConfiguration(aliases:).
-        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.7.0"),
+        // 1.8.0 floor: generated commands use @Option(defaultAsFlag:) (1.8.0)
+        // and CommandConfiguration(aliases:) (1.7.0).
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.0"),
         // Compile-time only (the #schema macro plugin); never linked into products.
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0"..<"700.0.0"),
         // Functional Result/Optional utilities (async map/match/tap).
@@ -97,7 +98,7 @@ let package = Package(
         ),
         .target(
             name: "MMExampleAPI",
-            // ArgumentParser + MMCLI activate `#schema(cli: .enabled)` — the
+            // ArgumentParser + MMCLI activate `#schema` CLI generation — the
             // documented tradeoff: the daemon transitively links both (inert).
             dependencies: [
                 "MMSchema",

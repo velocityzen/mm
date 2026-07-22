@@ -46,12 +46,21 @@ struct MethodTests {
                         response: .structure(fields: [
                             .init(key: 0, name: "fingerprint", type: .uint),
                             .init(key: 1, name: "methods", type: .array(Self.signatureSchema)),
-                            // The hand-written decoder reads `types` with
-                            // decodeIfPresent (absent on pre-types wires), so
-                            // the probe records it optional.
+                            // The hand-written decoder reads `types` and
+                            // `namespaces` with decodeIfPresent (absent on
+                            // older wires), so the probe records them
+                            // optional.
                             .init(
                                 key: 2, name: "types",
                                 type: .optional(.array(Self.typeDefinitionSchema))),
+                            .init(
+                                key: 3, name: "namespaces",
+                                type: .optional(
+                                    .array(
+                                        .structure(fields: [
+                                            .init(key: 0, name: "name", type: .string),
+                                            .init(key: 1, name: "description", type: .string),
+                                        ])))),
                         ])
                     )
                 )

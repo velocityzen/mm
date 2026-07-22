@@ -12,6 +12,26 @@ public struct SchemaRequest: Codable, Hashable, Sendable, SchemaDescribable {
     public static var schema: TypeSchema { .structure(fields: []) }
 }
 
+/// One namespace visible in a discovery response: its prefix entity and its
+/// doc-only description. Served only for namespaces that declared one.
+public struct NamespaceSignature: Codable, Hashable, Sendable {
+    /// The namespace prefix (`journal`), the same entity that scopes its
+    /// methods.
+    public var name: String
+    /// Human-readable namespace documentation.
+    public var description: String
+
+    public init(name: String, description: String) {
+        self.name = name
+        self.description = description
+    }
+
+    enum CodingKeys: Int, CodingKey {
+        case name = 0
+        case description = 1
+    }
+}
+
 /// Response for `server.schema`.
 public struct SchemaResponse: Codable, Hashable, Sendable {
     /// ``SchemaFingerprint`` of the *complete* method set the server exposes
@@ -25,25 +45,50 @@ public struct SchemaResponse: Codable, Hashable, Sendable {
     /// contain. Empty from pre-types servers (the key is absent on the wire
     /// and decodes as `[]`).
     public var types: [TypeDefinition]
+    /// The described namespaces among the visible methods' prefixes, sorted
+    /// by name — doc-only, never fingerprinted. Empty from servers predating
+    /// the key (absent on the wire, decodes as `[]`) and from namespaces
+    /// that declared no description.
+    public var namespaces: [NamespaceSignature]
 
-    public init(fingerprint: UInt64, methods: [MethodSignature], types: [TypeDefinition] = []) {
+    public init(
+        fingerprint: UInt64,
+        methods: [MethodSignature],
+        types: [TypeDefinition] = [],
+        namespaces: [NamespaceSignature] = []
+    ) {
         self.fingerprint = fingerprint
         self.methods = methods
         self.types = types
+        self.namespaces = namespaces
     }
 
     enum CodingKeys: Int, CodingKey {
         case fingerprint = 0
         case methods = 1
         case types = 2
+        case namespaces = 3
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.fingerprint = try container.decode(UInt64.self, forKey: .fingerprint)
         self.methods = try container.decode([MethodSignature].self, forKey: .methods)
-        // Absent on pre-types encodings; the wire-evolution contract.
+        // Absent on older encodings; the wire-evolution contract, both keys.
         self.types = try container.decodeIfPresent([TypeDefinition].self, forKey: .types) ?? []
+        self.namespaces =
+            try container.decodeIfPresent([NamespaceSignature].self, forKey: .namespaces) ?? []
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.fingerprint, forKey: .fingerprint)
+        try container.encode(self.methods, forKey: .methods)
+        try container.encode(self.types, forKey: .types)
+        // Optional slot: absent when empty, like every optional wire key.
+        if !self.namespaces.isEmpty {
+            try container.encode(self.namespaces, forKey: .namespaces)
+        }
     }
 }
 

@@ -36,7 +36,7 @@ The wire contract is written exactly once, declaratively. `#schema` generates ev
 import MMSchema
 
 public enum Echo: MethodNamespace {
-    #schema("echo") {
+    #schema("echo", description: "Echoes values back, loudly on request.") {
         // Named types are part of the contract: string-valued wire enums
         // (with a generated `unknown` fallback case) and referenceable
         // structs. Descriptions are served by discovery — the contract
@@ -169,7 +169,7 @@ Daemons drop `MMClientConnectionService(connection:)` into their `ServiceGroup` 
 
 ### CLI
 
-The same declaration can generate a command-line tool. `#schema("echo", cli: .enabled)` additionally emits one swift-argument-parser command per call — names, `--help` text, and argument shapes all from the contract — plus a namespace group; the file then imports `ArgumentParser` and `MMCLI`. A `CLI(...)` part renames or omits commands, `Field(..., cli:)` shapes arguments (positional, flag, short, renamed, omitted), and none of it touches the wire: the overlay is never served, fingerprinted, or compared.
+The same declaration can generate a command-line tool. A top-level `CLI(.enabled)` entry in the block additionally emits one swift-argument-parser command per call — names, `--help` text, and argument shapes all from the contract — plus a namespace group; the file then imports `ArgumentParser` and `MMCLI`. A per-call `CLI(...)` part renames or omits commands, `Field(..., cli:)` shapes arguments (positional, flag, short — explicit or `short: .auto` deriving `-x` from the long name — renamed, omitted), and a `Field(..., default:)` literal makes the option hybrid: a bare `--format` means the default, and none of it touches the wire: the overlay is never served, fingerprinted, or compared.
 
 ```swift
 Call("append", description: "Appends one line to a journal") {

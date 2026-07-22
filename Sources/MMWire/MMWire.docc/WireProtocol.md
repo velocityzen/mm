@@ -375,8 +375,11 @@ Request (`SchemaRequest`): the empty map `{}` — the discovery **scope** is the
 | 0 | fingerprint | u64 — the fingerprint of the server's **complete** method set and type table (not of the filtered lists below), so a client can compare it with the hello fingerprint |
 | 1 | methods | array of MethodSignature |
 | 2 | types | array of TypeDefinition — **optional**; absent from pre-types servers and decodes as empty |
+| 3 | namespaces | array of NamespaceSignature — **optional**; absent from servers predating the key (decodes as empty) and when no served namespace declared a description |
 
 The methods list is scoped by the request's entity and filtered by the requesting peer's traversal rights: discovery reflects what that peer can reach. The types list contains the named-type definitions **transitively reachable** from the served methods' schemas (chased through the definitions themselves): every `reference` in the response resolves within the response.
+
+`NamespaceSignature` is an int-keyed struct documenting one namespace: key 0 = `name` (string, the namespace prefix entity, e.g. `journal`), key 1 = `description` (string). Entries exist only for namespaces that declared a description, sorted by name, and are filtered with the methods: a namespace is listed iff at least one of its methods is. Like every description, the list is documentation only — served by discovery, **never** hashed into the fingerprint and never consulted by compatibility comparisons.
 
 **Scope.** Each method's **method-name prefix** — its name minus the final verb segment (`journal.append` → `journal`; a single-segment name → root) — is interpreted as an entity name. A non-root request entity narrows the listing to methods whose prefix equals it or is a descendant of it; root selects every method. A scope that matches nothing yields an empty `methods` list, not an error.
 

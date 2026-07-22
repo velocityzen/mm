@@ -4,6 +4,25 @@ import MMTestSupport
 import MMWire
 import Testing
 
+// MARK: - Described namespace fixtures (the discovery `namespaces` list)
+
+private enum DescribedJournal: MethodNamespace {
+    static let append = Method<EchoRequest, EchoResponse>(name: "journal.append", access: .write)
+    static let list = Method<EchoRequest, EchoResponse>(name: "journal.list", access: .read)
+    static var all: [AnyMethod] {
+        [AnyMethod(Self.append), AnyMethod(Self.list)]
+    }
+    static let namespaceDescription: String? = "Append-only journals."
+}
+
+private enum DescribedAdmin: MethodNamespace {
+    static let wipe = Method<EchoRequest, EchoResponse>(name: "admin.wipe", access: .write)
+    static var all: [AnyMethod] {
+        [AnyMethod(Self.wipe)]
+    }
+    static let namespaceDescription: String? = "Destructive administration."
+}
+
 /// The builtin handlers wired by `registerBuiltins`: server.schema's
 /// traversal-filtered discovery and server.entity's ACL report.
 @Suite("Builtins")
@@ -70,6 +89,45 @@ struct BuiltinTests {
             ownerView.methods.map(\.name)
                 == ["admin.wipe", "journal.append", "journal.list", "server.entity", "server.schema"]
         )
+    }
+
+    @Test("described namespaces are listed with the same visibility as their methods")
+    func namespaceDescriptions() async throws {
+        let router = Router(
+            namespaces: [DescribedJournal.self, DescribedAdmin.self],
+            aclProvider: InMemoryACLProvider(Self.world),
+            registerBuiltins: true
+        ) {
+            Handle(DescribedJournal.append) { request, _ in
+                .success(EchoResponse(value: request.value))
+            }
+            Handle(DescribedJournal.list) { request, _ in
+                .success(EchoResponse(value: request.value))
+            }
+            Handle(DescribedAdmin.wipe) { request, _ in
+                .success(EchoResponse(value: request.value))
+            }
+        }
+
+        // `other` cannot traverse `admin`, so neither admin.wipe nor the
+        // admin namespace entry is served. Builtins declare no description:
+        // `server` is never listed.
+        let otherView = try await self.discover(router, peer: Peers.other)
+        #expect(
+            otherView.namespaces
+                == [NamespaceSignature(name: "journal", description: "Append-only journals.")]
+        )
+
+        let ownerView = try await self.discover(router, peer: Peers.owner)
+        #expect(ownerView.namespaces.map(\.name) == ["admin", "journal"])
+        #expect(
+            ownerView.namespaces.map(\.description)
+                == ["Destructive administration.", "Append-only journals."]
+        )
+
+        // Scope narrowing filters the namespace list with the methods.
+        let scoped = try await self.discover(router, peer: Peers.owner, scope: entity("admin"))
+        #expect(scoped.namespaces.map(\.name) == ["admin"])
     }
 
     @Test("a missing ACL on any prefix step excludes the method for everyone")

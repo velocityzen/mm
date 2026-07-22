@@ -55,6 +55,49 @@ struct SchemaContractMacroTests {
         )
     }
 
+    @Test("description: re-emits into the contract and namespaceDescription")
+    func namespaceDescription() {
+        assertMacroExpansion(
+            """
+            #schema("box", description: "A box of pings.") {
+                Call("ping") {
+                    Access { .read }
+                }
+            }
+            """,
+            expandedSource: """
+                public struct PingRequest: Codable, Hashable, Sendable, SchemaDescribable {
+                    public static var schema: TypeSchema {
+                        .structure(fields: [])
+                    }
+                    public init() {
+                    }
+                }
+                public struct PingResponse: Codable, Hashable, Sendable, SchemaDescribable {
+                    public static var schema: TypeSchema {
+                        .structure(fields: [])
+                    }
+                    public init() {
+                    }
+                }
+                public static let `ping` = Method<PingRequest, PingResponse>(
+                    name: "box.ping", access: .read)
+                public static var all: [AnyMethod] {
+                    [AnyMethod(Self.`ping`)]
+                }
+                public static let contract: SchemaDeclaration = Schema("box", description: "A box of pings.") {
+                    Call("ping") {
+                            Access {
+                                .read
+                            }
+                        }
+                }
+                public static let namespaceDescription: String? = "A box of pings."
+                """,
+            macros: macros
+        )
+    }
+
     @Test("diagnostics: the static subset is enforced")
     func diagnostics() {
         // A throwing expansion leaves the source unexpanded and reports the
@@ -114,7 +157,7 @@ struct SchemaContractMacroTests {
             diagnostics: [
                 DiagnosticSpec(
                     message:
-                        "#schema supports only Call, Enum, and Type declarations at the top level (the macro form is the DSL's static subset — no conditionals)",
+                        "#schema supports only Call, Enum, Type, and CLI declarations at the top level (the macro form is the DSL's static subset — no conditionals)",
                     line: 1, column: 1)
             ],
             macros: macros
