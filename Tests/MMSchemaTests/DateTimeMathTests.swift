@@ -137,6 +137,28 @@ struct DateTimeMathTests {
                 == self.dateTime("2027-01-01T00:00:01"))
     }
 
+    // MARK: - Now (Foundation-gated)
+
+    @Test("now() is the current instant: UTC by default, zone offsets applied")
+    func now() {
+        let before = Date().timeIntervalSince1970
+        let utcNow = MMTimestamp.now()
+        let after = Date().timeIntervalSince1970
+        #expect(utcNow.offsetMinutes == 0)
+        let (seconds, nanoseconds) = utcNow.secondsSinceEpoch
+        let instant = Double(seconds) + Double(nanoseconds) / 1_000_000_000
+        #expect(instant >= before - 1 && instant <= after + 1)
+        // A zoned now is the same instant read on a shifted wall clock.
+        let ahead = MMTimestamp.now(in: TimeZone(secondsFromGMT: 5 * 3600 + 30 * 60)!)
+        #expect(ahead.offsetMinutes == 330)
+        #expect(abs((ahead - utcNow).components.seconds) <= 2)
+        // The wall-clock and date forms agree with the timestamp's reading.
+        let wallClock = MMDateTime.now(in: TimeZone(secondsFromGMT: 0)!)
+        #expect(abs(wallClock.secondsSinceEpochAsUTC - seconds) <= 2)
+        let today = MMDate.today(in: TimeZone(secondsFromGMT: 0)!)
+        #expect(abs(today - utcNow.dateTime.date) <= 1)
+    }
+
     // MARK: - DateComponents interop
 
     @Test("the fixed kinds round-trip through DateComponents")

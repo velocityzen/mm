@@ -311,6 +311,8 @@ private enum ParsedFieldDefault {
     case integer(String)
     case floating(String)
     case boolean(String)
+    /// `.now` — the moment of use; calendar/clock fields only.
+    case now
 }
 
 private enum ParsedCLIArgument {
@@ -634,6 +636,10 @@ private func validateFieldDefault(
             }
         case .bool:
             guard case .boolean = flagDefault else { throw mismatch("a boolean literal") }
+        case .date, .datetime, .timestamp:
+            guard case .now = flagDefault else {
+                throw mismatch("`.now` — the only default a calendar/clock field takes")
+            }
         case .map, .structure, .external:
             guard case .string = flagDefault else {
                 throw mismatch("a string literal (the option takes JSON text)")
@@ -648,7 +654,7 @@ private func validateFieldDefault(
             guard case .string = flagDefault else {
                 throw mismatch("a string literal (the option takes JSON text)")
             }
-        case .optional, .array, .date, .datetime, .timestamp:
+        case .optional, .array:
             throw SchemaMacroError(
                 description:
                     "Call(\"\(call.name)\"): field \"\(field.name)\" default: is not supported for this field type"
@@ -980,6 +986,11 @@ private func parseFieldDefault(
         sign = "-"
         body = prefixed.expression
     }
+    if sign.isEmpty, let member = body.as(MemberAccessExprSyntax.self),
+        member.base == nil, member.declName.baseName.text == "now"
+    {
+        return .now
+    }
     if sign.isEmpty, let literal = stringLiteral(body) {
         return .string(literal)
     }
@@ -994,7 +1005,7 @@ private func parseFieldDefault(
     }
     throw SchemaMacroError(
         description:
-            "\(context): default must be a string, integer, float, or boolean literal (static subset)"
+            "\(context): default must be a string, integer, float, or boolean literal, or .now (static subset)"
     )
 }
 
@@ -2072,6 +2083,15 @@ private func emitField(
             case .string(let value): literal = quoted(value)
             case .integer(let source), .floating(let source), .boolean(let source):
                 literal = source
+            case .now:
+                // Validated: .now only on an optional calendar/clock field.
+                // Evaluated when the command's properties initialize — the
+                // moment of invocation, not of generation.
+                switch field.type {
+                    case .optional(.date): literal = "MMDate.today()"
+                    case .optional(.datetime): literal = "MMDateTime.now()"
+                    default: literal = "MMTimestamp.now()"
+                }
         }
         defaultAsFlagArgument = "defaultAsFlag: \(literal)"
     }

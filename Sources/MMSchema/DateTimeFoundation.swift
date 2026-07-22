@@ -84,6 +84,58 @@ extension MMTimestamp {
     }
 }
 
+// MARK: - The current moment
+
+/// `Date()` is the wall-clock source here — the one legitimate use: these
+/// constructors exist so application code has a sanctioned way to say "now"
+/// without the core types growing a clock. Server/client code measuring
+/// elapsed time still uses monotonic clocks, never this.
+extension MMTimestamp {
+    /// The current instant. Defaults to offset zero (`Z`) — the canonical
+    /// rendering for machine timestamps; pass a zone for local-time
+    /// presentation (`MMTimestamp.now(in: .current)`). Nanosecond field
+    /// carries the sub-second reading at the clock's own precision.
+    public static func now(in timeZone: TimeZone = TimeZone(secondsFromGMT: 0)!) -> MMTimestamp {
+        let date = Date()
+        // Time zone offsets are whole minutes in every modern zone; the
+        // division cannot lose anything the wire grammar could carry.
+        let offsetMinutes = timeZone.secondsFromGMT(for: date) / 60
+        let interval = date.timeIntervalSince1970
+        var seconds = Int(interval.rounded(.down))
+        var nanoseconds = Int(((interval - interval.rounded(.down)) * 1_000_000_000).rounded())
+        if nanoseconds == 1_000_000_000 {
+            seconds += 1
+            nanoseconds = 0
+        }
+        // Force unwraps: the epoch is a valid datetime, "now" plus any legal
+        // offset stays inside year 0...9999 for the next several millennia,
+        // and the offset is within ±18:00 by TimeZone's own contract.
+        let epoch = MMDateTime(
+            date: MMDate(year: 1970, month: 1, day: 1)!,
+            hour: 0, minute: 0, second: 0
+        )!
+        let local = epoch.shifted(
+            seconds: seconds + offsetMinutes * 60, nanoseconds: nanoseconds)!
+        return MMTimestamp(dateTime: local, offsetMinutes: offsetMinutes)!
+    }
+}
+
+extension MMDateTime {
+    /// The current wall-clock reading in a zone (the local calendar and
+    /// clock by default). A wall clock carries no offset — use
+    /// ``MMTimestamp/now(in:)`` when the instant matters.
+    public static func now(in timeZone: TimeZone = .current) -> MMDateTime {
+        MMTimestamp.now(in: timeZone).dateTime
+    }
+}
+
+extension MMDate {
+    /// Today's calendar date in a zone (the local calendar by default).
+    public static func today(in timeZone: TimeZone = .current) -> MMDate {
+        MMTimestamp.now(in: timeZone).dateTime.date
+    }
+}
+
 extension MMVPTS {
     /// The value as `DateComponents`: present fields map one to one —
     /// variable precision is exactly what `DateComponents` models. A

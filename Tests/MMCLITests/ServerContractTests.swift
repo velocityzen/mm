@@ -98,7 +98,7 @@ private func appendOnce(_ client: MMClientConnection) async throws -> Ledger.App
             Ledger.append, on: cliTestEntity("ledger"),
             Ledger.AppendRequest(
                 line: "x", kind: .credit, meta: nil, count: nil, force: false, tag: nil,
-                origin: nil, tint: nil, format: nil)),
+                origin: nil, tint: nil, format: nil, when: nil)),
         method: "ledger.append", entity: "ledger")
 }
 

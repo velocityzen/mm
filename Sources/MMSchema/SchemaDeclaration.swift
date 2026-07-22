@@ -513,7 +513,8 @@ private func validTypeName(_ name: String) -> String {
 }
 
 /// The literal behind a field's `default:` — written directly as a string,
-/// integer, float, or boolean literal, matching the field's wire type.
+/// integer, float, or boolean literal matching the field's wire type, or
+/// ``now`` on a calendar/clock field.
 public struct FieldDefault: Sendable, Hashable,
     ExpressibleByStringLiteral, ExpressibleByIntegerLiteral,
     ExpressibleByFloatLiteral, ExpressibleByBooleanLiteral
@@ -523,9 +524,20 @@ public struct FieldDefault: Sendable, Hashable,
         case integer(Int64)
         case floating(Double)
         case boolean(Bool)
+        case now
     }
 
     let kind: Kind
+
+    private init(kind: Kind) {
+        self.kind = kind
+    }
+
+    /// The moment of use, for `.date`/`.datetime`/`.timestamp` fields (the
+    /// only default they take): a generated CLI evaluates it per invocation
+    /// — `MMTimestamp.now()` (offset zero), `MMDateTime.now()`, or
+    /// `MMDate.today()` by field kind.
+    public static let now = FieldDefault(kind: .now)
 
     public init(stringLiteral value: String) { self.kind = .string(value) }
     public init(integerLiteral value: Int64) { self.kind = .integer(value) }

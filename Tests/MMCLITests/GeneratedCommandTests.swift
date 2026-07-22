@@ -31,6 +31,7 @@ enum Ledger: MethodNamespace {
                 Field("origin", .optional(.string), cli: .option(short: .auto))
                 Field("tint", .optional(.string), cli: .option("color", short: .auto))
                 Field("format", .optional(.string), default: "json")
+                Field("when", .optional(.timestamp), default: .now)
             }
             Response { Field("total", .int) }
         }
@@ -159,6 +160,18 @@ struct GeneratedCommandTests {
         #expect(help.contains("default as flag: json"))
     }
 
+    @Test("default: .now on a timestamp field means the moment of invocation")
+    func nowDefault() throws {
+        let base = ["--socket", "/tmp/ledger.sock", "ledger.main", "x", "--kind", "credit"]
+        #expect(try Ledger.AppendCommand.parse(base).when == nil)
+        let explicit = try Ledger.AppendCommand.parse(base + ["--when", "2026-01-01T00:00:00Z"])
+        #expect(explicit.when == MMTimestamp("2026-01-01T00:00:00Z"))
+        let stamped = try #require(try Ledger.AppendCommand.parse(base + ["--when"]).when)
+        // The bare flag reads the clock at parse: offset zero, a sane year.
+        #expect(stamped.offsetMinutes == 0)
+        #expect(stamped.dateTime.date.year >= 2026)
+    }
+
     @Test("short: .auto derives the short from the long name, renamed or not")
     func derivedShorts() throws {
         let command = try Ledger.AppendCommand.parse([
@@ -252,6 +265,7 @@ struct GeneratedCommandTests {
                     Field("origin", .optional(.string))
                     Field("tint", .optional(.string))
                     Field("format", .optional(.string), default: "json")
+                    Field("when", .optional(.timestamp), default: .now)
                 }
                 Response { Field("total", .int) }
             }

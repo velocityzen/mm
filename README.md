@@ -169,7 +169,7 @@ Daemons drop `MMClientConnectionService(connection:)` into their `ServiceGroup` 
 
 ### CLI
 
-The same declaration can generate a command-line tool. A top-level `CLI(.enabled)` entry in the block additionally emits one swift-argument-parser command per call — names, `--help` text, and argument shapes all from the contract — plus a namespace group; the file then imports `ArgumentParser` and `MMCLI`. A per-call `CLI(...)` part renames or omits commands, `Field(..., cli:)` shapes arguments (positional, flag, short — explicit or `short: .auto` deriving `-x` from the long name — renamed, omitted), and a `Field(..., default:)` literal makes the option hybrid: a bare `--format` means the default, and none of it touches the wire: the overlay is never served, fingerprinted, or compared.
+The same declaration can generate a command-line tool. A top-level `CLI(.enabled)` entry in the block additionally emits one swift-argument-parser command per call — names, `--help` text, and argument shapes all from the contract — plus a namespace group; the file then imports `ArgumentParser` and `MMCLI`. A per-call `CLI(...)` part renames or omits commands, `Field(..., cli:)` shapes arguments (positional, flag, short — explicit or `short: .auto` deriving `-x` from the long name — renamed, omitted), and a `Field(..., default:)` literal makes the option hybrid: a bare `--format` means the default (`default: .now` on date/time fields stamps the invocation moment), and none of it touches the wire: the overlay is never served, fingerprinted, or compared.
 
 ```swift
 Call("append", description: "Appends one line to a journal") {
