@@ -193,6 +193,39 @@ struct ClientIntegrationTests {
         }
     }
 
+    @Test("calendar and clock values round-trip the wire exactly")
+    func dateKindsRoundTrip() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                let payload = WhenPayload(
+                    day: MMDate(year: 2026, month: 2, day: 29)
+                        ?? MMDate(year: 2026, month: 2, day: 28)!,
+                    slot: MMDateTime(
+                        date: MMDate(year: 2026, month: 7, day: 21)!,
+                        hour: 14, minute: 30, second: 0, nanosecond: 250_000_000)!,
+                    created: MMTimestamp(
+                        dateTime: MMDateTime(
+                            date: MMDate(year: 2026, month: 7, day: 21)!,
+                            hour: 12, minute: 0, second: 0)!,
+                        offsetMinutes: -570)!,
+                    remind: nil
+                )
+                let (reply, runResult) = try await withConnectedClient(unixPath: path) {
+                    connection in
+                    // Entity inference on the single-entity route: the echo
+                    // proves encode → wire → decode is byte-faithful for all
+                    // three kinds, fraction and negative offset included.
+                    await connection.call(TestMethods.when, payload)
+                }
+                #expect(reply == .success(payload))
+                if case .failure(let error) = runResult {
+                    Issue.record("run() must end cleanly, got \(error)")
+                }
+            }
+        }
+    }
+
     @Test("a typed call round-trips: encode, authorize, dispatch, decode")
     func typedEchoRoundTrip() async throws {
         try await withTempSocketPath { path in

@@ -95,6 +95,25 @@ extension SchemaValue {
             case .string:
                 guard case .string = self else { return self.mismatch(path, expected: "string") }
                 return .success(self)
+            case .date:
+                guard case .string(let text) = self, case .success = MMDate.parse(text) else {
+                    return self.mismatch(path, expected: "ISO date (YYYY-MM-DD)")
+                }
+                return .success(self)
+            case .datetime:
+                guard case .string(let text) = self, case .success = MMDateTime.parse(text)
+                else {
+                    return self.mismatch(
+                        path, expected: "ISO datetime (YYYY-MM-DDTHH:MM:SS[.fff])")
+                }
+                return .success(self)
+            case .timestamp:
+                guard case .string(let text) = self, case .success = MMTimestamp.parse(text)
+                else {
+                    return self.mismatch(
+                        path, expected: "ISO timestamp (YYYY-MM-DDTHH:MM:SS[.fff]Z|±HH:MM)")
+                }
+                return .success(self)
             case .bytes:
                 switch self {
                     case .bytes:

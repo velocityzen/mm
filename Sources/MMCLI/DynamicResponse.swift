@@ -74,7 +74,7 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                 return .double(Double(try decoder.singleValueContainer().decode(Float.self)))
             case .double:
                 return .double(try decoder.singleValueContainer().decode(Double.self))
-            case .string, .enumeration:
+            case .string, .enumeration, .date, .datetime, .timestamp:
                 return .string(try decoder.singleValueContainer().decode(String.self))
             case .bytes:
                 return .bytes(
@@ -189,7 +189,7 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                 return .double(Double(try container.decode(Float.self, forKey: key)))
             case .double:
                 return .double(try container.decode(Double.self, forKey: key))
-            case .string, .enumeration:
+            case .string, .enumeration, .date, .datetime, .timestamp:
                 return .string(try container.decode(String.self, forKey: key))
             case .bytes:
                 return .bytes(Self.rawBytes(try container.decode(ByteBuffer.self, forKey: key)))
@@ -236,7 +236,7 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                 return .double(Double(try container.decode(Float.self)))
             case .double:
                 return .double(try container.decode(Double.self))
-            case .string, .enumeration:
+            case .string, .enumeration, .date, .datetime, .timestamp:
                 return .string(try container.decode(String.self))
             case .bytes:
                 return .bytes(Self.rawBytes(try container.decode(ByteBuffer.self)))

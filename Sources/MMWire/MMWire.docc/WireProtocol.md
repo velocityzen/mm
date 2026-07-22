@@ -454,7 +454,20 @@ Tag table:
 | 10 | structure | key 1: array of Field |
 | 11 | enumeration | key 1: array of EnumCase |
 | 12 | reference | key 1: qualified type name (string) |
+| 13 | date | — (ISO calendar date string; grammar below) |
+| 14 | datetime | — (ISO wall-clock datetime string, no offset; grammar below) |
+| 15 | timestamp | — (ISO datetime-with-offset string, an absolute instant; grammar below) |
 | 255 | unknown | — |
+
+**Calendar and clock values (tags 13–15).** All three encode as MessagePack **strings** in canonical ISO 8601 / RFC 3339 form; they are distinct schema kinds — not strings — because they carry different semantics (a `date` has no time zone by nature; a `datetime` is a floating wall-clock reading; a `timestamp` is an absolute instant). Grammar (normative):
+
+```
+date      := YYYY "-" MM "-" DD                       ; 2026-07-21
+datetime  := date "T" HH ":" MM ":" SS [ "." 1*9DIGIT ] ; 2026-07-21T14:30:00.5
+timestamp := datetime ( "Z" | ("+"/"-") HH ":" MM )    ; ...Z or ...+02:00
+```
+
+All numeric fields are fixed-width zero-padded; year 0000–9999, proleptic Gregorian (leap years validated); hour 00–23, minute 00–59, second 00–60 (leap second allowed); the fraction is 1–9 digits (nanosecond precision); the offset is within ±18:00. **Canonical emission**: seconds always present, the fraction only when non-zero with trailing zeros trimmed, uppercase `T`/`Z`, and `Z` for offset zero. **Parsers accept** two liberties only: lowercase `t`/`z`, and `±00:00` as an alias of `Z` (both re-emit canonically). A value that does not parse is a decode failure of its payload, answered like any malformed payload (`malformedParams`, code 3, for a request slot).
 
 A `structure`'s fields appear in **declaration order** (the order the type's decoder requests them). `Field` is an int-keyed struct: key 0 = `key` (the field's integer wire key, or nil/absent for string-keyed fields), key 1 = `name` (string), key 2 = `type` (TypeSchema), key 3 = `description` (string, **optional**, documentation only).
 
@@ -491,7 +504,7 @@ A simple tagged, length-prefixed byte encoding — deliberately **not** MessageP
 
 **signature** := name (string) ‖ access (`u8`, the raw rwx bits) ‖ request schema ‖ response schema ‖ *stream entries, emitted only when present*: `u8` tag `1` then the request-stream element schema; `u8` tag `2` then the response-stream element schema. A method with no streams emits neither entry, so any unary-only set hashes to exactly its pre-streaming value (the golden of 9.4 is unchanged); the distinct tags keep the request and response stream slots asymmetric.
 
-**schema** := `u8` case tag (the same values as the wire tag table in 8.3: 0 bool, 1 int, 2 uint, 3 float, 4 double, 5 string, 6 bytes, 7 optional, 8 array, 9 map, 10 structure, 255 unknown), then payload:
+**schema** := `u8` case tag (the same values as the wire tag table in 8.3: 0 bool, 1 int, 2 uint, 3 float, 4 double, 5 string, 6 bytes, 7 optional, 8 array, 9 map, 10 structure, 11 enumeration, 12 reference, 13 date, 14 datetime, 15 timestamp, 255 unknown), then payload:
 
 - `optional` (7), `array` (8): the child schema.
 - `map` (9): the key schema, then the value schema.

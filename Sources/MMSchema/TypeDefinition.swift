@@ -66,7 +66,7 @@ extension TypeSchema {
                 case .structure(let fields):
                     return fields.reduce(into: Set<String>()) { $0.formUnion($1.value) }
                 case .bool, .int, .uint, .float, .double, .string, .bytes,
-                    .enumeration, .unknown:
+                    .date, .datetime, .timestamp, .enumeration, .unknown:
                     return []
             }
         }

@@ -1,4 +1,5 @@
 import ArgumentParser
+import MMSchema
 
 /// CLI conformance for macro-generated wire enums:
 /// `extension Journal.Priority: MMCLIEnumArgument {}` is all a generated
@@ -8,6 +9,27 @@ import ArgumentParser
 /// an `unknown` fallback case for forward compatibility. That case is a
 /// decoding artifact, never a value a caller may send, so this protocol's
 /// defaults hide it from help/completions and refuse it as input.
+/// The calendar/clock kinds as typed command arguments: parsed by the value
+/// types' own strict ISO parsers, so a generated `Field("day", .date)`
+/// becomes a plain `--day 2026-07-21` option.
+extension MMDate: ExpressibleByArgument {
+    public init?(argument: String) {
+        self.init(argument)
+    }
+}
+
+extension MMDateTime: ExpressibleByArgument {
+    public init?(argument: String) {
+        self.init(argument)
+    }
+}
+
+extension MMTimestamp: ExpressibleByArgument {
+    public init?(argument: String) {
+        self.init(argument)
+    }
+}
+
 public protocol MMCLIEnumArgument: ExpressibleByArgument, RawRepresentable, CaseIterable
 where RawValue == String {}
 

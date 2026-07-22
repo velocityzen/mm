@@ -1,14 +1,17 @@
 import MMSchema
 
 /// A companion CLI's build-time claim that the listed contracts are its
-/// server's **entire** surface. Bind it once via ``MMCLIDefaults`` and
+/// server's **entire** surface. Declare it once — ``Contract(_:)`` in the
+/// ``MMCLI(isolation:_:)`` block — and
 /// every invocation verifies the whole composition for free: the expected
 /// hello fingerprint is folded from the contracts (builtins included), so a
 /// matching hello proves every namespace — including the one being called —
 /// with zero extra round-trips.
 ///
 /// ```swift
-/// await withCLI(MMCLIDefaults(serverContract: .complete([journalContract]))) {
+/// await MMCLI {
+///     Contract(.complete([journalContract]))
+/// } run: {
 ///     await MM.main()
 /// }
 /// ```

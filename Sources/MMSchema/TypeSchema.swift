@@ -8,7 +8,8 @@
 /// - key **0**: the case tag, a `UInt8` —
 ///   0 `bool`, 1 `int`, 2 `uint`, 3 `float`, 4 `double`, 5 `string`,
 ///   6 `bytes`, 7 `optional`, 8 `array`, 9 `map`, 10 `structure`,
-///   11 `enumeration`, 12 `reference`, 255 `unknown`.
+///   11 `enumeration`, 12 `reference`, 13 `date`, 14 `datetime`,
+///   15 `timestamp`, 255 `unknown`.
 /// - key **1**: first payload — the wrapped schema for `optional`, the element
 ///   schema for `array`, the key schema for `map`, the field list for
 ///   `structure`, the case list for `enumeration`, the qualified type name
@@ -34,6 +35,14 @@ public indirect enum TypeSchema: Sendable, Hashable {
     /// Raw binary (MessagePack `bin`). Never produced by the probe — types
     /// carrying raw bytes declare it via ``SchemaDescribable``.
     case bytes
+    /// A calendar date — ``MMDate``, an ISO `YYYY-MM-DD` string on the wire.
+    case date
+    /// A wall-clock datetime with no zone — ``MMDateTime``,
+    /// `YYYY-MM-DDTHH:MM:SS[.fff]` on the wire.
+    case datetime
+    /// An absolute instant — ``MMTimestamp``, a datetime with UTC offset
+    /// (`...Z` or `...±HH:MM`) on the wire.
+    case timestamp
     case optional(TypeSchema)
     case array(TypeSchema)
     case map(key: TypeSchema, value: TypeSchema)
@@ -122,7 +131,8 @@ extension TypeSchema {
     ) -> TypeSchema {
         let rebuilt: TypeSchema
         switch self {
-            case .bool, .int, .uint, .float, .double, .string, .bytes, .reference, .unknown:
+            case .bool, .int, .uint, .float, .double, .string, .bytes,
+                .date, .datetime, .timestamp, .reference, .unknown:
                 rebuilt = self
             case .optional(let wrapped):
                 rebuilt = .optional(wrapped.rewritten(node: node, field: field, enumCase: enumCase))
@@ -195,6 +205,9 @@ extension TypeSchema: Codable {
             case .structure: return 10
             case .enumeration: return 11
             case .reference: return 12
+            case .date: return 13
+            case .datetime: return 14
+            case .timestamp: return 15
             case .unknown: return 255
         }
     }
@@ -203,7 +216,8 @@ extension TypeSchema: Codable {
         var container = encoder.container(keyedBy: WireKeys.self)
         try container.encode(tag, forKey: .tag)
         switch self {
-            case .bool, .int, .uint, .float, .double, .string, .bytes, .unknown:
+            case .bool, .int, .uint, .float, .double, .string, .bytes,
+                .date, .datetime, .timestamp, .unknown:
                 break
             case .optional(let wrapped):
                 try container.encode(wrapped, forKey: .first)
@@ -269,6 +283,9 @@ extension TypeSchema: Codable {
                 self =
                     (try? container.decode(String.self, forKey: .first)).map(TypeSchema.reference)
                     ?? .unknown
+            case 13: self = .date
+            case 14: self = .datetime
+            case 15: self = .timestamp
             default:
                 self = .unknown
         }

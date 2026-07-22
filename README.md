@@ -182,22 +182,26 @@ Call("append", description: "Appends one line to a journal") {
 }
 ```
 
-Mount the generated group in a root command and the whole tool is a few lines:
+The whole tool is one declaration — `MMCLI` synthesizes and runs the root command from `Configuration(...)`, and the other parts bind as the invocation's defaults (see the verification paragraph below for what `Contract` buys):
 
 ```swift
 @main
-struct MM: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "mm",
-        subcommands: [Journal.Command.self]
-    )
+struct Main {
+    static func main() async {
+        await MMCLI {
+            Name("mm")
+            Commands([Journal.Command.self, MMCLIDiscover.self, MMCLIRawCall.self])
+            Contract(.complete([journalContract]))
+            Endpoint(.unix(path: "/tmp/mm.sock"))
+        }
+    }
 }
 ```
 
 ```sh
-$ mm journal add journal.notes --line "hello" --socket /tmp/mm.sock
+$ mm journal add journal.notes --line "hello"       # Endpoint(...) supplied the socket
 {"count":1}
-$ mm journal add journal.system --line "nope" --socket /tmp/mm.sock
+$ mm journal add journal.system --line "nope"
 denied: journal.append on journal.system            # exit code 77
 ```
 
@@ -205,9 +209,9 @@ denied: journal.append on journal.system            # exit code 77
 
 So the entity is the one argument every command has, always the leading positional. Request fields default to `--field-name` options; opting a field into positional style is explicit — `Field("line", .string, cli: .argument)` turns the same command into `mm journal add journal.notes "hello"` (the shape the runnable example in `Examples/` uses).
 
-Unary calls print their response as JSON (`--output json-pretty` to taste); server-stream commands print elements as JSON lines with SIGINT mapped to a graceful STOP; client-stream commands read stdin. `MMCLI` also ships schema-driven generic commands: `discover` (what the server serves) and `call` (invoke any method by wire name with `--params` JSON).
+Unary calls print their response as JSON (`--output json-pretty` to taste); server-stream commands print elements as JSON lines with SIGINT mapped to a graceful STOP; client-stream commands read stdin. `--output text` renders per command: a `Format(SomeResponse.self) { ... }` declaration in the `MMCLI { }` block, else the type's own `CustomStringConvertible`, else JSON — the json formats never consult either, so scripts stay stable. `MMCLI` also ships schema-driven generic commands: `discover` (what the server serves) and `call` (invoke any method by wire name with `--params` JSON).
 
-**Schema verification is automatic — never manual.** Every generated command confirms its own namespace against the live server before dispatching (one scoped discovery diff; drift prints the difference and exits 76; `--no-verify` skips it for one invocation). A purpose-built CLI upgrades that to a free check: bind the build-time defaults around the root command's run — `await withCLI(MMCLIDefaults(serverContract: .complete([journalContract]), endpoint: .unix(path: socketPath))) { await MM.main() }` (a task-local: build-time knowledge, no process-global state; the endpoint default makes `--socket`/`--tcp` optional) — and the expected whole-server hello fingerprint is folded at build time from the same declarations the daemon compiled (builtins included), so a matching hello proves the entire composition with zero extra round-trips; on mismatch, commands fall back to the scoped diff of the namespace in use. A server that registers shared `Types(...)` containers folds their definitions too — pass the same declarations (`sharedTypes:`) to the claim, or it can never match. Embedding clients get the same automation: set `configuration.schema = .complete([journalContract])` (or `.partial` for a client that uses a slice of the server; both take `sharedTypes:` when the server registers shared `Types(...)` containers) and the connection verifies itself right after connect — `await connection.verify()` yields `.ok` (whole composition proven from the hello), `.partial` (your contracts are in sync; the composition changed elsewhere), or `.difference(differences)` — never a disconnect. For humans and scripts there is still the explicit `verify` subcommand per group — there is no manual fingerprint anywhere, CLI or library; the fingerprint is build knowledge folded from contracts, never something an operator types.
+**Schema verification is automatic — never manual.** Every generated command confirms its own namespace against the live server before dispatching (one scoped discovery diff; drift prints the difference and exits 76; `--no-verify` skips it for one invocation). A purpose-built CLI upgrades that to a free check: declare the whole tool as data — `await MMCLI { Name("mm"); Commands([...]); Contract(.complete([journalContract])); Endpoint(.unix(path: socketPath)) }` synthesizes and runs the root command, binds the declarations as a task-local (no process-global state), and makes `--socket`/`--tcp` optional via the endpoint — and the expected whole-server hello fingerprint is folded at build time from the same declarations the daemon compiled (builtins included), so a matching hello proves the entire composition with zero extra round-trips; on mismatch, commands fall back to the scoped diff of the namespace in use. A server that registers shared `Types(...)` containers folds their definitions too — pass the same declarations (`sharedTypes:`) to the claim, or it can never match. Embedding clients get the same automation: set `configuration.schema = .complete([journalContract])` (or `.partial` for a client that uses a slice of the server; both take `sharedTypes:` when the server registers shared `Types(...)` containers) and the connection verifies itself right after connect — `await connection.verify()` yields `.ok` (whole composition proven from the hello), `.partial` (your contracts are in sync; the composition changed elsewhere), or `.difference(differences)` — never a disconnect. For humans and scripts there is still the explicit `verify` subcommand per group — there is no manual fingerprint anywhere, CLI or library; the fingerprint is build knowledge folded from contracts, never something an operator types.
 
 ## Streaming
 

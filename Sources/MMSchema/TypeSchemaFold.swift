@@ -4,6 +4,7 @@ extension TypeSchema {
     /// transform handles exactly one case with no recursion of its own.
     public enum FoldStep<Result> {
         case bool, int, uint, float, double, string, bytes
+        case date, datetime, timestamp
         case optional(Result)
         case array(Result)
         case map(key: Result, value: Result)
@@ -45,6 +46,9 @@ extension TypeSchema {
             case .double: return try transform(.double)
             case .string: return try transform(.string)
             case .bytes: return try transform(.bytes)
+            case .date: return try transform(.date)
+            case .datetime: return try transform(.datetime)
+            case .timestamp: return try transform(.timestamp)
             case .optional(let wrapped):
                 return try transform(
                     .optional(try wrapped.foldImplementation(resolver, inFlight, transform))

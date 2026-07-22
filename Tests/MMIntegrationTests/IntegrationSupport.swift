@@ -200,6 +200,11 @@ enum TestMethods {
     /// not `box`, not siblings, not children.
     static let scopedExact = Method<EchoRequest, EchoResponse>(
         name: "scoped.exact", access: .read)
+    /// Echoes a payload of all three calendar/clock kinds — the MessagePack
+    /// round-trip proof for `.date`/`.datetime`/`.timestamp` wire values.
+    /// Under the discovery-invisible `scoped` prefix like its siblings.
+    static let when = Method<WhenPayload, WhenPayload>(
+        name: "scoped.when", access: .read)
 
     // MARK: - Streaming fixtures (S3)
 
@@ -298,6 +303,22 @@ struct ImportRequest: Codable, Hashable, Sendable {
     enum CodingKeys: Int, CodingKey {
         case entity = 0
         case stopAfter = 1
+    }
+}
+
+/// A payload carrying all three calendar/clock kinds (plus an optional), for
+/// the wire round-trip proof.
+struct WhenPayload: Codable, Hashable, Sendable {
+    var day: MMDate
+    var slot: MMDateTime
+    var created: MMTimestamp
+    var remind: MMTimestamp?
+
+    enum CodingKeys: Int, CodingKey {
+        case day = 0
+        case slot = 1
+        case created = 2
+        case remind = 3
     }
 }
 
@@ -442,6 +463,9 @@ func makeTestServer(
         }
         Handle(TestMethods.scopedExact, Accepts("box.item")) { request, _ in
             .success(EchoResponse(value: request.value))
+        }
+        Handle(TestMethods.when, Accepts("box.item")) { request, _ in
+            .success(request)
         }
         Handle(TestMethods.version) { _, context in
             .success(VersionResponse(version: context.protocolVersion))

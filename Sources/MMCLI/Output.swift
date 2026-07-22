@@ -21,14 +21,29 @@ public struct MMCLIOutput: Sendable {
     /// `sortedKeys` keeps output deterministic and diff-friendly.
     /// ``OutputFormat/raw`` currently renders as compact JSON (a dedicated
     /// raw renderer is a later phase; the flag exists so scripts written
-    /// today keep working).
+    /// today keep working). ``OutputFormat/text`` renders through the first
+    /// of: the tool's per-type ``Format(_:_:)`` entry (bound in
+    /// ``MMCLIDefaults/formatters``); the type's own
+    /// `CustomStringConvertible` conformance — the Swift-native way to give
+    /// a generated response or element its text form, no registry needed
+    /// (`extension Journal.ReadResponse: CustomStringConvertible { ... }`);
+    /// else compact JSON. Stream elements and terminals alike; the `json`
+    /// formats never consult either.
     public static func render<T: Encodable>(
         _ value: T,
         format: OutputFormat
     ) throws -> String {
+        if format == .text {
+            if let rendered = MMCLIDefaults.current.formatters.render(value) {
+                return rendered
+            }
+            if let convertible = value as? any CustomStringConvertible {
+                return convertible.description
+            }
+        }
         let encoder = JSONEncoder()
         switch format {
-            case .json, .raw:
+            case .json, .raw, .text:
                 encoder.outputFormatting = [.sortedKeys]
             case .jsonPretty:
                 encoder.outputFormatting = [.sortedKeys, .prettyPrinted]

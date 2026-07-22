@@ -8,7 +8,7 @@ A runnable pair demonstrating the full matter-in-motion story — schema definit
 - [Daemon/JournalStore.swift](Daemon/JournalStore.swift) — the application state in its own file: an actor holding the journals, delegating the cross-connection change fan-out (every append, from any connection, broadcasts a `ChangeEvent` to that journal's followers) to [Daemon/FollowerHub.swift](Daemon/FollowerHub.swift) — a lock-guarded registry so each follower stream's synchronous `onTermination` can unregister a dead consumer without spawning a task; both cleanup paths (handler exit and stream termination) race safely.
 - [Client/Client.swift](Client/Client.swift) — a CLI client whose whole lifecycle is one `MMClientConnection.with(...)` bracket (acquire connects and starts the inbound loop; dispose closes and joins it), with every step multiplexed over that single connection and **one pattern per function**, each a self-contained recipe: `verify` (automatic schema verification), `discover` (discovery + `SchemaDifference`), `append`/`read` (unary calls), `follow` (server → client stream with a graceful STOP), `importLines` (client → server stream), `sync` (duplex — both directions streaming on one call), and `appendDenied` (a deliberate authorization denial).
 
-- [CLI/CLI.swift](CLI/CLI.swift) — the generated command-line face: `#schema("journal", cli: .enabled)` emits every subcommand (names, help, argument shapes) from the same contract declaration; this file is just the root command mounting `Journal.Command`. The `CLI(.command("add", aliases: ["append"]))` overlay renames `journal.append` to `journal add` without touching the wire.
+- [CLI/CLI.swift](CLI/CLI.swift) — the generated command-line face: `#schema("journal", cli: .enabled)` emits every subcommand (names, help, argument shapes) from the same contract declaration; the whole tool is one `MMCLI { Name(...); Abstract(...); Commands([...]); Contract(...); Endpoint(...); Format(...) }` declaration — the CLI twin of the daemon's `MMService { ... }`: the root command is synthesized from the root-shape parts (`Name`/`Abstract`/`Commands`, with a full `Configuration(...)` as the escape hatch), the contract claim verifies every invocation from the hello fingerprint, `Endpoint` makes `--socket` optional, and the `Format` entries drive `--output text`. The `CLI(.command("add", aliases: ["append"]))` overlay renames `journal.append` to `journal add` without touching the wire.
 
 ## Run it
 
@@ -22,8 +22,8 @@ swift run mm-example-client            # terminal 2
 Or drive the daemon with the generated CLI instead:
 
 ```sh
-swift run mm-example-cli journal add journal.notes "hello" --socket /tmp/mm-example.sock
-swift run mm-example-cli journal read journal.notes --socket /tmp/mm-example.sock --output json-pretty
+swift run mm-example-cli journal add journal.notes "hello"   # Endpoint(...) supplies the socket
+swift run mm-example-cli journal read journal.notes --output text
 swift run mm-example-cli journal --help
 ```
 

@@ -170,6 +170,9 @@ public struct MMCLIDynamicRequest: Codable, Sendable {
             case .map: return "map"
             case .structure: return "structure"
             case .enumeration: return "enumeration"
+            case .date: return "date"
+            case .datetime: return "datetime"
+            case .timestamp: return "timestamp"
             case .reference(let name): return "reference(\(name))"
             case .unknown: return "unknown"
         }
@@ -230,7 +233,7 @@ private struct DynamicRequestNode: Encodable {
                 }
                 var single = encoder.singleValueContainer()
                 try single.encode(number)
-            case .string, .enumeration:
+            case .string, .enumeration, .date, .datetime, .timestamp:
                 guard case .string(let text) = self.value else {
                     throw self.invalid(encoder, expected: "string")
                 }

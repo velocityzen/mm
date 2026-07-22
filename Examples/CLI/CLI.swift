@@ -9,11 +9,21 @@ import MMExampleAPI
 /// by its `CLI(.command("add"))` overlay).
 ///
 /// ```sh
-/// swift run mm-example-daemon                                  # terminal 1
-/// swift run mm-example-cli journal add journal.notes "hello" \
-///     --socket /tmp/mm-example.sock                            # terminal 2
-/// swift run mm-example-cli journal read journal.notes --socket /tmp/mm-example.sock
+/// swift run mm-example-daemon                       # terminal 1
+/// swift run mm-example-cli journal add journal.notes "hello"   # terminal 2
+/// swift run mm-example-cli journal read journal.notes --output text
 /// ```
+///
+/// The whole tool is one declaration — the CLI twin of the daemon's
+/// `MMService { ... }`. `MMCLI` synthesizes and runs the root command from
+/// `Configuration(...)` (parse, async dispatch, help, and exit codes all
+/// through ArgumentParser); the other declarations bind as a task-local for
+/// the invocation: the contract claim verifies the whole composition for
+/// free from the hello fingerprint (a grown daemon falls back to a scoped
+/// discovery diff automatically), `Endpoint` makes `--socket`/`--tcp`
+/// optional, and the `Format` entries give `--output text` per-command
+/// rendering keyed by the generated types (json formats always bypass them,
+/// so scripts stay stable).
 ///
 /// `journal.notes` is the target **entity** — the noun of the call, and every
 /// command's leading positional. It comes from the daemon's ACL tree
@@ -22,42 +32,28 @@ import MMExampleAPI
 /// entity tree is runtime state — syscall table versus file paths. That is
 /// why `journal add journal.system "x"` is denied (root-owned entity) while
 /// the identical verb on `journal.notes` succeeds, with zero schema
-/// difference between the two. The two `journal`s in `journal add
-/// journal.notes` are unrelated spellings: the command group is the method
-/// namespace; the entity path shares that prefix only by convention.
-struct MMExampleCLI: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "mm-example-cli",
-        abstract: "Talks to mm-example-daemon over its Unix socket.",
-        subcommands: [
-            Journal.Command.self,
-            // Schema-driven generics from MMCLI: what the server serves, and
-            // any method by wire name.
-            MMCLIDiscover.self,
-            MMCLIRawCall.self,
-        ]
-    )
-}
-
-/// The entry point: the build-time defaults bound around the root command's
-/// own `main()`. `@main` lives on a plain struct — not the command — so
-/// ArgumentParser's parse/dispatch/exit choreography runs unchanged inside
-/// the binding; there is no boilerplate to hide. The defaults are a
-/// task-local, never installed: the example daemon serves exactly the
-/// journal contract (every invocation verifies the whole composition for
-/// free from the hello fingerprint; a grown daemon falls back to a scoped
-/// discovery diff automatically), and the daemon's well-known socket fills
-/// in when `--socket`/`--tcp` are omitted.
+/// difference between the two.
 @main
-struct Main {
+struct MMExampleCLI {
     static func main() async {
-        await withCLI(
-            MMCLIDefaults(
-                serverContract: .complete([journalContract]),
-                endpoint: .unix(path: "/tmp/mm-example.sock")
-            )
-        ) {
-            await MMExampleCLI.main()
+        await MMCLI {
+            Name("mm-example-cli")
+            Abstract("Talks to mm-example-daemon over its Unix socket.")
+            Commands([
+                Journal.Command.self,
+                // Schema-driven generics from MMCLI: what the server serves,
+                // and any method by wire name.
+                MMCLIDiscover.self,
+                MMCLIRawCall.self,
+            ])
+            Contract(.complete([journalContract]))
+            Endpoint(.unix(path: "/tmp/mm-example.sock"))
+            // Both spellings: explicit metatype, or the type inferred from
+            // the closure parameter.
+            Format(ChangeEvent.self) { "\($0.count)\t\($0.line)" }
+            Format { (response: Journal.ReadResponse) in
+                response.lines.joined(separator: "\n")
+            }
         }
     }
 }

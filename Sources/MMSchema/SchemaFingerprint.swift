@@ -134,7 +134,8 @@ public enum SchemaFingerprint {
         // `TypeSchema.tag` numbers rather than restating them.
         bytes.append(schema.tag)
         switch schema {
-            case .bool, .int, .uint, .float, .double, .string, .bytes, .unknown:
+            case .bool, .int, .uint, .float, .double, .string, .bytes,
+                .date, .datetime, .timestamp, .unknown:
                 break
             case .optional(let wrapped):
                 append(wrapped, into: &bytes)

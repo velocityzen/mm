@@ -392,6 +392,9 @@ private func kebabCased(_ name: String) -> String {
 
 private indirect enum ParsedType {
     case bool, int, uint, float, double, string
+    /// The calendar/clock kinds: generated properties use the MMSchema
+    /// value types (`MMDate`, `MMDateTime`, `MMTimestamp`).
+    case date, datetime, timestamp
     case optional(ParsedType)
     case array(ParsedType)
     case map(key: ParsedType, value: ParsedType)
@@ -562,7 +565,8 @@ private func validate(types: [ParsedTypeDecl], calls: [ParsedCall]) throws {
     }
     func check(_ type: ParsedType, context: String) throws {
         switch type {
-            case .bool, .int, .uint, .float, .double, .string, .external:
+            case .bool, .int, .uint, .float, .double, .string,
+                .date, .datetime, .timestamp, .external:
                 break
             case .optional(let wrapped):
                 try check(wrapped, context: context)
@@ -1149,6 +1153,9 @@ private func parseType(_ expr: ExprSyntax, context: String) throws -> ParsedType
             case "float": return .float
             case "double": return .double
             case "string": return .string
+            case "date": return .date
+            case "datetime": return .datetime
+            case "timestamp": return .timestamp
             case "bytes", "unknown":
                 throw SchemaMacroError(
                     description:
@@ -1235,6 +1242,9 @@ private func swiftType(_ type: ParsedType) -> String {
         case .float: return "Float"
         case .double: return "Double"
         case .string: return "String"
+        case .date: return "MMDate"
+        case .datetime: return "MMDateTime"
+        case .timestamp: return "MMTimestamp"
         case .optional(let wrapped): return "\(swiftType(wrapped))?"
         case .array(let element): return "[\(swiftType(element))]"
         case .map(let key, let value): return "[\(swiftType(key)): \(swiftType(value))]"
@@ -1255,6 +1265,9 @@ private func schemaLiteral(_ type: ParsedType, namespace: String) throws -> Stri
         case .float: return ".float"
         case .double: return ".double"
         case .string: return ".string"
+        case .date: return ".date"
+        case .datetime: return ".datetime"
+        case .timestamp: return ".timestamp"
         case .optional(let wrapped):
             return ".optional(\(try schemaLiteral(wrapped, namespace: namespace)))"
         case .array(let element):
@@ -1644,7 +1657,8 @@ private func commandFieldForm(
     if case .omitted = field.cliHint { return .omitted }
     func isDirect(_ type: ParsedType) -> Bool {
         switch type {
-            case .bool, .int, .uint, .float, .double, .string:
+            case .bool, .int, .uint, .float, .double, .string,
+                .date, .datetime, .timestamp:
                 return true
             case .reference(let name):
                 return enumNames.contains(name)

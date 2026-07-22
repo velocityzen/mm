@@ -24,6 +24,17 @@ struct MMCLIOptionsTests {
         }
     }
 
+    @Test("a bound default output applies when --output is omitted; the flag wins")
+    func boundDefaultOutput() throws {
+        try MMCLIDefaults.$current.withValue(MMCLIDefaults(output: .text)) {
+            let defaulted = try MMCLIOptions.parse(["--socket", "/tmp/x.sock"])
+            #expect(defaulted.output == .text)
+            let explicit = try MMCLIOptions.parse(
+                ["--socket", "/tmp/x.sock", "--output", "json"])
+            #expect(explicit.output == .json)
+        }
+    }
+
     @Test("--socket maps to a unix endpoint")
     func socketEndpoint() throws {
         let options = try MMCLIOptions.parse(["--socket", "/tmp/x.sock"])

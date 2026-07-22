@@ -12,15 +12,20 @@ public enum OutputFormat: String, ExpressibleByArgument, CaseIterable, Sendable 
     /// Reserved for a future raw renderer; currently identical to ``json``
     /// (documented on ``MMCLIOutput/emit(_:format:)``).
     case raw
+    /// Human-readable, resolved per value type: a ``Format(_:_:)``
+    /// declaration, else the type's own `CustomStringConvertible`
+    /// conformance, else compact JSON. Stream elements and terminals alike.
+    case text
 }
 
 /// The shared connection options every generated command embeds via
 /// `@OptionGroup`: where the daemon listens, connection tunables, and the
 /// output format.
 ///
-/// Exactly one of `--socket` / `--tcp` must be given — unless the tool bound
-/// a default endpoint via ``MMCLIDefaults``, in which case both may be
-/// omitted and the default applies (explicit flags always win).
+/// Exactly one of `--socket` / `--tcp` must be given — unless the tool
+/// declared a default endpoint (``Endpoint(_:)`` in its ``MMCLI`` block), in
+/// which case both may be omitted and the default applies (explicit flags
+/// always win).
 /// ``validate()`` enforces that plus the shape of every parsed value, so the
 /// computed ``endpoint`` and ``clientConfiguration`` are only read after a
 /// successful parse.
@@ -37,8 +42,19 @@ public struct MMCLIOptions: ParsableArguments, Sendable {
     @Option(help: ArgumentHelp("Hello-exchange timeout in seconds.", valueName: "seconds"))
     public var helloTimeout: Double?
 
-    @Option(help: ArgumentHelp("Output format for results written to stdout."))
-    public var output: OutputFormat = .json
+    @Option(
+        name: .customLong("output"),
+        help: ArgumentHelp(
+            "Output format for results written to stdout (default: json, or the tool's bound default)."
+        )
+    )
+    var outputFlag: OutputFormat?
+
+    /// The effective output format: the explicit `--output` flag, else the
+    /// tool's bound default (``MMCLIDefaults/output``), else `json`.
+    public var output: OutputFormat {
+        self.outputFlag ?? MMCLIDefaults.current.output ?? .json
+    }
 
     @Flag(
         name: .customLong("no-verify"),
