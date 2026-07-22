@@ -69,6 +69,24 @@ struct AutoVerificationTests {
         }
     }
 
+    @Test("the namespace root call dispatches entity-less over the wire")
+    func rootCallDispatches() async throws {
+        try await withLedgerServer { options in
+            let connection = try await MMClientConnection.connect(
+                to: options.endpoint,
+                configuration: MMClientConfiguration()
+            ).get()
+            let (reply, _) = try await withClientRunLoop(
+                connection: connection, context: connection
+            ) { connection in
+                // Wire name "ledger" (the namespace itself), no `on:` — the
+                // route's Accepts("ledger") infers the target.
+                await connection.call(Ledger.root, Ledger.RootRequest())
+            }
+            #expect(reply == .success(Ledger.RootResponse(entries: 0)))
+        }
+    }
+
     @Test("a complete claim over a Types(...) server hello-matches when sharedTypes are folded")
     func completeWithSharedTypes() async throws {
         try await withLedgerServer(sharedTypes: [LedgerSharedTypes.self]) { options in

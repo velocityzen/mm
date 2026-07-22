@@ -221,13 +221,18 @@ public struct Router: Sendable {
     }
 
     /// Each method's namespace prefix as an entity, for `server.schema`
-    /// filtering: "journal.append" → "journal"; a single-segment name → root.
+    /// filtering: "journal.append" → "journal". A single-segment name (a
+    /// namespace root call, `Call("@")`) is its own prefix — "search" →
+    /// "search" — so the root method is filtered exactly like its dotted
+    /// siblings.
     private static func prefixTable(names: [String]) -> [String: EntityName] {
         Dictionary(
             uniqueKeysWithValues: names.map { name in
-                (
+                let raw = Self.methodNamePrefix(of: name)
+                let prefixText = raw.isEmpty ? name : raw
+                return (
                     name,
-                    EntityName.parse(Self.methodNamePrefix(of: name)).getOrElse { error in
+                    EntityName.parse(prefixText).getOrElse { error in
                         preconditionFailure(
                             "Router: method name '\(name)' has an invalid namespace prefix: \(error)"
                         )
@@ -291,9 +296,18 @@ public struct Router: Sendable {
                 )
             }
             let namespaceNames = Set(descriptors.map(\.name))
-            let ownedPrefixes = Set(descriptors.map { Self.methodNamePrefix(of: $0.name) })
+            // A single-segment descriptor (the namespace root call) owns its
+            // own name as a prefix — never root, which would falsely claim
+            // every other namespace's routes.
+            let ownedPrefixes = Set(
+                descriptors.map { descriptor -> String in
+                    let prefix = Self.methodNamePrefix(of: descriptor.name)
+                    return prefix.isEmpty ? descriptor.name : prefix
+                }
+            )
             if let orphan = routesByName.keys.first(where: { name in
-                ownedPrefixes.contains(Self.methodNamePrefix(of: name))
+                let prefix = Self.methodNamePrefix(of: name)
+                return ownedPrefixes.contains(prefix.isEmpty ? name : prefix)
                     && !namespaceNames.contains(name)
             }) {
                 preconditionFailure(

@@ -953,12 +953,18 @@ public func Schema(
     }
     let types = assembleTypes(typeDeclarations, namespace: prefix.rawValue)
     let localNames = Set(typeDeclarations.map(\.name))
-    if let duplicate = firstDuplicate(methods.map { "\(prefix.rawValue).\($0.name)" }) {
+    // `Call("@")` is the namespace root call: the method IS the namespace
+    // (`search`, not `search.@`). At most one per schema — a second folds to
+    // the same wire name and trips the duplicate check below.
+    func wireName(_ callName: String) -> String {
+        callName == "@" ? prefix.rawValue : "\(prefix.rawValue).\(callName)"
+    }
+    if let duplicate = firstDuplicate(methods.map { wireName($0.name) }) {
         preconditionFailure("Schema declares \"\(duplicate)\" twice")
     }
     let signatures = methods.map { method in
         MethodSignature(
-            name: "\(prefix.rawValue).\(method.name)",
+            name: wireName(method.name),
             access: method.access,
             request: qualifyReferences(
                 in: method.request,

@@ -35,7 +35,11 @@
 ///   (`Response("FollowSummary") { ... }`).
 /// - The typed descriptor per call (`Method`, `ServerStreamMethod`,
 ///   `ClientStreamMethod`, or `BidirectionalStreamMethod`, chosen by which stream parts
-///   are declared), named after the call (`Journal.append`).
+///   are declared), named after the call (`Journal.append`). `Call("@")`
+///   declares the namespace **root call** — the method IS the namespace
+///   (wire name `journal`), its generated members are named `root`
+///   (`Journal.root`, `RootRequest`, ...), and with CLI generation it
+///   becomes the command group's default subcommand.
 /// - `static var all: [AnyMethod]` — declare the `MethodNamespace` conformance
 ///   on the enum yourself (a freestanding macro cannot add it).
 /// - `static let contract: SchemaDeclaration` — the runtime declaration,

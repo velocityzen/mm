@@ -59,6 +59,7 @@ public let journalContract: SchemaDeclaration = Journal.contract
 Rules that keep the wire stable:
 
 - A method is four independent, freely combinable parts: `Request`, `RequestStream`, `ResponseStream`, `Response`. Unary is just "no stream parts". Omitted `Request` means an empty payload.
+- `Call("@")` is the namespace **root call**: the method IS the namespace (wire name `search`, not `search.run`). Generated members are named `root` (`Search.root`, `RootRequest`, `RootCommand`); the CLI makes it the group's default subcommand, so `tool search` alone runs it. One per schema; discovery filters it by execute on its own name-entity, like its dotted siblings. Pair it with `Accepts("search")` and even the entity can be omitted.
 - The call's target entity rides the **open envelope**, never the payload. Do not add an `entity` field to a request "for routing" — handlers read `context.entity`, clients pass `on:`.
 - Field keys are declaration-order integers. When evolving, pin keys (`Field(3, "note", .string)`) and make every new field `.optional(...)` — unknown keys are skipped, so old and new peers interoperate without a version bump. The protocol version stays 1; evolution is optional fields, not versions.
 - `Access { .read / .write / .execute }` is the permission class the verb demands on the target entity. Choose it like a file mode, not like HTTP semantics.

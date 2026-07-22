@@ -38,6 +38,13 @@ enum Ledger: MethodNamespace {
             Access { .read }
             Response { Field("lines", .array(.string)) }
         }
+        // The namespace root call: the method IS the namespace — wire name
+        // "ledger", descriptor `Ledger.root`, and the group's default
+        // subcommand (`tool ledger` alone runs it).
+        Call("@", description: "Summarizes the ledger") {
+            Access { .read }
+            Response { Field("entries", .int) }
+        }
     }
 }
 
@@ -48,7 +55,23 @@ struct GeneratedCommandTests {
         let configuration = Ledger.Command.configuration
         #expect(configuration.commandName == "ledger")
         let names = configuration.subcommands.map { $0.configuration.commandName }
-        #expect(names == ["add", "import-all", "verify"])
+        #expect(names == ["add", "import-all", "root", "verify"])
+    }
+
+    @Test("Call(\"@\") is the namespace root: wire name, descriptor, default subcommand")
+    func rootCall() throws {
+        // The method IS the namespace.
+        #expect(Ledger.root.name == "ledger")
+        // The contract re-emission carries the same wire name (macro
+        // fidelity: the runtime DSL folds "@" identically).
+        #expect(Ledger.contract.signatures.map(\.name).contains("ledger"))
+        let breaks = try Ledger.contract.verify(against: Ledger.self).get()
+        #expect(breaks == [])
+        // The generated command exists and is the group's default: the
+        // group name alone dispatches to it.
+        #expect(Ledger.Command.configuration.defaultSubcommand == Ledger.RootCommand.self)
+        let command = try Ledger.RootCommand.parse(["--socket", "/tmp/ledger.sock"])
+        #expect(command.entity == nil)
     }
 
     @Test("every group gets the contract-drift verify subcommand")
@@ -180,6 +203,10 @@ struct GeneratedCommandTests {
             Call("importAll", description: "Reads everything back") {
                 Access { .read }
                 Response { Field("lines", .array(.string)) }
+            }
+            Call("@", description: "Summarizes the ledger") {
+                Access { .read }
+                Response { Field("entries", .int) }
             }
         }
         #expect(Ledger.contract.fingerprint() == stripped.fingerprint())

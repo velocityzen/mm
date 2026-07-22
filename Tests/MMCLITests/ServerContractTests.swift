@@ -70,6 +70,11 @@ func withLedgerServer<T: Sendable>(
         Handle(Ledger.importAll) { _, _ in
             .success(Ledger.ImportAllResponse(lines: []))
         }
+        // The namespace root call (wire name "ledger"), scoped to its own
+        // entity — which also enables entity-less calls via inference.
+        Handle(Ledger.root, Accepts("ledger")) { _, _ in
+            .success(Ledger.RootResponse(entries: 0))
+        }
     }
     return try await withServiceGroup(
         service,

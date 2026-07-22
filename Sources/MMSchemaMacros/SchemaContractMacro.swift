@@ -313,13 +313,25 @@ private struct ParsedCall {
 
     var cliOverlay: ParsedCLIOverlay?
 
+    /// The namespace-root marker, `Call("@")`: the method IS the namespace —
+    /// wire name `search`, not `search.run`.
+    var isRoot: Bool { name == "@" }
+
+    /// The Swift identifier the generated members derive from: the call
+    /// name, or `root` for the namespace root call (`@` cannot name a Swift
+    /// declaration). A sibling call literally named "root" therefore
+    /// collides with `Call("@")` — the expansion fails to compile, same as
+    /// any duplicated call name.
+    var descriptorName: String { isRoot ? "root" : name }
+
     var capitalized: String {
-        capitalizedFirst(name)
+        capitalizedFirst(descriptorName)
     }
 
     /// The generated subcommand's name: the `CLI(.command(...))` override, or
-    /// the kebab-cased call name.
-    var cliCommandName: String { cliOverlay?.commandName ?? kebabCased(name) }
+    /// the kebab-cased call name (`root` for the namespace root call, which
+    /// is also the group's default subcommand — the group name alone runs it).
+    var cliCommandName: String { cliOverlay?.commandName ?? kebabCased(descriptorName) }
     var cliOmitted: Bool { cliOverlay?.omitted ?? false }
     var commandTypeName: String { "\(capitalized)Command" }
 
@@ -681,10 +693,10 @@ private func parseCall(_ call: FunctionCallExprSyntax) throws -> ParsedCall {
     else {
         throw SchemaMacroError(description: "Call requires a literal method-name string")
     }
-    guard isValidSwiftIdentifierish(name) else {
+    guard name == "@" || isValidSwiftIdentifierish(name) else {
         throw SchemaMacroError(
             description:
-                "Call name \"\(name)\" must be a single identifier segment ([A-Za-z_][A-Za-z0-9_]*) so it can name the generated descriptor"
+                "Call name \"\(name)\" must be a single identifier segment ([A-Za-z_][A-Za-z0-9_]*) so it can name the generated descriptor — or \"@\" for the namespace root call"
         )
     }
     guard let body = call.trailingClosure else {
@@ -1507,13 +1519,19 @@ private func descriptorShape(for call: ParsedCall) -> (type: String, generics: S
     }
 }
 
+/// The method's wire name: `namespace.call`, or — for the root call
+/// `Call("@")` — the namespace itself.
+private func wireName(namespace: String, call: ParsedCall) -> String {
+    call.isRoot ? namespace : "\(namespace).\(call.name)"
+}
+
 private func descriptor(for call: ParsedCall, namespace: String) -> String {
-    let wireName = "\(namespace).\(call.name)"
+    let name = wireName(namespace: namespace, call: call)
     let documentation = documentationArgument(for: call).map { ",\n    documentation: \($0)" } ?? ""
     let shape = descriptorShape(for: call)
     return """
-        public static let `\(call.name)` = \(shape.type)<\(shape.generics)>(
-            name: "\(wireName)", access: \(call.accessSource)\(documentation))
+        public static let `\(call.descriptorName)` = \(shape.type)<\(shape.generics)>(
+            name: "\(name)", access: \(call.accessSource)\(documentation))
         """
 }
 
@@ -1524,7 +1542,7 @@ private func generateDescriptors(for contract: ParsedContract) -> String {
 
 private func generateAll(for contract: ParsedContract) -> String {
     let entries = contract.calls
-        .map { "AnyMethod(Self.`\($0.name)`)" }
+        .map { "AnyMethod(Self.`\($0.descriptorName)`)" }
         .joined(separator: ", ")
     return """
         public static var all: [AnyMethod] {
@@ -1585,13 +1603,19 @@ private func generateCommands(for contract: ParsedContract, enclosingType: Strin
     let groupName =
         contract.cliMode.commandName
         ?? contract.namespace.split(separator: ".").joined(separator: "-")
+    // A CLI-visible root call (`Call("@")`) is the group's default
+    // subcommand: the group name alone runs it (`tool search --limit 5`),
+    // and the explicit spelling (`tool search root`) remains.
+    let defaultSubcommand = contract.calls
+        .first { $0.isRoot && !$0.cliOmitted }
+        .map { ",\n            defaultSubcommand: \($0.commandTypeName).self" } ?? ""
     declarations.append(
         """
         public struct Command: ParsableCommand {
             public static let configuration = CommandConfiguration(
                 commandName: "\(groupName)",
                 abstract: "Commands for the \(contract.namespace) namespace.",
-                subcommands: [\(subcommands.joined(separator: ", "))])
+                subcommands: [\(subcommands.joined(separator: ", "))]\(defaultSubcommand))
             public init() {}
         }
         """
@@ -1657,7 +1681,7 @@ private func commandDeclaration(
     enumNames: Set<String>,
     structsByName: [String: [ParsedField]]
 ) -> String {
-    let wireName = "\(namespace).\(call.name)"
+    let wireName = wireName(namespace: namespace, call: call)
     // Request fields: a generated struct's declared fields, a local
     // named-type reference's fields (the type is a sibling with a memberwise
     // init), or — for external references — a single JSON option.
