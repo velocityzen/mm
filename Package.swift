@@ -12,6 +12,7 @@ let package = Package(
         .library(name: "MMSchema", targets: ["MMSchema"]),
         .library(name: "MMServer", targets: ["MMServer"]),
         .library(name: "MMClient", targets: ["MMClient"]),
+        .library(name: "MMClientService", targets: ["MMClientService"]),
         .library(name: "MMCLI", targets: ["MMCLI"]),
         .executable(name: "mm-example-daemon", targets: ["MMExampleDaemon"]),
         .executable(name: "mm-example-client", targets: ["MMExampleClient"]),
@@ -77,9 +78,18 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
-                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Metrics", package: "swift-metrics"),
+            ]
+        ),
+        .target(
+            name: "MMClientService",
+            // The ServiceGroup adapter, split out so plain clients and CLIs
+            // don't link swift-service-lifecycle (and its swift-async-algorithms).
+            dependencies: [
+                "MMClient",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
             ]
         ),
         .target(
@@ -89,7 +99,8 @@ let package = Package(
                 "MMSchema",
                 "MMWire",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
-                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
+                // UnixSignals only: the ServiceLifecycle product would drag in
+                // swift-async-algorithms.
                 .product(name: "UnixSignals", package: "swift-service-lifecycle"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOCore", package: "swift-nio"),
@@ -226,6 +237,7 @@ let package = Package(
                 "MMTestSupport",
                 "MMServer",
                 "MMClient",
+                "MMClientService",
                 "MMWire",
                 "MMSchema",
                 .product(name: "NIOCore", package: "swift-nio"),

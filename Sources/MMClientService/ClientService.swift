@@ -1,3 +1,5 @@
+import MMClient
+import NIOCore
 import ServiceLifecycle
 
 /// swift-service-lifecycle adapter for ``MMClientConnection``: drop one in a
@@ -6,7 +8,7 @@ import ServiceLifecycle
 /// ```swift
 /// let connection = try await MMClientConnection.connect(to: endpoint).get()
 /// let group = ServiceGroup(configuration: .init(
-///     services: [.init(service: MMClientConnectionService(connection: connection))],
+///     services: [.init(service: MMClientService(connection: connection))],
 ///     gracefulShutdownSignals: [.sigterm],
 ///     cancellationSignals: [.sigint],
 ///     logger: logger
@@ -23,7 +25,7 @@ import ServiceLifecycle
 /// fail with `MMCallError.connectionClosed`. There is no call drain in v1: an
 /// application that wants in-flight calls answered stops issuing calls and
 /// awaits them *before* triggering shutdown.
-public struct MMClientConnectionService: Service {
+public struct MMClientService: Service {
     public let connection: MMClientConnection
 
     public init(connection: MMClientConnection) {

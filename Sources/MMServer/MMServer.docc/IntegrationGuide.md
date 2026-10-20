@@ -663,6 +663,7 @@ The client (say `eyectl`, or a sibling daemon) imports the same namespace module
 
 ```swift
 import MMClient
+import MMClientService  // product MMClientService: the ServiceGroup adapter
 import MMSchema
 import ServiceLifecycle
 
@@ -672,7 +673,7 @@ let connection = try await MMClientConnection.connect(
     configuration: MMClientConfiguration(schema: .complete([Eye.contract]))
 ).get()
 let group = ServiceGroup(configuration: .init(
-    services: [.init(service: MMClientConnectionService(connection: connection))],
+    services: [.init(service: MMClientService(connection: connection))],
     gracefulShutdownSignals: [.sigterm],
     cancellationSignals: [.sigint],
     logger: logger

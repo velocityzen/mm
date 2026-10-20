@@ -16,13 +16,13 @@ let reply = await MMClientConnection.with(.unix(path: socketPath)) { connection 
 
 Custom choreography — stream drainers, staged teardown — lives *inside* the bracket body as structured children (`async let`, a local group); the bracket still owns the lifecycle around it.
 
-Daemons connect manually instead: ``MMClientConnection/connect(to:configuration:eventLoopGroup:logger:)`` bootstraps the transport and exchanges hellos (version negotiation is min-wins; a fingerprint mismatch is a ``ServerInfo`` verdict that should trigger discovery, never a disconnect), and ``MMClientConnectionService`` runs the inbound loop under a swift-service-lifecycle `ServiceGroup`:
+Daemons connect manually instead: ``MMClientConnection/connect(to:configuration:eventLoopGroup:logger:)`` bootstraps the transport and exchanges hellos (version negotiation is min-wins; a fingerprint mismatch is a ``ServerInfo`` verdict that should trigger discovery, never a disconnect), and `MMClientService` — its own product, so plain clients and CLIs don't link swift-service-lifecycle — runs the inbound loop under a `ServiceGroup`:
 
 ```swift
 let connection = try await MMClientConnection.connect(
     to: .unix(path: "/var/run/echo/rpc.sock")).get()
 let group = ServiceGroup(configuration: .init(
-    services: [.init(service: MMClientConnectionService(connection: connection))],
+    services: [.init(service: MMClientService(connection: connection))],
     gracefulShutdownSignals: [.sigterm],
     logger: logger
 ))
@@ -54,10 +54,6 @@ Connection lifecycle is deliberately simple: ``ClientState`` is `.connected` the
 ### Discovery and schema verification
 
 - ``SchemaDifference``
-
-### Lifecycle integration
-
-- ``MMClientConnectionService``
 
 ### Errors
 

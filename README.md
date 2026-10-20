@@ -8,15 +8,16 @@ A Swift library implementing a binary RPC protocol over Unix domain sockets and 
 
 ## Modules
 
-One package, `MatterInMotion`, four library products:
+One package, `MatterInMotion`, six library products:
 
 - `MMWire` — MessagePack coder over `ByteBuffer`, `[u32 LE length][payload]` framing, the RPC envelope, the hello preamble. Depends on NIOCore and `MMSchema` only.
 - `MMSchema` — Method descriptors, `TypeSchema` and the schema fingerprint, `EntityACL`, `PeerIdentity`. Pure values: no NIO import, no IO.
 - `MMServer` — `Router` with a result-builder DSL, authorization, peer-credential capture, streaming handlers, `MMService` bootstrap.
 - `MMClient` — `MMClientConnection`: typed unary and streaming calls with msgid multiplexing, credit-based flow control, schema discovery.
+- `MMClientService` — `MMClientService`, the swift-service-lifecycle `Service` adapter for daemon-style clients. Separate so plain clients and CLIs don't link swift-service-lifecycle.
 - `MMCLI` — the runtime behind schema-generated command-line tools (swift-argument-parser): connection options, exit-code mapping, stream drivers, `discover` and raw `call` commands.
 
-Dependency direction: `MMSchema` depends on nothing internal; `MMWire` depends on `MMSchema` (the wire time kinds' VPTS codec lives there); `MMServer` and `MMClient` depend on both; `MMCLI` sits on `MMClient`. `MMSchema` stays importable by client-only processes.
+Dependency direction: `MMSchema` depends on nothing internal; `MMWire` depends on `MMSchema` (the wire time kinds' VPTS codec lives there); `MMServer` and `MMClient` depend on both; `MMClientService` and `MMCLI` sit on `MMClient`. `MMSchema` stays importable by client-only processes.
 
 ## Design principles
 
@@ -165,7 +166,7 @@ let outcome = await MMClientConnection.with(.unix(path: "/tmp/echo.sock")) { con
 }
 ```
 
-Daemons drop `MMClientConnectionService(connection:)` into their `ServiceGroup` instead of using the bracket. Reconnection is deliberately out of scope: a closed connection stays closed, and retry policy belongs to the application, driven by `stateUpdates()`.
+Daemons add the `MMClientService` product and drop `MMClientService(connection:)` into their `ServiceGroup` instead of using the bracket. Reconnection is deliberately out of scope: a closed connection stays closed, and retry policy belongs to the application, driven by `stateUpdates()`.
 
 ### CLI
 
@@ -260,12 +261,13 @@ targets: [
 
 ## Documentation
 
-The API reference is DocC, generated from the catalogs in `Sources/<Target>/<Target>.docc` and hosted on the [Swift Package Index](https://swiftpackageindex.com/velocityzen/mm) ([.spi.yml](.spi.yml) builds all four targets):
+The API reference is DocC, generated from the catalogs in `Sources/<Target>/<Target>.docc` and hosted on the [Swift Package Index](https://swiftpackageindex.com/velocityzen/mm) ([.spi.yml](.spi.yml) builds every library target):
 
 - [MMWire](https://swiftpackageindex.com/velocityzen/mm/documentation/mmwire) — MessagePack coding, framing, the envelope, the hello preamble.
 - [MMSchema](https://swiftpackageindex.com/velocityzen/mm/documentation/mmschema) — method descriptors, the contract DSL and `#schema` macro, ACLs, the fingerprint.
 - [MMServer](https://swiftpackageindex.com/velocityzen/mm/documentation/mmserver) — router, authorization, streaming handlers, service bootstrap.
 - [MMClient](https://swiftpackageindex.com/velocityzen/mm/documentation/mmclient) — typed calls, streaming handles, discovery.
+- [MMClientService](https://swiftpackageindex.com/velocityzen/mm/documentation/mmclientservice) — the `ServiceGroup` adapter for daemon-style clients.
 - [MMCLI](https://swiftpackageindex.com/velocityzen/mm/documentation/mmcli) — the schema-generated CLI runtime.
 
 The long-form guides ship as DocC articles inside those catalogs (hosted with the reference, readable in-repo too):

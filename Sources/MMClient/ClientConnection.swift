@@ -24,10 +24,11 @@ import NIOPosix
 ///     await connection.call(Journal.append, on: notes, request)
 /// }
 ///
-/// // 2. swift-service-lifecycle (daemons): drop the adapter in a ServiceGroup.
+/// // 2. swift-service-lifecycle (daemons): drop the MMClientService adapter
+/// //    (its own product) in a ServiceGroup.
 /// let connection = try await MMClientConnection.connect(to: .unix(path: sock)).get()
 /// let group = ServiceGroup(configuration: .init(
-///     services: [.init(service: MMClientConnectionService(connection: connection))],
+///     services: [.init(service: MMClientService(connection: connection))],
 ///     gracefulShutdownSignals: [.sigterm],
 ///     logger: logger
 /// ))
@@ -57,7 +58,9 @@ public actor MMClientConnection {
     /// The outcome of the hello exchange, fixed for the connection's lifetime.
     public nonisolated let server: ServerInfo
 
-    nonisolated let channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>
+    // `package` so the MMClientService module's synchronous shutdown handler
+    // can close it.
+    package nonisolated let channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>
     private nonisolated let configuration: MMClientConfiguration
     private nonisolated let logger: Logger
     private nonisolated let metrics: ClientMetrics
@@ -256,7 +259,7 @@ public actor MMClientConnection {
     /// error or protocol violation while `body` ran (a clean EOF or the
     /// bracket's own close is success). Per-call failures stay inside
     /// `body`'s own value — typically a `Result` from `call`. For long-lived
-    /// daemons prefer ``MMClientConnectionService`` in a `ServiceGroup`; the
+    /// daemons prefer `MMClientService` (its own product) in a `ServiceGroup`; the
     /// bracket is the tool-and-test shape.
     public static func with<Value: Sendable>(
         _ endpoint: MMEndpoint,

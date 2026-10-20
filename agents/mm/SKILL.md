@@ -209,7 +209,7 @@ let outcome = await MMClientConnection.with(.unix(path: socketPath)) { connectio
 }
 ```
 
-In a daemon-style client, use `MMClientConnection.connect` and add `MMClientConnectionService(connection: connection)` to the `ServiceGroup` instead of the bracket.
+In a daemon-style client, use `MMClientConnection.connect` and add `MMClientService(connection: connection)` (its own product: depend on `MMClientService` and `import MMClientService`) to the `ServiceGroup` instead of the bracket.
 
 Verify the schema like the server does:
 

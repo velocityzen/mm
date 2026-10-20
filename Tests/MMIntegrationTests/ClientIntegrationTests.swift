@@ -1,4 +1,5 @@
 import Logging
+import MMClientService
 import MMSchema
 import MMTestSupport
 import MMWire
@@ -597,7 +598,7 @@ struct ClientIntegrationTests {
                 let clientGroup = ServiceGroup(
                     configuration: .init(
                         services: [
-                            .init(service: MMClientConnectionService(connection: connection))
+                            .init(service: MMClientService(connection: connection))
                         ],
                         logger: Logger(label: "mm.test.client-group")
                     )
