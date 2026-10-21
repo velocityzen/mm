@@ -12,7 +12,7 @@ struct HelloTests {
     func clientHelloBytesDefault() async throws {
         let harness = try await connectPipeline()
         // Captured before any inbound was written: the client speaks first.
-        // Frame: u32 LE length 15, magic "MM", version 1, fingerprint 0 (no
+        // Frame: u32 LE length 15, matter "MM", version 1, fingerprint 0 (no
         // expectation), capabilities 0.
         let expected: [UInt8] = [
             0x0f, 0x00, 0x00, 0x00,
@@ -70,8 +70,8 @@ struct HelloTests {
         #expect(info.capabilities == 0b0100)
     }
 
-    @Test("server hello with bad magic fails with badHello and closes")
-    func badMagicIsBadHello() async throws {
+    @Test("server hello with bad matter fails with badHello and closes")
+    func badMatterIsBadHello() async throws {
         let harness = try await connectPipeline()
         var bogus = try MMHello(protocolVersion: 1, schemaFingerprint: 0, capabilities: 0)
             .encode().get()

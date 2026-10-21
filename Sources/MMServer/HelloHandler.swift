@@ -14,7 +14,7 @@ import NIOPosix
 ///
 /// - Writes the server's hello as the connection's **first outbound frame**,
 ///   at channel activation.
-/// - Requires the peer's first frame to be a decodable hello: bad magic or an
+/// - Requires the peer's first frame to be a decodable hello: bad matter or an
 ///   undecodable/truncated hello is a protocol violation — counted and the
 ///   connection closed, the frame never forwarded.
 /// - Forwards the *valid* hello frame (and everything after it) inbound, so

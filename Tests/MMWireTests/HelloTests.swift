@@ -13,7 +13,7 @@ struct HelloTests {
         capabilities: 0xdead_beef
     )
 
-    @Test("byte order pinned: little-endian fields behind MM magic")
+    @Test("byte order pinned: little-endian fields behind the MM matter bytes")
     func pinnedVector() {
         // 0x0123456789abcdef LE → ef cd ab 89 67 45 23 01; 0xdeadbeef LE → ef be ad de.
         #expect(Self.pinnedHello.encode().mpSuccess.map(mpHex) == Self.pinnedVector)
@@ -47,18 +47,18 @@ struct HelloTests {
         }
     }
 
-    @Test("bad magic in either byte is badMagic")
-    func badMagic() {
+    @Test("bad matter in either byte is badMatter")
+    func badMatter() {
         #expect(
             MMHello.decode(from: mpBytes("4e4d01efcdab8967452301efbeadde"))
-                == .failure(.badMagic)
+                == .failure(.badMatter)
         )
         #expect(
             MMHello.decode(from: mpBytes("4d4e01efcdab8967452301efbeadde"))
-                == .failure(.badMagic)
+                == .failure(.badMatter)
         )
-        // Magic is checked as soon as both bytes are present, even on a short buffer.
-        #expect(MMHello.decode(from: mpBytes("4e4e")) == .failure(.badMagic))
+        // The matter bytes are checked as soon as both are present, even on a short buffer.
+        #expect(MMHello.decode(from: mpBytes("4e4e")) == .failure(.badMatter))
     }
 
     @Test("short buffers are truncated")

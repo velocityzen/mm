@@ -44,7 +44,7 @@ struct HelloExchangeTests {
         #expect(
             bytes == [
                 0x0F, 0x00, 0x00, 0x00,  // u32 LE length = 15, payload only
-                0x4D, 0x4D,  // magic "MM"
+                0x4D, 0x4D,  // matter "MM"
                 0x01,  // protocol version 1
                 0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x01,  // fingerprint LE
                 0x00, 0x00, 0x00, 0x00,  // capabilities LE
@@ -56,8 +56,8 @@ struct HelloExchangeTests {
         _ = try? channel.finish()
     }
 
-    @Test("bad magic in the first frame closes the connection, nothing forwarded")
-    func badMagicCloses() throws {
+    @Test("bad matter in the first frame closes the connection, nothing forwarded")
+    func badMatterCloses() throws {
         let channel = try makeConnectedChannel()
         var garbage = ByteBuffer()
         garbage.writeBytes([UInt8](repeating: 0x58, count: MMHello.encodedByteCount))  // "XX…"
@@ -71,7 +71,7 @@ struct HelloExchangeTests {
     func truncatedHelloCloses() throws {
         let channel = try makeConnectedChannel()
         var short = ByteBuffer()
-        short.writeBytes([0x4D, 0x4D, 0x01])  // right magic, truncated body
+        short.writeBytes([0x4D, 0x4D, 0x01])  // right matter, truncated body
         try channel.writeInbound(short)
         channel.embeddedEventLoop.run()
         #expect(channel.isActive == false)

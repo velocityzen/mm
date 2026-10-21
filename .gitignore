@@ -4,3 +4,8 @@
 .index-build/
 .DS_Store
 *.xcodeproj
+
+# SourceKit-LSP index builds compile the MMCLIGeneratorPlugin output of
+# MMCLITests without an output-file-map entry, so the compiler writes these
+# into the working directory (an upstream bug).
+/MMCLICommands.*

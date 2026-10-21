@@ -30,7 +30,7 @@ enum HelloFailure: Error {
 /// - Requires the server's first frame to be a decodable hello. A valid hello
 ///   completes `helloPromise` and is **not** forwarded inbound — `connect`
 ///   consumes it from the promise, so the envelope loop never sees it. Bad
-///   magic or an undecodable hello fails the promise with
+///   matter or an undecodable hello fails the promise with
 ///   ``HelloFailure/badHello`` and closes the connection.
 /// - Forwards everything after the hello unchanged.
 ///

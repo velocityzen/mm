@@ -27,8 +27,9 @@ public enum MMWireError: Error, Equatable, Hashable, Sendable {
     /// A wire array had the wrong number of elements. `expected` is exact for the
     /// envelope (4/4/3) and a minimum for evolution-tolerant arrays (`MMError`).
     case invalidArity(expected: Int, got: Int)
-    /// The hello preamble did not begin with the `MM` magic bytes.
-    case badMagic
+    /// The hello preamble did not begin with the two matter bytes, `MM`
+    /// (Matter in Motion).
+    case badMatter
     /// An `Encodable` conformance failed outside MMWire's control.
     case encodingFailed(description: String)
     /// A `Decodable` conformance failed outside MMWire's control.

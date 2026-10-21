@@ -4,7 +4,7 @@ import NIOCore
 /// MessagePack, so it can be parsed before any coder state exists.
 ///
 /// ```
-/// offset  0-1   magic 0x4D 0x4D ("MM")
+/// offset  0-1   matter 0x4D 0x4D ("MM")
 /// offset  2     protocolVersion   UInt8
 /// offset  3-10  schemaFingerprint UInt64 little-endian
 /// offset 11-14  capabilities      UInt32 little-endian
@@ -17,8 +17,8 @@ import NIOCore
 /// Version negotiation itself (min-wins) and the fingerprint-mismatch → discovery
 /// policy belong to higher layers; this type is pure layout.
 public struct MMHello: Equatable, Sendable {
-    /// The two magic bytes, "MM".
-    public static let magic: [UInt8] = [0x4d, 0x4d]
+    /// The two matter bytes, "MM".
+    public static let matter: [UInt8] = [0x4d, 0x4d]
     /// The fixed encoded size in bytes.
     public static let encodedByteCount = 15
 
@@ -34,7 +34,7 @@ public struct MMHello: Equatable, Sendable {
 
     /// Writes the fixed 15-byte layout into `buffer`. Cannot fail.
     public func encode(into buffer: inout ByteBuffer) {
-        buffer.writeBytes(Self.magic)
+        buffer.writeBytes(Self.matter)
         buffer.writeInteger(self.protocolVersion)
         buffer.writeInteger(self.schemaFingerprint, endianness: .little)
         buffer.writeInteger(self.capabilities, endianness: .little)
@@ -52,20 +52,20 @@ public struct MMHello: Equatable, Sendable {
     /// Decodes a hello from the first 15 readable bytes of `buffer` without consuming
     /// them. Trailing extra bytes are tolerated and ignored (forward compatibility).
     ///
-    /// Failure order: fewer than 2 readable bytes is `.truncated`; a wrong magic is
-    /// `.badMagic` (checked as soon as both magic bytes are present, even if the rest
+    /// Failure order: fewer than 2 readable bytes is `.truncated`; wrong matter bytes are
+    /// `.badMatter` (checked as soon as both matter bytes are present, even if the rest
     /// is short); otherwise fewer than 15 readable bytes is `.truncated`.
     public static func decode(from buffer: ByteBuffer) -> Result<MMHello, MMWireError> {
         let base = buffer.readerIndex
         guard buffer.readableBytes >= 2 else { return .failure(.truncated) }
         guard
-            buffer.getInteger(at: base, as: UInt8.self) == Self.magic[0],
-            buffer.getInteger(at: base + 1, as: UInt8.self) == Self.magic[1]
+            buffer.getInteger(at: base, as: UInt8.self) == Self.matter[0],
+            buffer.getInteger(at: base + 1, as: UInt8.self) == Self.matter[1]
         else {
-            return .failure(.badMagic)
+            return .failure(.badMatter)
         }
         // One consecutive little-endian read of the whole 15-byte layout
-        // (magic re-read and discarded); nil = not all 15 bytes arrived.
+        // (matter re-read and discarded); nil = not all 15 bytes arrived.
         guard let fields = buffer.peekMultipleIntegers(
             endianness: .little,
             as: (UInt8, UInt8, UInt8, UInt64, UInt32).self

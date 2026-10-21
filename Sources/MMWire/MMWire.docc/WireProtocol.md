@@ -66,7 +66,7 @@ offset  0         1         2         3 .. 10                     11 .. 14
        +---------+---------+---------+------------------------------+---------------------+
 ```
 
-- **Magic** (offsets 0 to 1): `4d 4d` (ASCII `MM`). Any other value is a fatal `badMagic` error, and the connection is failed.
+- **Matter** (offsets 0 to 1): `4d 4d` (ASCII `MM`). Any other value is a fatal `badMatter` error, and the connection is failed.
 - **protocolVersion** (offset 2): the highest protocol version the sender supports. Currently 1.
 - **schemaFingerprint** (offsets 3 to 10): the sender's 8-byte schema fingerprint (section 9) as a little-endian `u64`. A client with no schema of its own sends the fingerprint of the schema it expects, or 0 if it has none.
 - **capabilities** (offsets 11 to 14): a little-endian `u32` bitset. **Version 1 defines no capability bits, so senders MUST send 0.** Receivers MUST ignore bits they do not recognize.
@@ -76,8 +76,8 @@ offset  0         1         2         3 .. 10                     11 .. 14
 **Short hellos are fatal.** A hello payload shorter than 15 bytes is a fatal `truncated` error. It is treated exactly like a truncated stream (sections 2 and 10): the connection is failed. Error precedence:
 
 - Fewer than 2 readable bytes: `truncated`.
-- Both magic bytes readable and wrong: `badMagic`, even if the rest of the layout is missing.
-- Correct magic, fewer than 15 bytes in total: `truncated`.
+- Both matter bytes readable and wrong: `badMatter`, even if the rest of the layout is missing.
+- Correct matter bytes, fewer than 15 bytes in total: `truncated`.
 
 **Version negotiation is min-wins.** The effective version of the connection is `min(local version, peer version)`. A peer that cannot operate at that version closes the connection. Otherwise both sides use the effective version. Because the exchange may be concurrent, a side may send envelopes before it has processed the peer's hello, and so before it knows the effective version. Such envelopes MUST be valid at the sender's lowest supported version (in version 1, that is version 1). A sender that needs features of a higher version MUST wait for the peer's hello before its first envelope.
 
@@ -651,7 +651,7 @@ The builtins (section 8) are in the fingerprinted set, so a real server's finger
 The protocol itself requires:
 
 - The hello (section 3) is the **first frame in each direction**. Everything after it is envelopes.
-- These are fatal, and the connection is failed: a frame-cap violation (section 2), bad magic, a short hello (section 3), a malformed envelope (section 4), a truncated stream. A fingerprint mismatch is **not** fatal (section 3).
+- These are fatal, and the connection is failed: a frame-cap violation (section 2), bad matter bytes, a short hello (section 3), a malformed envelope (section 4), a truncated stream. A fingerprint mismatch is **not** fatal (section 3).
 - Requests are answered on the same connection, correlated by msgid. The protocol has no reconnection, resumption, or msgid continuity across connections.
 - A request the caller abandons (for example, cancelled on the client side) may still run on the server. The protocol makes no cancellation guarantee.
 
@@ -661,7 +661,7 @@ All other connection behavior is **endpoint policy, not protocol**: idle timeout
 
 How the reference implementation sets the endpoint policy above. Other implementations are not bound by it.
 
-**Hello-first enforcement.** The server writes its hello when the channel becomes active, without waiting for the peer's hello. The peer's first frame must decode as a hello. Bad magic, or a truncated or undecodable hello, closes the connection before the frame passes the hello handler, so no envelope is processed before the hello. The client does the same: it sends its hello as its first outbound frame and requires the server's first frame to be a decodable hello. Otherwise `connect` fails (the channel is closed and no connection is returned).
+**Hello-first enforcement.** The server writes its hello when the channel becomes active, without waiting for the peer's hello. The peer's first frame must decode as a hello. Bad matter, or a truncated or undecodable hello, closes the connection before the frame passes the hello handler, so no envelope is processed before the hello. The client does the same: it sends its hello as its first outbound frame and requires the server's first frame to be a decodable hello. Otherwise `connect` fails (the channel is closed and no connection is returned).
 
 **Idle-timeout reaping.** Each server connection has a traffic-idle timer (default 120 s) that counts traffic in *either* direction. Outbound stream frames count, so a client that only consumes a response stream is never closed mid-stream. A connection with no traffic in either direction for the timeout is closed. The reaper runs below the frame decoder, so it also closes peers that connect and never complete the hello. The client has the same reaper, off by default.
 

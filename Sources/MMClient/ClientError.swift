@@ -6,7 +6,7 @@ import MMWire
 /// per-call failures use ``MMCallError`` instead. `Equatable` so tests assert
 /// exact `Result` values.
 public enum MMClientError: Error, Equatable, Sendable {
-    /// The server's first frame was not a decodable hello (bad magic,
+    /// The server's first frame was not a decodable hello (bad matter,
     /// truncated, or otherwise malformed). The connection is closed.
     case badHello
     /// Version negotiation (min-wins) produced a version this client cannot
