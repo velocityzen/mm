@@ -256,8 +256,8 @@ Both halves emit [swift-metrics](https://github.com/apple/swift-metrics) instrum
 
 ## Requirements
 
-- Swift 6 (strict concurrency), macOS 15+ or Linux.
-- Dependencies (the complete runtime list): [swift-nio](https://github.com/apple/swift-nio), [swift-service-lifecycle](https://github.com/swift-server/swift-service-lifecycle), [swift-log](https://github.com/apple/swift-log), [swift-metrics](https://github.com/apple/swift-metrics). MessagePack is implemented in-repo. ([swift-syntax](https://github.com/swiftlang/swift-syntax) is a compile-time-only dependency of the `#schema` macro plugin — never linked into products.)
+- Swift 6.4+ (strict concurrency), macOS 15+ or Linux.
+- Dependencies (the complete runtime list): [swift-nio](https://github.com/apple/swift-nio), [swift-service-lifecycle](https://github.com/swift-server/swift-service-lifecycle), [swift-log](https://github.com/apple/swift-log), [swift-metrics](https://github.com/apple/swift-metrics). MessagePack is implemented in-repo. ([swift-syntax](https://github.com/swiftlang/swift-syntax) is a compile-time-only dependency of the `#schema` macro and the `MMCLIGeneratorPlugin` — never linked into products.)
 
 ## Installation
 

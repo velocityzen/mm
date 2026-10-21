@@ -5,7 +5,7 @@ import MMWire
 /// The tool's build-time defaults — the companion server's completeness
 /// claim, its well-known endpoint, the default output format, and the
 /// per-type text renderers. The declarative face is the
-/// ``MMCLI(isolation:_:)`` block (``Contract(_:)``, ``Endpoint(_:)``, ...);
+/// ``MMCLI(_:)`` block (``Contract(_:)``, ``Endpoint(_:)``, ...);
 /// this type and ``withCLI(_:_:)`` are the value level underneath.
 ///
 /// A task-local, not a process-global: both values are build-time knowledge
@@ -33,7 +33,7 @@ public struct MMCLIDefaults: Sendable {
     public var formatters: MMCLIFormatters
 
     /// The binding commands read; empty unless the tool declared one via
-    /// the ``MMCLI(isolation:_:)`` block (or bound it with ``withCLI(_:_:)``).
+    /// the ``MMCLI(_:)`` block (or bound it with ``withCLI(_:_:)``).
     @TaskLocal public static var current = MMCLIDefaults()
 
     public init(
@@ -96,7 +96,7 @@ public struct MMCLIFormatEntry: Sendable {
 /// Declares how one type renders under `--output text`: the typed twin of a
 /// row in ``MMCLIFormatters`` — no downcasting in user code, the erasure
 /// lives here.
-public func Format<T: Encodable>(
+public func Format<T: Encodable & Sendable>(
     _ type: T.Type,
     _ render: @Sendable @escaping (T) -> String
 ) -> MMCLIFormatEntry {
@@ -113,7 +113,7 @@ public func Format<T: Encodable>(
 /// ```swift
 /// Format { (event: ChangeEvent) in "\(event.count)\t\(event.line)" }
 /// ```
-public func Format<T: Encodable>(
+public func Format<T: Encodable & Sendable>(
     _ render: @Sendable @escaping (T) -> String
 ) -> MMCLIFormatEntry {
     Format(T.self, render)
@@ -121,7 +121,7 @@ public func Format<T: Encodable>(
 
 // MARK: - The declarative entry point
 
-/// One declaration in an ``MMCLI(isolation:_:)`` block: the root command's
+/// One declaration in an ``MMCLI(_:)`` block: the root command's
 /// shape, the claim, the endpoint, the default output, or a per-type text
 /// renderer. Constructed by ``Configuration(_:)``, ``Contract(_:)``,
 /// ``Endpoint(_:)``, ``Output(_:)``, and ``Format(_:_:)``.
@@ -146,7 +146,7 @@ public struct MMCLIPart: Sendable {
 /// `discussion`, aliases, ...). ``Name(_:)``, ``Abstract(_:)``,
 /// ``Commands(_:)``, and ``Version(_:)`` merge onto it; declaring the same
 /// field both ways is a programmer error. With any root-shape part present,
-/// ``MMCLI(isolation:_:)`` synthesizes and runs the root itself — the whole
+/// ``MMCLI(_:)`` synthesizes and runs the root itself — the whole
 /// tool becomes one declaration, no `AsyncParsableCommand` root to write.
 /// Root-shape parts are only meaningful in the `run:`-less form.
 public func Configuration(_ configuration: CommandConfiguration) -> MMCLIPart {
@@ -233,21 +233,16 @@ public enum MMCLIBuilder: MMListBuilding {
 /// the last entry. ``withCLI(_:_:)`` and ``MMCLIDefaults`` remain the
 /// value-level spelling underneath.
 @discardableResult
-public func MMCLI<Value>(
-    isolation: isolated (any Actor)? = #isolation,
+public nonisolated(nonsending) func MMCLI<Value>(
     @MMCLIBuilder _ parts: () -> [MMCLIPart],
-    run body: () async throws -> Value
+    run body: nonisolated(nonsending) () async throws -> Value
 ) async rethrows -> Value {
     let (defaults, configuration) = assembleParts(parts())
     precondition(
         configuration == nil,
         "Configuration(...) belongs to the run:-less MMCLI form — with run:, the root command type carries its own configuration"
     )
-    return try await MMCLIDefaults.$current.withValue(
-        defaults,
-        operation: body,
-        isolation: isolation
-    )
+    return try await MMCLIDefaults.$current.withValue(defaults, operation: body)
 }
 
 /// The fully synthesized form: declare the root command's shape —
@@ -255,7 +250,7 @@ public func MMCLI<Value>(
 /// full ``Configuration(_:)`` they merge onto — and `MMCLI` builds and runs
 /// the root itself: parse, async dispatch, help, and exit codes all through
 /// ArgumentParser, so the entire tool is one declaration (see
-/// ``MMCLI(isolation:_:run:)`` for the custom-root form):
+/// ``MMCLI(_:run:)`` for the custom-root form):
 ///
 /// ```swift
 /// @main
@@ -272,8 +267,7 @@ public func MMCLI<Value>(
 ///     }
 /// }
 /// ```
-public func MMCLI(
-    isolation: isolated (any Actor)? = #isolation,
+public nonisolated(nonsending) func MMCLI(
     @MMCLIBuilder _ parts: () -> [MMCLIPart]
 ) async {
     let (defaults, configuration) = assembleParts(parts())
@@ -284,9 +278,7 @@ public func MMCLI(
     }
     await MMCLIDefaults.$current.withValue(
         defaults,
-        operation: { await dispatchSynthesizedRoot(configuration, arguments: nil) },
-        isolation: isolation
-    )
+        operation: { await dispatchSynthesizedRoot(configuration, arguments: nil) })
 }
 
 func assembleParts(
@@ -412,19 +404,14 @@ func dispatchSynthesizedRoot(
     }
 }
 
-/// The value-level binding under the ``MMCLI(isolation:_:)`` block: binds
+/// The value-level binding under the ``MMCLI(_:)`` block: binds
 /// already-assembled ``MMCLIDefaults`` around `body`. Reach for it when the
 /// defaults are computed rather than declared — or in tests, which bind
 /// defaults around a single parse the same way. The binding is scoped,
 /// never installed: nothing outside `body` observes it.
-public func withCLI<Value>(
+public nonisolated(nonsending) func withCLI<Value>(
     _ defaults: MMCLIDefaults,
-    isolation: isolated (any Actor)? = #isolation,
-    _ body: () async throws -> Value
+    _ body: nonisolated(nonsending) () async throws -> Value
 ) async rethrows -> Value {
-    try await MMCLIDefaults.$current.withValue(
-        defaults,
-        operation: body,
-        isolation: isolation
-    )
+    try await MMCLIDefaults.$current.withValue(defaults, operation: body)
 }
