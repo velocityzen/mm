@@ -139,6 +139,26 @@ struct FingerprintTests {
         #expect(SchemaFingerprint.compute([relaxed, Self.appendSignature]) == reference)
     }
 
+    @Test("server.entity canonical encoding matches the wire spec byte for byte")
+    func builtinEntityCanonicalBytes() throws {
+        // Wire spec section 9.3. A one-signature set hashes exactly its
+        // canonical encoding (section 9.2), so equal hashes pin the bytes.
+        let hex =
+            "0d000000" + "7365727665722e656e74697479"  // name: len 13, "server.entity"
+            + "04"  // access: read
+            + "0a" + "00000000"  // request: structure, 0 fields
+            + "0a" + "03000000"  // response: structure, 3 fields
+            + "01" + "0000000000000000" + "05000000" + "6f776e6572" + "02"  // key 0 "owner" uint
+            + "01" + "0100000000000000" + "05000000" + "67726f7570" + "02"  // key 1 "group" uint
+            + "01" + "0200000000000000" + "04000000" + "6d6f6465" + "02"  // key 2 "mode" uint
+        let bytes = stride(from: 0, to: hex.count, by: 2).map { offset in
+            let start = hex.index(hex.startIndex, offsetBy: offset)
+            return UInt8(hex[start..<hex.index(start, offsetBy: 2)], radix: 16)!
+        }
+        let signature = try Builtins.entity.signature().get()
+        #expect(SchemaFingerprint.compute([signature]) == SchemaFingerprint.fnv1a64(bytes))
+    }
+
     @Test("empty set hashes to the FNV-1a offset basis")
     func emptySet() {
         #expect(SchemaFingerprint.compute([]) == 0xcbf2_9ce4_8422_2325)

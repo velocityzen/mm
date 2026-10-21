@@ -4,7 +4,7 @@ The typed client: unary and streaming calls with msgid multiplexing, credit-base
 
 ## Overview
 
-The simple shape is the bracket, ``MMClientConnection/with(_:configuration:eventLoopGroup:logger:_:)`` — one scope owns connect, the inbound loop, your body, close, and the join:
+The simplest way to connect is the bracket, ``MMClientConnection/with(_:configuration:eventLoopGroup:logger:_:)``. One scope handles connect, the inbound loop, your body, close, and the join:
 
 ```swift
 let reply = await MMClientConnection.with(.unix(path: socketPath)) { connection in
@@ -12,11 +12,23 @@ let reply = await MMClientConnection.with(.unix(path: socketPath)) { connection 
 }
 ```
 
-`with` is sugar over ``MMClientConnection/open(_:configuration:eventLoopGroup:logger:)`` — the **live** connection as an FPBracket resource (acquire connects and starts the inbound loop; dispose closes and joins it, returning the loop's outcome as the release verdict), composable with other bracketed resources via `flatMap`/`BracketAsyncDo`. The bracket's `.failure` therefore means connect failed **or** the connection did not survive the scope — a transport error or protocol violation while the body ran; a clean EOF or the bracket's own close releases successfully, leaving per-call failures in the body's value. One connection multiplexes many calls (msgid-correlated, bounded by ``MMClientConfiguration/maxInFlightCalls``): open one per unit of work, not per call.
+`with` is a shorthand for ``MMClientConnection/open(_:configuration:eventLoopGroup:logger:)``, which returns the **live** connection as an FPBracket resource:
 
-Custom choreography — stream drainers, staged teardown — lives *inside* the bracket body as structured children (`async let`, a local group); the bracket still owns the lifecycle around it.
+- Acquire connects and starts the inbound loop.
+- Dispose closes the connection, joins the loop, and returns the loop's outcome as the release verdict.
 
-Daemons connect manually instead: ``MMClientConnection/connect(to:configuration:eventLoopGroup:logger:)`` bootstraps the transport and exchanges hellos (version negotiation is min-wins; a fingerprint mismatch is a ``ServerInfo`` verdict that should trigger discovery, never a disconnect), and `MMClientService` — its own product, so plain clients and CLIs don't link swift-service-lifecycle — runs the inbound loop under a `ServiceGroup`:
+It composes with other bracketed resources through `flatMap`/`BracketAsyncDo`.
+
+The bracket returns `.failure` if connect failed **or** the connection did not survive the scope (a transport error or protocol violation while the body ran). A clean EOF or the bracket's own close releases successfully. Per-call failures stay in the body's return value.
+
+One connection multiplexes many calls. Calls are matched by msgid, and ``MMClientConfiguration/maxInFlightCalls`` limits how many run at once. Open one connection per unit of work, not per call.
+
+Put custom coordination, such as stream drainers or staged teardown, *inside* the bracket body as structured child tasks (`async let`, a local group). The bracket still owns the lifecycle around it.
+
+Daemons connect manually instead:
+
+- ``MMClientConnection/connect(to:configuration:eventLoopGroup:logger:)`` sets up the transport and exchanges hellos. Version negotiation picks the lower version. A fingerprint mismatch never disconnects: ``ServerInfo`` reports it, and it should trigger discovery.
+- `MMClientService` runs the inbound loop under a `ServiceGroup`. It is a separate product, so plain clients and CLIs do not link swift-service-lifecycle.
 
 ```swift
 let connection = try await MMClientConnection.connect(
@@ -29,11 +41,21 @@ let group = ServiceGroup(configuration: .init(
 try await group.run()
 ```
 
-`call(_:on:_:)` is overloaded for all four method shapes; the `on:` entity rides the open envelope, and defaults to root — an entity-less call, valid only against a route whose server-side `Accepts` names exactly one concrete entity (the server infers and authorizes the target); any other route answers `.denied`. Unary calls return `Result<Response, MMCallError>` directly. Streaming calls return handles: ``InboundStreamHandle`` for server streams (an `AsyncSequence` of elements — iterating grants credit — plus `result()`, `stop()`, and `cancel()`), ``OutboundStreamHandle`` for client streams (credit-gated `send(_:)`, one-shot `finish()`, `result()`), and ``BidirectionalStreamHandle`` with independent `inbound`/`outbound` halves sharing one terminal. ``StreamSendOutcome`` surfaces `.peerStopped`, `.callEnded`, and `.connectionClosed` as typed, graceful outcomes rather than errors. To consume a stream while the same task drives other calls, ``withStream(_:each:_:)`` runs `each` in a structured sibling (the head-of-line rule as an API shape) and returns only after both the body finished and the sequence ended — the join is built in.
+`call(_:on:_:)` has overloads for all four method shapes. The open envelope carries the `on:` entity. The default is root, which means an entity-less call. This is valid only for a route whose server-side `Accepts` names exactly one concrete entity; the server infers and authorizes the target. Any other route answers `.denied`.
 
-``MMClientConnection/discoverSchema(scope:)`` fetches the server's contract through the builtin `server.schema` (filtered by your traversal rights), and ``SchemaDifference`` diffs it against the locally compiled declaration — signatures and named types both, descriptions stripped — as the decision input for graceful degradation.
+Unary calls return `Result<Response, MMCallError>` directly. Streaming calls return handles:
 
-Connection lifecycle is deliberately simple: ``ClientState`` is `.connected` then `.closed(reason:)`, observed via `stateUpdates()`. Reconnection is out of scope by design — a closed connection stays closed, and retry policy belongs to the application.
+- ``InboundStreamHandle`` for server streams: an `AsyncSequence` of elements (iterating grants credit), plus `result()`, `stop()`, and `cancel()`.
+- ``OutboundStreamHandle`` for client streams: credit-gated `send(_:)`, one-shot `finish()`, and `result()`.
+- ``BidirectionalStreamHandle``: independent `inbound`/`outbound` halves that share one terminal.
+
+``StreamSendOutcome`` reports `.peerStopped`, `.callEnded`, and `.connectionClosed` as typed, graceful outcomes, not errors.
+
+To consume a stream while the same task makes other calls, use ``withStream(_:each:_:)``. It runs `each` in a structured sibling task, which enforces the head-of-line rule. It returns only after the body finishes and the sequence ends, so it joins both for you.
+
+``MMClientConnection/discoverSchema(scope:)`` fetches the server's contract through the builtin `server.schema`, filtered by your traversal rights. ``SchemaDifference`` compares it with the locally compiled declaration: signatures and named types, without descriptions. Use the result to decide how to degrade gracefully.
+
+The connection lifecycle is intentionally simple. ``ClientState`` is `.connected`, then `.closed(reason:)`; observe it with `stateUpdates()`. There is no reconnection: a closed connection stays closed. Retry policy belongs to the application.
 
 ## Topics
 

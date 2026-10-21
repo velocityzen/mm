@@ -19,6 +19,16 @@ struct EnvelopeGoldenVectorTests {
         #expect(MMEnvelope.decode(from: mpBytes(vector)) == .success(envelope))
     }
 
+    @Test("request with the root entity [1, 1, \"ping\", \"\", []] encodes and decodes")
+    func requestRootEntityVector() {
+        // Wire spec Appendix A.4: the root target is the empty string.
+        let vector = "950101a470696e67a090"
+        let envelope = MMEnvelope.request(
+            msgid: 1, method: "ping", entity: "", params: mpBytes("90"))
+        #expect(envelope.encoded().mpSuccess.map(mpHex) == vector)
+        #expect(MMEnvelope.decode(from: mpBytes(vector)) == .success(envelope))
+    }
+
     @Test("response success [0, 5, nil, true] encodes and decodes")
     func responseSuccessVector() {
         let vector = "940005c0c3"

@@ -4,21 +4,71 @@ The contract layer: method descriptors, wire type schemas, the declarative schem
 
 ## Overview
 
-MMSchema is pure values — no NIO import, no IO — so client-only processes can depend on it (plus MMClient) without pulling in server machinery.
+MMSchema contains only values: no NIO import, no IO. Client-only processes can depend on it (plus MMClient) without server code.
 
-A wire contract is a set of **method descriptors**: ``Method`` for unary calls, and ``ServerStreamMethod``, ``ClientStreamMethod``, and ``BidirectionalStreamMethod`` for the three streaming shapes of the four-part method model (opening request, optional request stream, optional response stream, terminal response). Descriptors erase to ``AnyMethod`` and are grouped in a ``MethodNamespace``, whose `all` list is what a server cross-checks at startup and what discovery serves as ``MethodSignature`` values.
+A wire contract is a set of **method descriptors**. Each method has four parts: an opening request, an optional request stream, an optional response stream, and a terminal response.
 
-Contracts can be *declared as data* with the runtime DSL — `Schema("prefix") { Enum / Type / Call { Access; Request; RequestStream; ResponseStream; Response } }` — producing a ``SchemaDeclaration`` that can compute its ``SchemaFingerprint`` and `verify(against:)` the compiled Swift types. The `Call` part functions — `Access`, `Request`, `Response`, `RequestStream`, and `ResponseStream` — are overloaded to take a fields block, a bare ``TypeSchema``, a ``SchemaDescribable`` metatype, or a named-type reference; the full overload set is listed in the function index below. The `#schema` macro (see ``schema(_:description:_:)``) takes the same declaration at compile time and generates everything it implies: integer-keyed request/response/element structs, string-valued wire enums with an `unknown` fallback, the typed descriptors, `all`, `types`, and the re-emitted contract. Shared named types live in `#schemaTypes` containers (``schemaTypes(_:_:)``) or hand-written ``SchemaDescribable`` types.
+- ``Method`` describes unary calls.
+- ``ServerStreamMethod``, ``ClientStreamMethod``, and ``BidirectionalStreamMethod`` describe the three streaming shapes.
 
-Wire shapes are modeled by ``TypeSchema`` (structures with integer-keyed fields, string-valued enumerations, nominal ``TypeDefinition`` references) and discovered from Swift types by `TypeSchema.of(_:)` — a memoized decoder probe with ``SchemaDescribable`` as the escape hatch. Descriptions are doc-only everywhere: served by discovery, never hashed into the fingerprint — including the namespace's own (`Schema("journal", description: "...")` / `#schema(description:)`), which rides the discovery response's ``NamespaceSignature`` list and doubles as the generated CLI group's abstract.
+Descriptors erase to ``AnyMethod``. A ``MethodNamespace`` groups them. Its `all` list is what a server cross-checks at startup and what discovery serves as ``MethodSignature`` values.
 
-Schema *walking* is written once rather than per consumer: ``TypeResolver`` is the canonical `.reference` resolution through a definitions table (chains followed, cycles reported), ``TypeSchema/fold(resolver:_:)`` is the one recursion for schema analyses, and ``SchemaValue`` is a schema-shaped value as plain data — loose input (typically parsed JSON) canonicalized by ``SchemaValue/validated(against:resolver:path:)``, where the schema decides every scalar kind and failures carry their dotted path. The schema-driven wire coders in MMCLI build on all three.
+You can *declare a contract as data* with the runtime DSL: `Schema("prefix") { Enum / Type / Call { Access; Request; RequestStream; ResponseStream; Response } }`. The result is a ``SchemaDeclaration``. It computes its ``SchemaFingerprint`` and can `verify(against:)` the compiled Swift types.
 
-Calendar and clock values are first-class wire kinds, never strings: `.date` is a calendar date, `.datetime` a floating wall-clock reading, `.timestamp` an absolute instant with a fixed offset — ``MMDate``, ``MMDateTime``, and ``MMTimestamp`` in Swift. The types are dependency-free (hand-rolled ISO 8601 parsing and rendering, no Foundation, no ICU), `Comparable` (timestamps order by instant), and come with calendar math via ``MMDateComponent`` (`date + .month(1)` clamps month ends; time components carry across days), exact `Duration` math (`timestamp - other` is the instant difference), day-striding dates (``MMDate`` is `Strideable`, so `startDate..<endDate` iterates), and — where Foundation exists — `DateComponents` interop both ways plus the current moment (`MMTimestamp.now(in:)`, `MMDateTime.now(in:)`, `MMDate.today(in:)`); the core types themselves stay clock-free. On the MessagePack wire all three ride as VPTS binary, the variable-precision timestamp codec whose reference implementation is ``MMVPTS`` (spec: the VPTS article under MMWire); their `Codable` form is the canonical ISO string, which is what JSON projections and display use.
+The `Call` part functions (`Access`, `Request`, `Response`, `RequestStream`, `ResponseStream`) accept a fields block, a bare ``TypeSchema``, a ``SchemaDescribable`` metatype, or a named-type reference. The function index below lists all overloads.
 
-Authorization is filesystem-style: ``EntityName`` is a validated dotted path, ``EntityACL`` carries owner uid, group gid, and 9 rwx/ugo mode bits with first-matching-class-wins semantics, and ``AccessMode`` is the rwx option set a method declares. ``PeerIdentity`` is deliberately not Codable — it is kernel-derived only and never crosses the wire.
+The `#schema` macro (see ``schema(_:description:_:)``) takes the same declaration at compile time. It generates:
 
-Every server also speaks the ``Builtins``: `server.schema` (discovery, scoped by the envelope entity) and `server.entity` (an entity's ACL record).
+- integer-keyed request, response, and element structs
+- string-valued wire enums with an `unknown` fallback
+- the typed descriptors, `all`, and `types`
+- the re-emitted contract
+
+Shared named types live in `#schemaTypes` containers (``schemaTypes(_:_:)``) or in hand-written ``SchemaDescribable`` types.
+
+``TypeSchema`` models wire shapes: structures with integer-keyed fields, string-valued enumerations, and nominal ``TypeDefinition`` references. `TypeSchema.of(_:)` reads the schema of a Swift type with a memoized decoder probe. If the probe cannot handle a type, conform it to ``SchemaDescribable`` instead.
+
+Descriptions are documentation only. Discovery serves them, but the fingerprint never includes them. The same applies to the namespace description (`Schema("journal", description: "...")` / `#schema(description:)`). Discovery returns it in the ``NamespaceSignature`` list, and the generated CLI group uses it as its abstract.
+
+Schema *walking* code is shared by all consumers:
+
+- ``TypeResolver`` resolves `.reference` through a definitions table. It follows chains and reports cycles.
+- ``TypeSchema/fold(resolver:_:)`` is the one recursion for schema analyses.
+- ``SchemaValue`` is a schema-shaped value as plain data. ``SchemaValue/validated(against:resolver:path:)`` canonicalizes loose input, typically parsed JSON. The schema decides every scalar kind, and each failure includes its dotted path.
+
+The schema-driven wire coders in MMCLI use all three.
+
+Calendar and clock values are wire kinds of their own, never strings:
+
+- `.date` is a calendar date (``MMDate``).
+- `.datetime` is a floating wall-clock reading (``MMDateTime``).
+- `.timestamp` is an absolute instant with a fixed offset (``MMTimestamp``).
+
+These types:
+
+- have no dependencies: their own ISO 8601 parsing and rendering, no Foundation, no ICU
+- are `Comparable` (timestamps order by instant)
+- support calendar math with ``MMDateComponent``: `date + .month(1)` clamps to the month end, and time components carry across days
+- support exact `Duration` math: `timestamp - other` is the instant difference
+- step by day: ``MMDate`` is `Strideable`, so `startDate..<endDate` iterates
+- with Foundation, convert to and from `DateComponents` and read the current moment: `MMTimestamp.now(in:)`, `MMDateTime.now(in:)`, `MMDate.today(in:)`
+
+The core types never read the clock themselves.
+
+On the MessagePack wire, all three use VPTS binary, the variable-precision timestamp codec. ``MMVPTS`` is its reference implementation (spec: the VPTS article under MMWire). Their `Codable` form is the canonical ISO string, which JSON projections and display use.
+
+Authorization works like a filesystem:
+
+- ``EntityName`` is a validated dotted path.
+- ``EntityACL`` holds an owner uid, a group gid, and 9 rwx/ugo mode bits. The first matching class wins.
+- ``AccessMode`` is the rwx option set a method declares.
+
+``PeerIdentity`` is intentionally not Codable. It comes only from the kernel and never crosses the wire.
+
+Every server also serves the ``Builtins``:
+
+- `server.schema`: discovery, scoped by the envelope entity
+- `server.entity`: an entity's ACL record
 
 ## Topics
 

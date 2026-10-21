@@ -1,23 +1,45 @@
 # ``MMCLI``
 
-The runtime behind schema-generated command-line tools: connection options, exit-code mapping, output rendering, stream drivers, and schema-driven generic commands.
+The runtime for schema-generated command-line tools: connection options, exit-code mapping, output rendering, stream drivers, and schema-driven generic commands.
 
 ## Overview
 
-A top-level `CLI(.enabled)` entry in the `#schema("journal")` block marks the schema for CLI generation: the `MMCLIGeneratorPlugin` build-tool plugin, applied to the command-line target, emits one swift-argument-parser command per non-omitted call plus a namespace group (`Journal.Command`) as an extension of the namespace type — so the API module declaring the schema (shared with the daemon) depends on MMSchema alone — names, `--help` text, and argument shapes all derived from the contract declaration, reshaped by `CLI(...)` parts and `Field(..., cli:)` hints. A `Field(..., default:)` literal automatically makes its option hybrid (ArgumentParser's `defaultAsFlag`): bare `--format` means the default, `--format yaml` parses the value, absent stays nil; on calendar/clock fields `default: .now` stamps the moment of invocation. A `description:` on the schema becomes the group's abstract (falling back to a "Commands for the … namespace." template without one). Those generated commands are thin: everything with runtime behavior lives here.
+A top-level `CLI(.enabled)` entry in the `#schema("journal")` block turns on CLI generation. The `MMCLIGeneratorPlugin` build-tool plugin, applied to the command-line target, generates one swift-argument-parser command per non-omitted call and a namespace group (`Journal.Command`), as an extension of the namespace type. The API module that declares the schema, shared with the daemon, depends only on MMSchema. Names, `--help` text, and argument shapes come from the contract, adjusted by `CLI(...)` parts and `Field(..., cli:)` hints.
 
-- ``MMCLIOptions`` is the shared `@OptionGroup` every command embeds: `--socket`/`--tcp` (exactly one — or neither, when the tool declared its daemon's well-known address via ``Endpoint(_:)``; explicit flags always win), connect/hello timeouts, `--output` (``OutputFormat``: `json`, `json-pretty`, `raw`, `text`), and `--no-verify`.
-- ``MMCLIRunner`` owns the connection lifecycle for a one-shot process: connect, run the inbound loop as a structured child, execute the command body, close — connect failures render "is the daemon running?" and exit 69. Schema verification is automatic and never manual: a matching build-time completeness claim proves the whole composition from the hello, and otherwise the command's namespace is confirmed with one scoped discovery diff before dispatch (drift exits 76).
-- ``MMCLIVerify`` backs the generated per-namespace `verify` subcommand: a discovery diff of the compiled contract against what the server serves, scoped to the namespace — the build-time-derived compatibility check (the hello fingerprint covers the whole server and can't be computed from one namespace). "In sync" exits 0; any difference prints its buckets and exits 1, like `diff`.
-- Verification also runs **automatically**: every generated command hands the runner its contract (`invoke(_:verifying:_:)`), which confirms the namespace before dispatch — drift exits 76, `--no-verify` opts out, denied discovery skips with a note. ``MMCLIServerContract`` upgrades this to a free check for purpose-built tools — declared via ``Contract(_:)``: `.complete([...])` folds the expected whole-server hello fingerprint at startup (builtins and any `sharedTypes:` declarations included — a server registering shared `Types(...)` containers can never match a claim that omits them), a matching hello proves the entire composition with no discovery round-trip, and a mismatch falls back to the scoped diff.
-- ``MMCLIFailure`` maps `MMCallError` to sysexits-flavored codes (denied → 77, unknown method → 64, malformed params → 65, transport → 69, SIGINT → 130, application `MMError`s → 1 with `error <code>: <message>` on stderr) and validates entity arguments. The `<entity>` positional is optional on every command: omitting it sends an entity-less (root-targeted) request, which the daemon accepts only when the route's `Accepts` names exactly one concrete entity and infers it — any other route answers with an ordinary denial.
-- ``MMCLIOutput`` renders responses as JSON — generated payload structs carry field names in their `CodingKeys`' `stringValue`, so `JSONEncoder` prints named keys with zero schema plumbing. All stdout/stderr writing lives in this one type. `--output text` adds per-command human rendering, resolved in order: a ``Format(_:_:)`` declaration in the ``MMCLI(_:)`` block (also spellable metatype-free as ``Format(_:)`` — `Format { (event: ChangeEvent) in ... }`, the type inferred from the closure parameter; keyed by the generated response/element *type*, so one entry addresses exactly one command's output or one stream's elements); the type's own `CustomStringConvertible` conformance (`extension Journal.ReadResponse: CustomStringConvertible { ... }` — the registry-free way, conformance travels with the type); else compact JSON; `json`/`json-pretty` always bypass the formatters, so scripts stay stable. ``Output(_:)`` sets the tool's default format for human-first tools.
-- ``MMCLIStreamDriver`` drives the three stream shapes: `follow` prints elements as JSON lines with SIGINT mapped to a graceful STOP (second SIGINT cancels); `feed` pumps stdin lines through the credit-gated writer (single-string-field elements take plain lines, everything else JSON lines; EOF is END); `duplex` does both at once. ``MMCLISignals`` provides the structured SIGINT primitive underneath.
-- ``MMCLIEnumArgument`` makes generated wire enums typed command arguments whose `unknown` fallback is hidden from help and refused as input; ``MMCLIJSON`` decodes JSON-literal options for fields with no flat command-line shape.
+- A `Field(..., default:)` literal makes its option hybrid (ArgumentParser's `defaultAsFlag`). Bare `--format` uses the default, `--format yaml` parses the value, and an absent option stays nil.
+- On calendar and clock fields, `default: .now` uses the time of invocation.
+- A `description:` on the schema becomes the group's abstract. Without it, the abstract is "Commands for the … namespace."
 
-Two generic commands need no code generation and mount alongside generated groups: ``MMCLIDiscover`` (`discover` — the schema a server actually serves, with the hello verdict on stderr) and ``MMCLIRawCall`` (`call` — any unary method by wire name, `--params` JSON validated and encoded against the *discovered* signature via ``MMCLIDynamicRequest``, the response decoded through ``MMCLIDynamicResponse``'s task-local schema and rendered with field names).
+The generated commands contain little code. All runtime behavior lives in this module:
 
-The whole tool is one declaration — the CLI twin of `MMService { ... }`. The root-shape parts (``Name(_:)``, ``Abstract(_:)``, ``Commands(_:)``, ``Version(_:)`` — or a full ``Configuration(_:)`` they merge onto, for fields like `defaultSubcommand`) make ``MMCLI(_:)`` synthesize and run the root command itself (parse, async dispatch, help, exit codes — all through ArgumentParser), and the other parts bind as the invocation's task-local defaults:
+- ``MMCLIOptions`` is the shared `@OptionGroup` in every command:
+  - `--socket`/`--tcp`: exactly one, or neither when the tool declares its daemon's address with ``Endpoint(_:)``. Explicit flags always win.
+  - Connect and hello timeouts.
+  - `--output` (``OutputFormat``: `json`, `json-pretty`, `raw`, `text`).
+  - `--no-verify`.
+- ``MMCLIRunner`` runs the connection lifecycle of a one-shot process: connect, run the inbound loop as a structured child, run the command body, close. A connect failure prints "is the daemon running?" and exits 69.
+- ``MMCLIVerify`` implements the generated `verify` subcommand of each namespace. It diffs the compiled contract against what the server serves, for that namespace only. This is the compatibility check you can derive at build time. (The hello fingerprint covers the whole server, so one namespace cannot produce it.) In sync exits 0. A difference prints its buckets and exits 1, like `diff`.
+- Verification also runs **automatically**, never manually. Every generated command passes its contract to the runner (`invoke(_:verifying:_:)`). The runner confirms the namespace with one scoped discovery diff before dispatch. Drift exits 76. `--no-verify` turns it off. Denied discovery skips the check with a note. Purpose-built tools can declare ``MMCLIServerContract`` with ``Contract(_:)``. `.complete([...])` computes the expected whole-server hello fingerprint at startup, including builtins and any `sharedTypes:` declarations. (A server that registers shared `Types(...)` containers never matches a claim that omits them.) A matching hello then proves the whole composition with no discovery round-trip. A mismatch falls back to the scoped diff.
+- ``MMCLIFailure`` maps `MMCallError` to sysexits-style exit codes: denied 77, unknown method 64, malformed params 65, transport 69, SIGINT 130. Application `MMError`s exit 1 and print `error <code>: <message>` on stderr. It also validates entity arguments. The `<entity>` positional is optional on every command. Without it, the request is root-targeted. The daemon accepts that only when the route's `Accepts` names exactly one concrete entity, which it infers. Other routes return an ordinary denial.
+- ``MMCLIOutput`` renders responses as JSON. Generated payload structs keep field names in their `CodingKeys`' `stringValue`, so `JSONEncoder` prints named keys with no schema code. This type does all stdout and stderr writing. `--output text` uses the first match:
+  1. A ``Format(_:_:)`` entry in the ``MMCLI(_:)`` block, or ``Format(_:)`` without the metatype: `Format { (event: ChangeEvent) in ... }` infers the type from the closure parameter. Entries are keyed by the generated response or element *type*: one entry matches one command's output or one stream's elements.
+  2. The type's `CustomStringConvertible` conformance (`extension Journal.ReadResponse: CustomStringConvertible { ... }`), which needs no registry.
+  3. Compact JSON.
+
+  `json` and `json-pretty` always skip the formatters, so script output stays stable. ``Output(_:)`` sets the default format for tools used mainly by people.
+- ``MMCLIStreamDriver`` runs the three stream shapes. ``MMCLISignals`` provides its structured SIGINT primitive.
+  - `follow` prints elements as JSON lines. SIGINT sends a graceful STOP, and a second SIGINT cancels.
+  - `feed` sends stdin lines through the credit-gated writer. Single-string-field elements take plain lines, others JSON lines. EOF sends END.
+  - `duplex` does both.
+- ``MMCLIEnumArgument`` makes generated wire enums typed command arguments. Their `unknown` fallback is hidden from help and rejected as input.
+- ``MMCLIJSON`` decodes JSON-literal options for fields with no flat command-line shape.
+
+Two generic commands need no code generation. Mount them next to the generated groups:
+
+- ``MMCLIDiscover`` (`discover`) prints the schema the server actually serves, with the hello verdict on stderr.
+- ``MMCLIRawCall`` (`call`) calls any unary method by wire name. ``MMCLIDynamicRequest`` validates and encodes `--params` JSON against the *discovered* signature. The response is decoded with the task-local schema of ``MMCLIDynamicResponse`` and printed with field names.
+
+The whole tool is one declaration, like `MMService { ... }`. With the root-shape parts (``Name(_:)``, ``Abstract(_:)``, ``Commands(_:)``, ``Version(_:)``), ``MMCLI(_:)`` builds and runs the root command through ArgumentParser (parsing, async dispatch, help, exit codes). For fields like `defaultSubcommand`, add a full ``Configuration(_:)``; the parts merge onto it. Other parts become task-local defaults for the invocation:
 
 ```swift
 @main
@@ -36,7 +58,7 @@ struct Main {
 }
 ```
 
-A tool with its own hand-written root keeps it and uses the `run:` form instead — `await MMCLI { Contract(...) } run: { await MM.main() }` (no `Configuration` part there; the root type carries its own). ``withCLI(_:_:)`` and ``MMCLIDefaults`` remain the value-level spelling underneath.
+A tool with a hand-written root uses the `run:` form: `await MMCLI { Contract(...) } run: { await MM.main() }`. It takes no `Configuration` part, because the root type has its own. ``withCLI(_:_:)`` and ``MMCLIDefaults`` are the value-level API underneath.
 
 ## Topics
 

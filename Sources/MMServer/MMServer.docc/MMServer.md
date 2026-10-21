@@ -4,7 +4,7 @@ The server: router, authorization, peer-credential capture, streaming handlers, 
 
 ## Overview
 
-A whole daemon is declared as data and run inside a swift-service-lifecycle `ServiceGroup`:
+You declare a whole daemon as data and run it inside a swift-service-lifecycle `ServiceGroup`:
 
 ```swift
 let server = MMService {
@@ -22,15 +22,23 @@ let server = MMService {
 }
 ```
 
-``MMService`` binds the endpoint (Unix domain socket or TCP), exchanges hellos, and dispatches through the ``Router``. Dispatch order is fixed: route lookup, parse the open envelope's entity slot, traversal `x` on every ancestor, target ACL check, and only then params decode and handler invocation — zero payload bytes are interpreted before authorization passes. Handlers receive an ``MMContext`` whose `entity` is the call's already-authorized envelope target.
+``MMService`` binds the endpoint (Unix domain socket or TCP), exchanges hellos, and dispatches through the ``Router`` in a fixed order:
 
-Handlers are registered with `On` inside the service builder (or `Handle` on a bare ``Router``) in all four method shapes. Streaming handlers get a credit-gated ``MMResponseSink`` to push elements and/or an ``MMRequestStream`` of inbound elements; ``StreamSendOutcome`` reports `.peerStopped` and `.callEnded` as typed, graceful outcomes. `For(_:_:)` enrolls a namespace's startup cross-check: every declared method needs a handler, or the daemon refuses to boot.
+1. Route lookup.
+2. Parse the open envelope's entity slot.
+3. Traversal `x` on every ancestor.
+4. Target ACL check.
+5. Params decode and handler call.
 
-Authorization is asked of an ``EntityACLProvider`` — the host's dynamic authority, with ``InMemoryACLProvider`` and the declarative `ACLProvider { Entity(...) { ... } }` tree as the static form. Peer identity comes from kernel credentials on Unix sockets; a capture failure closes the connection with no dispatch, and a missing ACL is a denial that never leaks existence.
+No payload bytes are read before authorization passes. Handlers receive an ``MMContext`` whose `entity` is the call's already-authorized envelope target.
 
-Startup ordering on top of ServiceLifecycle (which has none) uses ``ServiceReadiness``, ``GatedService``, and the `Ready(_:)` builder part firing at bind. Every server auto-registers the builtins `server.schema` and `server.entity`.
+Register handlers with `On` in the service builder, or `Handle` on a bare ``Router``, for all four method shapes. Streaming handlers get a credit-gated ``MMResponseSink`` to send elements, an ``MMRequestStream`` of inbound elements, or both. ``StreamSendOutcome`` reports `.peerStopped` and `.callEnded` as typed, graceful outcomes, not errors. `For(_:_:)` adds a startup check for a namespace: if a declared method has no handler, the daemon does not start.
 
-The <doc:IntegrationGuide> walks through embedding all of this in a production daemon (including a SQLite-backed ACL provider and hardening knobs); <doc:RemoteAccess> covers SSH socket forwarding, systemd/launchd recipes, and TCP caveats.
+Authorization decisions come from an ``EntityACLProvider``, the host's dynamic source of rules. For static rules, use ``InMemoryACLProvider`` or the declarative `ACLProvider { Entity(...) { ... } }` tree. On Unix sockets, peer identity comes from kernel credentials. If the server cannot read them, it closes the connection without dispatch. A missing ACL is a denial that does not reveal whether the entity exists.
+
+ServiceLifecycle has no startup ordering. Use ``ServiceReadiness``, ``GatedService``, and the `Ready(_:)` builder part (fires at bind) to order startup. Every server automatically registers the builtins `server.schema` and `server.entity`.
+
+The <doc:IntegrationGuide> shows how to embed all of this in a production daemon, including a SQLite-backed ACL provider and hardening settings. <doc:RemoteAccess> covers SSH socket forwarding, systemd and launchd recipes, and TCP caveats.
 
 ## Topics
 

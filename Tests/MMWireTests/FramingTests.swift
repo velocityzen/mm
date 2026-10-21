@@ -175,6 +175,17 @@ struct FrameEncoderTests {
         #expect(try channel.finish().isClean)
     }
 
+    @Test("golden bytes: a frame around the request envelope")
+    func encoderGoldenRequestFrame() throws {
+        // Wire spec section 2.1: the 13-byte request of section 4.1.
+        let channel = EmbeddedChannel(handler: MessageToByteHandler(MMFrameEncoder()))
+        try channel.writeOutbound(mpBytes("950101a470696e67a3626f7890"))
+        #expect(
+            try channel.readOutbound(as: ByteBuffer.self).map(mpHex)
+                == "0d000000950101a470696e67a3626f7890")
+        #expect(try channel.finish().isClean)
+    }
+
     @Test("payload exactly at the cap encodes")
     func payloadAtCap() throws {
         let channel = EmbeddedChannel(
@@ -203,7 +214,7 @@ struct FrameEncoderTests {
             MessageToByteHandler(MMFrameEncoder()),
             ByteToMessageHandler(MMFrameDecoder()),
         ])
-        let payloadHexes = ["", "2a", "940101a470696e6790", String(repeating: "ab", count: 1000)]
+        let payloadHexes = ["", "2a", "950101a470696e67a3626f7890", String(repeating: "ab", count: 1000)]
         for hex in payloadHexes {
             try channel.writeOutbound(mpBytes(hex))
             let framedBytes = try channel.readOutbound(as: ByteBuffer.self)

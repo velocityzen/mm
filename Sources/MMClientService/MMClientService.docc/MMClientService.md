@@ -1,10 +1,10 @@
 # ``MMClientService``
 
-The swift-service-lifecycle adapter for `MMClientConnection`: run a daemon-style client's inbound loop as a managed service in a `ServiceGroup`.
+The swift-service-lifecycle adapter for `MMClientConnection`. It runs the inbound loop of a daemon-style client as a managed service in a `ServiceGroup`.
 
 ## Overview
 
-This adapter lives in its own product so plain clients and schema-generated CLIs depend on `MMClient` alone and never link swift-service-lifecycle or the swift-async-algorithms it pulls in. Tools and tests use the bracket, `MMClientConnection.with`. Long-lived daemons connect manually and hand the connection to ``MMClientService/MMClientService``:
+This adapter is a separate product. Plain clients and schema-generated CLIs depend only on `MMClient`. They never link swift-service-lifecycle or swift-async-algorithms, which swift-service-lifecycle depends on. Tools and tests use the bracket, `MMClientConnection.with`. Long-lived daemons connect manually and pass the connection to ``MMClientService/MMClientService``:
 
 ```swift
 import MMClient

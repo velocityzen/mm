@@ -4,17 +4,31 @@ The wire layer: MessagePack coding over `ByteBuffer`, length-prefix framing, the
 
 ## Overview
 
-MMWire implements the bottom layers of the matter-in-motion protocol and depends on NIOCore and MMSchema only (the latter for the wire time kinds' VPTS codec):
+MMWire implements the lowest layers of the matter-in-motion protocol. It depends only on NIOCore and MMSchema (for the VPTS codec of the wire time kinds).
 
-- **Framing** — `[u32 LE length][payload]` frames via ``MMFrameDecoder`` and ``MMFrameEncoder``. The length counts the payload only, and the cap (default 16 MiB, see ``MMWireInfo``) is enforced before a single body byte is accumulated.
-- **Hello preamble** — ``MMHello``, a fixed 15-byte structure (magic `MM`, protocol version, schema fingerprint, capability bitset) sent as the first frame in each direction.
-- **Envelope** — ``MMEnvelope``, tagged MessagePack arrays with kinds 0–6: terminal, open, credit, item, END, STOP, and CANCEL. Params, results, and stream items stay raw `ByteBuffer` slices until a typed layer decodes them.
+- **Framing**: `[u32 LE length][payload]` frames, through ``MMFrameDecoder`` and ``MMFrameEncoder``. The length counts only the payload. The decoder checks the size limit (default 16 MiB, see ``MMWireInfo``) before it stores any body byte.
+- **Hello preamble**: ``MMHello``, a fixed 15-byte structure (magic `MM`, protocol version, schema fingerprint, capability bitset). Each side sends it as its first frame.
+- **Envelope**: ``MMEnvelope``, tagged MessagePack arrays with kinds 0 to 6: terminal, open, credit, item, END, STOP, and CANCEL. Params, results, and stream items stay raw `ByteBuffer` slices until a typed layer decodes them.
 
-Typed payloads are coded by ``MMPackEncoder`` and ``MMPackDecoder``: structs encode as MessagePack maps with integer keys, unknown keys are skipped on decode, and `ByteBuffer`-typed fields get zero-copy bin/str slices. The wire time kinds (`MMDate`, `MMDateTime`, `MMTimestamp` from MMSchema) short-circuit the same way: they ride as MessagePack bin holding a VPTS encoding (<doc:VPTS>), never as their ISO-string `Codable` form. Beneath the coders, the MessagePack value layer is exposed as the `readMessagePack*` / `writeMessagePack*` method families on `ByteBuffer` — readers for every format family, writers that always emit the smallest correct representation, a structural `skipMessagePackValue(maxDepth:)`, and `readMessagePackRawValueSlice(maxDepth:)` for zero-copy raw extents. Because those methods extend a NIOCore type, they appear under `ByteBuffer`'s extensions in the reference rather than in the lists below.
+``MMPackEncoder`` and ``MMPackDecoder`` code typed payloads:
 
-Failures surface as `Result` with the single typed error ``MMWireError``. Well-known RPC error codes live in ``MMErrorCode``: codes 1–63 are reserved for the protocol, applications use 64 and above.
+- Structs encode as MessagePack maps with integer keys.
+- The decoder skips unknown keys.
+- `ByteBuffer`-typed fields get zero-copy bin/str slices.
+- The wire time kinds (`MMDate`, `MMDateTime`, `MMTimestamp` from MMSchema) are also special-cased. They travel as MessagePack bin holding a VPTS encoding (<doc:VPTS>), never as their ISO-string `Codable` form.
 
-The byte-level contract — every frame, envelope kind, ACL rule, fingerprint step, and pinned conformance vector — is specified in <doc:WireProtocol>.
+Below the coders, the MessagePack value layer is available as the `readMessagePack*` and `writeMessagePack*` method families on `ByteBuffer`:
+
+- readers for every format family
+- writers that always produce the smallest correct representation
+- `skipMessagePackValue(maxDepth:)`, a structural skip
+- `readMessagePackRawValueSlice(maxDepth:)`, for zero-copy raw value slices
+
+They extend a NIOCore type, so the reference lists them under `ByteBuffer` extensions, not below.
+
+Failures return a `Result` with one typed error, ``MMWireError``. ``MMErrorCode`` defines the well-known RPC error codes. Codes 1 to 63 are reserved for the protocol. Applications use 64 and above.
+
+<doc:WireProtocol> specifies the byte-level contract: every frame, envelope kind, ACL rule, fingerprint step, and pinned conformance vector.
 
 ## Topics
 

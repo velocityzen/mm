@@ -1,21 +1,21 @@
 ---
 name: mm
-description: Implement, extend, or debug a matter-in-motion (mm) RPC server or client in Swift. Use this skill whenever the task involves MMService, MMClientConnection, a #schema contract, EntityACL tables, RPC handlers, streaming (follow/import-style calls), or any daemon/client that talks over this library's Unix-socket/TCP protocol — even if the user just says "add a method", "expose X over the socket", "write a client for the daemon", or "the call is denied". Also use it before reviewing or refactoring code that imports MMWire, MMSchema, MMServer, or MMClient.
+description: Implement, extend, or debug a matter-in-motion (mm) RPC server or client in Swift. Use this skill whenever the task involves MMService, MMClientConnection, a #schema contract, EntityACL tables, RPC handlers, streaming (follow/import-style calls), or any daemon/client that talks over this library's Unix-socket/TCP protocol. Use it even if the user just says "add a method", "expose X over the socket", "write a client for the daemon", or "the call is denied". Also use it before reviewing or refactoring code that imports MMWire, MMSchema, MMServer, or MMClient.
 ---
 
 # Implementing a matter-in-motion server and client
 
-matter-in-motion is a binary RPC library: length-prefixed MessagePack envelopes over Unix domain sockets (or TCP), schemas declared once as Swift values, and filesystem-style rwx/ugo authorization enforced from kernel peer credentials. Everything below is the golden path; the runnable proof of every pattern is in `Examples/` (API + Daemon + Client).
+matter-in-motion is a binary RPC library: length-prefixed MessagePack envelopes over Unix domain sockets (or TCP). Schemas are Swift values, declared once. Authorization uses rwx/ugo modes, checked against kernel peer credentials. `Examples/` (API + Daemon + Client) has runnable code for every pattern below.
 
-Pick products by role — the dependency direction is load-bearing:
+Choose products by role. Keep this dependency direction:
 
-- Shared contract module: depends on `MMSchema` only. Never imports server or client.
+- Shared contract module: `MMSchema` only. Never import server or client.
 - Daemon: `MMServer` + `MMSchema` (+ swift-service-lifecycle, swift-log).
-- Client process: `MMClient` + `MMSchema`. A client never links `MMServer`.
+- Client process: `MMClient` + `MMSchema`. Never link `MMServer`.
 
-## Step 1 — declare the contract once, with `#schema`
+## Step 1: declare the contract once, with `#schema`
 
-The contract lives in its own module (so clients can import it without the server) as a single macro block. The macro generates the payload structs, typed descriptors, `all`, `types`, and a runtime `contract` — there is no second copy to keep in sync:
+Put the contract in its own module, so clients can import it without the server. One macro block generates the payload structs, typed descriptors, `all`, `types`, and a runtime `contract`. There is no second copy to sync:
 
 ```swift
 import MMSchema
@@ -35,7 +35,7 @@ public enum Journal: MethodNamespace {
             Request { Field("line", .string) }
             Response { Field("count", .int) }
         }
-        // Server → client stream: an ordinary method with a ResponseStream —
+        // Server → client stream: an ordinary method with a ResponseStream:
         // correlated to one call, authorized once at open, discoverable.
         Call("follow") {
             Access { .read }
@@ -58,20 +58,25 @@ public let journalContract: SchemaDeclaration = Journal.contract
 
 Rules that keep the wire stable:
 
-- A method is four independent, freely combinable parts: `Request`, `RequestStream`, `ResponseStream`, `Response`. Unary is just "no stream parts". Omitted `Request` means an empty payload.
-- `Call("@")` is the namespace **root call**: the method IS the namespace (wire name `search`, not `search.run`). Generated members are named `root` (`Search.root`, `RootRequest`, `RootCommand`); the CLI makes it the group's default subcommand, so `tool search` alone runs it. One per schema; discovery filters it by execute on its own name-entity, like its dotted siblings. Pair it with `Accepts("search")` and even the entity can be omitted.
-- The call's target entity rides the **open envelope**, never the payload. Do not add an `entity` field to a request "for routing" — handlers read `context.entity`, clients pass `on:`.
-- Field keys are declaration-order integers. When evolving, pin keys (`Field(3, "note", .string)`) and make every new field `.optional(...)` — unknown keys are skipped, so old and new peers interoperate without a version bump. The protocol version stays 1; evolution is optional fields, not versions.
-- `Access { .read / .write / .execute }` is the permission class the verb demands on the target entity. Choose it like a file mode, not like HTTP semantics.
-- Calendar/clock fields are first-class wire kinds, never strings: `Field("day", .date)` (calendar date), `.datetime` (wall clock, no zone), `.timestamp` (absolute instant with offset) — VPTS binary on the wire (variable-precision timestamp codec, spec `Sources/MMWire/MMWire.docc/VPTS.md`; ISO 8601 strings only in JSON/CLI projections, spec §8.3), `MMDate`/`MMDateTime`/`MMTimestamp` in Swift (dependency-free, `Comparable`; timestamps order by instant), with calendar math (`date + .month(1)` clamps month ends; time components carry across days), exact `Duration` math (`timestamp - other` is the instant difference), day-striding `MMDate` (`startDate..<endDate` iterates), `DateComponents` interop both ways, and Foundation-gated now constructors (`MMTimestamp.now()` UTC / `.now(in:)`, `MMDateTime.now(in:)`, `MMDate.today(in:)` — the core types have no clock). Don't model a date as `.string` or an epoch `.int`.
-- `description:` everywhere is served by discovery but never fingerprinted — doc edits are not schema drift. That includes the namespace itself: `#schema("journal", description: "...")` (or `Schema("journal", description: "...")`) rides discovery's `namespaces` list and becomes the generated CLI group's abstract.
-- Any part can BE a named type: `Request(.reference("X"))`, `ResponseStream(.reference("ChangeEvent"))`, or a `SchemaDescribable` Swift type. The macro then generates no struct for that part.
-- Shared types across schemas go in `#schemaTypes("common") { ... }` — but a compiler limitation means same-module macro arguments cannot see another macro's generated members, so shared containers need their own module (or hand-written `SchemaDescribable` types).
-- Hand-written types outside the macro work too; an empty request struct with no stored properties must declare `static var schema: TypeSchema { .structure(fields: []) }` (`SchemaDescribable`) because a property-less decoder cannot be probed.
+- A method has four independent, combinable parts: `Request`, `RequestStream`, `ResponseStream`, `Response`. Unary has no stream parts. No `Request` means an empty payload.
+- `Call("@")` is the namespace **root call**: wire name `search`, not `search.run`. Generated members use `root` (`Search.root`, `RootRequest`, `RootCommand`). The CLI runs it as the group's default subcommand (`tool search`). One per schema. Discovery filters it by execute on its own name-entity, like its dotted siblings. With `Accepts("search")`, callers can omit the entity.
+- The target entity travels in the **open envelope**, never the payload. Never add an `entity` request field for routing. Handlers read `context.entity`. Clients pass `on:`.
+- Field keys are declaration-order integers. To evolve a schema, pin keys (`Field(3, "note", .string)`) and make new fields `.optional(...)`. Peers skip unknown keys, so old and new peers interoperate. The protocol version stays 1: evolve with optional fields, not versions.
+- `Access { .read / .write / .execute }` is the permission class required on the target entity. Choose it like a file mode, not by HTTP semantics.
+- Calendar/clock fields are wire kinds. Never model them as `.string` or an epoch `.int`:
+  - `Field("day", .date)` (calendar date), `.datetime` (wall clock, no zone), `.timestamp` (absolute instant with offset).
+  - Wire: VPTS binary (variable-precision timestamp codec, spec `Sources/MMWire/MMWire.docc/VPTS.md`). ISO 8601 strings appear only in JSON/CLI projections (spec §8.3).
+  - Swift: `MMDate`/`MMDateTime`/`MMTimestamp`. Dependency-free and `Comparable`. Timestamps order by instant.
+  - Math: `date + .month(1)` clamps month ends. Time components carry across days. `timestamp - other` is an exact `Duration`. `startDate..<endDate` iterates by day. `DateComponents` converts both ways.
+  - The core types have no clock. For the current time, use the Foundation-gated `MMTimestamp.now()` (UTC) / `.now(in:)`, `MMDateTime.now(in:)`, `MMDate.today(in:)`.
+- Discovery serves `description:`, but fingerprints ignore it. Editing it is not drift. This includes the namespace: `#schema("journal", description: "...")` (or `Schema("journal", description: "...")`) appears in discovery's `namespaces` list and becomes the generated CLI group's abstract.
+- Any part can be a named type: `Request(.reference("X"))`, `ResponseStream(.reference("ChangeEvent"))`, or a `SchemaDescribable` Swift type. The macro then generates no struct for it.
+- Put types shared across schemas in `#schemaTypes("common") { ... }`. Compiler limitation: in one module, a macro's arguments cannot see members another macro generated. Put shared containers in their own module, or hand-write `SchemaDescribable` types.
+- Hand-written types also work. An empty request struct with no stored properties must declare `static var schema: TypeSchema { .structure(fields: []) }` (`SchemaDescribable`), because a decoder cannot probe it.
 
-## Step 2 — the server
+## Step 2: the server
 
-Declare the whole daemon as data inside `MMService { ... }` and hand it to a `ServiceGroup`. Verify the contract before listening — drift becomes a boot failure instead of a wire surprise:
+Declare the daemon as data in `MMService { ... }` and pass it to a `ServiceGroup`. Verify the contract before listening, so drift fails at boot, not on the wire:
 
 ```swift
 import Logging
@@ -114,7 +119,7 @@ let group = ServiceGroup(configuration: .init(
 try await group.run()
 ```
 
-Keep handlers in a reusable `RouteGroup` in its own file, carrying its dependencies. `On` has one overload per method shape; the context (`auth` below) always carries the already-authorized `entity`:
+Put handlers in a reusable `RouteGroup` in its own file, holding its dependencies. `On` has one overload per method shape. The context (`auth` below) always carries the already-authorized `entity`:
 
 ```swift
 struct JournalHandlers: RouteGroup {
@@ -133,7 +138,7 @@ struct JournalHandlers: RouteGroup {
                 }
             }
             // Quiet sources: a relay parked between events observes STOP only
-            // on its next send — watch `sink.stopRequested()` from a structured
+            // on its next send. Watch `sink.stopRequested()` from a structured
             // sibling to terminal promptly (see the example daemon).
             return .success(Journal.FollowSummary(delivered: delivered))
         }
@@ -152,30 +157,30 @@ struct JournalHandlers: RouteGroup {
 
 Server facts to design around:
 
-- Handlers return `Result<Response, MMError>`; error codes 1–63 are reserved for the protocol — application errors start at 64.
-- Every server auto-registers the builtins `server.schema` (discovery, filtered by the caller's traversal rights) and `server.entity`.
-- Cross-connection fan-out (broadcasting one connection's append to another's `follow` stream) is application infrastructure — see `Examples/Daemon/FollowerHub.swift` for the safe registry pattern (synchronous `onTermination`, idempotent removal, never finish under the lock).
+- Handlers return `Result<Response, MMError>`. Codes 1 to 63 are reserved for the protocol. Application errors start at 64.
+- Every server registers the builtins `server.schema` (discovery, filtered by the caller's traversal rights) and `server.entity`.
+- Cross-connection fan-out (one connection's append feeding another's `follow` stream) is application code. For the safe registry pattern, see `Examples/Daemon/FollowerHub.swift`: synchronous `onTermination`, idempotent removal, never finish under the lock.
 - Root-targeted requests (empty entity) are denied unless the route accepts them: `On(method, Accepts(.root, .all)) { ... }`.
-- Dynamic authorization (SQLite etc.): implement `EntityACLProvider` and pass the instance — `ACLProvider(provider)`. The builder tree is sugar over `InMemoryACLProvider`.
-- Startup ordering (ServiceLifecycle starts everything concurrently): `Ready(readiness)` in the builder fires a `ServiceReadiness` at bind; wrap dependents in `GatedService` to start after it. `OnBind { address in }` gives you ephemeral TCP ports.
+- Dynamic authorization (SQLite, for example): implement `EntityACLProvider` and pass `ACLProvider(provider)`. The builder tree is shorthand for `InMemoryACLProvider`.
+- Startup order (ServiceLifecycle starts services concurrently): `Ready(readiness)` fires a `ServiceReadiness` at bind. Wrap dependents in `GatedService` to start after it. `OnBind { address in }` reports ephemeral TCP ports.
 
-## Step 3 — the client
+## Step 3: the client
 
-For simple call-and-return clients, use the bracket — one scope owns connect/run/close/join. `with` is sugar over `MMClientConnection.open`, the live connection as an FPBracket resource (acquire = connect + start the loop, dispose = close + join); compose `open` with other brackets via `flatMap`/`BracketAsyncDo`:
+For simple call-and-return clients, use the bracket: one scope owns connect, run, close, and join. `with` is shorthand for `MMClientConnection.open`, the live connection as an FPBracket resource (acquire = connect + start the loop, dispose = close + join). Compose `open` with other brackets via `flatMap`/`BracketAsyncDo`:
 
 ```swift
 let reply = await MMClientConnection.with(.unix(path: socketPath)) { connection in
     await connection.call(Journal.append, on: notes, Journal.AppendRequest(line: "hi"))
 }
-// Result<Result<AppendResponse, MMCallError>, MMClientError> — connection vs call
+// Result<Result<AppendResponse, MMCallError>, MMClientError>: connection vs call
 // failure. Dispose returns the loop's outcome: bracket .failure = connect failed OR
 // the connection died mid-scope (transport error / protocol violation); clean EOF
 // or the bracket's own close is .success.
 ```
 
-One connection multiplexes many calls (msgids, concurrent callers, `maxInFlightCalls` bound) — one connection per unit of work, never per call. A closed connection stays closed; retry policy is the application's.
+One connection multiplexes many calls (msgids, concurrent callers, `maxInFlightCalls` limit). Open one per unit of work, never one per call.
 
-Custom choreography (streams in sibling tasks, staged teardown) lives *inside* the bracket body as structured children — the bracket still owns the lifecycle:
+Run custom flows (streams in sibling tasks, staged teardown) as structured children *inside* the bracket body. The bracket still owns the lifecycle:
 
 ```swift
 import MMClient
@@ -188,7 +193,7 @@ let outcome = await MMClientConnection.with(.unix(path: socketPath)) { connectio
 
     // Server-stream: withStream consumes in a structured sibling (iterating
     // grants credit) while the body drives the connection; the join is built
-    // in — it returns once the sequence ends.
+    // in. It returns once the sequence ends.
     let follow = await connection.call(Journal.follow, on: notes, Journal.FollowRequest())
     await withStream(follow, each: { change in
         print(change.line)
@@ -209,7 +214,7 @@ let outcome = await MMClientConnection.with(.unix(path: socketPath)) { connectio
 }
 ```
 
-In a daemon-style client, use `MMClientConnection.connect` and add `MMClientService(connection: connection)` (its own product: depend on `MMClientService` and `import MMClientService`) to the `ServiceGroup` instead of the bracket.
+In a daemon-style client, skip the bracket. Call `MMClientConnection.connect` and add `MMClientService(connection: connection)` to the `ServiceGroup`. It is a separate product: depend on `MMClientService` and `import MMClientService`.
 
 Verify the schema like the server does:
 
@@ -222,47 +227,70 @@ case .failure(let error): ...
 }
 ```
 
-A hello fingerprint mismatch is a signal to run discovery and degrade deliberately — never a disconnect. Reconnection is out of scope by design: a closed connection stays closed; watch `stateUpdates()` (`.connected` → `.closed(reason:)`) and let the application own retry policy.
+A hello fingerprint mismatch never disconnects. Treat it as a signal to run discovery and degrade deliberately. There is no reconnection, by design: a closed connection stays closed. Watch `stateUpdates()` (`.connected` → `.closed(reason:)`). The application owns retry policy.
 
 ## Generating a CLI from the contract
 
-A top-level `CLI(.enabled)` entry in the schema block marks it for CLI generation: a swift-argument-parser command per call plus a `Journal.Command` group — names, help text, and argument shapes all come from the declaration. The commands are generated into the CLI target by the `MMCLIGeneratorPlugin` build-tool plugin (`plugins: [.plugin(name: "MMCLIGeneratorPlugin", package: "mm")]` on the CLI target, which depends on `MMCLI` and `ArgumentParser`). The API module stays on `MMSchema` alone, so the daemon never links MMCLI or ArgumentParser. The namespace type must be declared at file scope (the generated code extends it) and be visible to the CLI module (`public` across modules).
+A top-level `CLI(.enabled)` entry in the schema block generates one swift-argument-parser command per call, plus a `Journal.Command` group. Names, help text, and argument shapes come from the declaration. The `MMCLIGeneratorPlugin` build-tool plugin writes the commands into the CLI target (`plugins: [.plugin(name: "MMCLIGeneratorPlugin", package: "mm")]`). That target depends on `MMCLI` and `ArgumentParser`. The API module stays on `MMSchema` only, so the daemon never links MMCLI or ArgumentParser. Declare the namespace type at file scope (generated code extends it) and make it visible to the CLI module (`public` across modules).
 
-- Rename/omit commands with a `CLI(...)` part: `CLI(.command("add", aliases: ["append"]))`, `CLI(.omitted)`. Default name is the kebab-cased call name.
-- Shape arguments with `Field(..., cli:)`: `.argument` (positional; required ones bind before the omittable `<entity>`, optional and array ones after it), `.flag` (bools), `.option("name", short: "n")` — or `short: .auto` to derive `-n` from the long name — `.omitted` (optional fields only). A `Field(..., default: <literal>)` on an optional field automatically makes the option hybrid (bare `--format` means the default, `--format yaml` parses, absent stays nil); calendar/clock fields take `default: .now` — the moment of invocation. The default is declaration metadata, never wire behavior. Defaults: `--field-name` options; wire enums become typed options (the `unknown` fallback is hidden and refused); structure/map/named-type fields take JSON literals.
-- The overlay is presentation-only by construction — stored on `MethodDeclaration`, never forwarded to `MethodSignature`, so it cannot affect discovery, fingerprints, or compatibility.
-- Every command gets the shared connection options (`--socket`/`--tcp`, timeouts, `--output json|json-pretty|raw`), an entity positional first, and sysexits-style failures (denied → 77, usage → 64, transport → 69, SIGINT → 130).
-- The entity positional (`journal.notes`) is NOT from the schema and never will be: the schema declares verbs and payload shapes; entities are the daemon's runtime tree, declared server-side with ACLs. Syscall table vs. file paths — don't try to enumerate entities in a contract, and don't drop the entity argument from a command. It IS optional at the call site: an omitted entity sends a root target, which the server infers only when the route's `Accepts` names exactly one concrete entity — every other route denies it.
-- Server-stream commands print elements as JSON lines (SIGINT = graceful STOP, second = CANCEL); client-stream commands read stdin lines (single-string-field elements take plain lines, others JSON; EOF = END); bidirectional does both.
-- `MMCLI` also ships `MMCLIDiscover` ("discover") and `MMCLIRawCall` ("call" — any method by wire name, `--params` JSON, schema-driven) to mount alongside generated groups.
-- Schema verification is automatic: every generated command diffs its own namespace against the server before dispatch (drift → exit 76; `--no-verify` opts out per invocation; denied discovery skips with a note — call rights don't imply read on the namespace entity). A companion CLI is ONE declaration, the CLI twin of `MMService { }`: `await MMCLI { Name("mm"); Abstract("..."); Version("1.0.0"); Commands([Journal.Command.self, MMCLIDiscover.self, MMCLIRawCall.self]); Contract(.complete([journalContract])); Endpoint(.unix(path: wellKnownSocket)); Format(ChangeEvent.self) { ... } }` (a full `Configuration(CommandConfiguration(...))` remains the escape hatch for fields like `defaultSubcommand`, with the sugar merging onto it) — MMCLI synthesizes and runs the root command (no AsyncParsableCommand root to write; a hand-written root uses the `run:` form instead). Declarations bind as a task-local, no process-global. `Endpoint` makes `--socket`/`--tcp` optional, `Output(.text)` sets the default format, and `--output text` renders per command: a `Format(ChangeEvent.self) { ... }` declaration, else the type's own `CustomStringConvertible` conformance, else JSON (json formats always bypass — scripts stay stable) — the whole-server hello fingerprint folds at build time (builtins included via `SchemaFingerprint.expected(serving:sharedTypes:)` — pass the server's shared `Types(...)` declarations, or a `Types`-registering server can never match), making verification free when it matches and a fallback diff when it doesn't. Client daemons get the same automation via `configuration.schema = .complete([...])` / `.partial([...])` — the connection verifies itself after connect and `await connection.verify()` yields `Result` of `.ok` / `.partial` / `.difference` (soft verdict, never a disconnect; `.noExpectation`/`.denied`/`.failed` on the error side); `connection.verifyContracts([...])` remains the manual slice-check underneath.
-- Every generated group also includes explicit `verify` (exit 1 on drift, like diff). There is no manual fingerprint option: the fingerprint is build knowledge (folded from the compiled contracts), never something an operator supplies at runtime.
-- Assemble the tool with a root `AsyncParsableCommand` (async dispatch requires the root to be async) listing `Journal.Command.self` and friends — see `Examples/CLI/CLI.swift`.
+- Rename or omit commands with a `CLI(...)` part: `CLI(.command("add", aliases: ["append"]))`, `CLI(.omitted)`. The default name is the kebab-cased call name.
+- Shape arguments with `Field(..., cli:)`:
+  - `.argument`: positional. Required ones come before the omittable `<entity>`. Optional and array ones come after it.
+  - `.flag`: bools.
+  - `.option("name", short: "n")`. `short: .auto` derives `-n` from the long name.
+  - `.omitted`: optional fields only.
+  - Unset: `--field-name` options. Wire enums become typed options (the `unknown` fallback is hidden and refused). Structure, map, and named-type fields take JSON literals.
+  - `Field(..., default: <literal>)` on an optional field makes a hybrid option: bare `--format` uses the default, `--format yaml` parses, absent stays nil. Calendar/clock fields take `default: .now` (invocation time). Defaults are declaration metadata, never wire behavior.
+- The overlay is presentation-only. It is stored on `MethodDeclaration`, never forwarded to `MethodSignature`, so it cannot affect discovery, fingerprints, or compatibility.
+- Every command gets the shared connection options (`--socket`/`--tcp`, timeouts, `--output json|json-pretty|raw`), an optional `<entity>` positional (after any required positional fields), and sysexits-style exit codes (denied → 77, usage → 64, transport → 69, SIGINT → 130).
+- The entity positional (`journal.notes`) never comes from the schema. The schema declares verbs and payload shapes. Entities are the daemon's runtime tree, declared server-side with ACLs (compare a syscall table with file paths). Never list entities in a contract. Never drop the entity argument from a command. It is optional at the call site: omitting it sends a root target. The server infers the target only if the route's `Accepts` names exactly one concrete entity. Other routes deny it.
+- Server-stream commands print elements as JSON lines (SIGINT = graceful STOP, second SIGINT = CANCEL). Client-stream commands read stdin lines (plain lines for single-string-field elements, otherwise JSON; EOF = END). Bidirectional does both.
+- `MMCLI` also ships `MMCLIDiscover` ("discover") and `MMCLIRawCall` ("call": any method by wire name, `--params` JSON, schema-driven) to mount beside generated groups.
+- Verification is automatic. Each generated command diffs its own namespace against the server before dispatch. Drift exits 76. `--no-verify` skips it for one invocation. Denied discovery skips it with a note (call rights do not imply read on the namespace entity).
+- A companion CLI is ONE declaration, the CLI counterpart of `MMService { }`: `await MMCLI { Name("mm"); Abstract("..."); Version("1.0.0"); Commands([Journal.Command.self, MMCLIDiscover.self, MMCLIRawCall.self]); Contract(.complete([journalContract])); Endpoint(.unix(path: wellKnownSocket)); Format(ChangeEvent.self) { ... } }`.
+  - MMCLI builds and runs the root command. Do not write an AsyncParsableCommand root. A hand-written root uses the `run:` form instead.
+  - For fields like `defaultSubcommand`, pass a full `Configuration(CommandConfiguration(...))`. Shorthand entries merge onto it.
+  - Declarations bind as a task-local, not a process global.
+  - `Endpoint` makes `--socket`/`--tcp` optional. `Output(.text)` sets the default format.
+  - `--output text` uses a `Format(ChangeEvent.self) { ... }` declaration, else the type's `CustomStringConvertible` conformance, else JSON. JSON formats always bypass it, so scripts stay stable.
+  - The whole-server hello fingerprint is computed at build time, builtins included, via `SchemaFingerprint.expected(serving:sharedTypes:)`. Pass the server's shared `Types(...)` declarations, or a server that registers `Types` never matches. A match makes verification free. A mismatch falls back to a diff.
+- Client daemons get the same automation. Set `configuration.schema = .complete([...])` / `.partial([...])`, and the connection verifies itself after connect. `await connection.verify()` returns a `Result`: `.ok` / `.partial` / `.difference` (a soft verdict, never a disconnect), or the errors `.noExpectation`/`.denied`/`.failed`. `connection.verifyContracts([...])` is the manual slice check underneath.
+- Every generated group includes an explicit `verify` command (exit 1 on drift, like diff). There is no manual fingerprint option. The fingerprint comes from the compiled contracts at build time, never from an operator at runtime.
+- List `Journal.Command.self` and the other commands in `Commands([...])` inside `MMCLI { }`. See `Examples/CLI/CLI.swift`.
 
 ## Authorization model (why calls get denied)
 
-- Identity is kernel-attested peer credentials on Unix sockets; TCP peers are `anonymous`. No token crosses the wire, and uid 0 is not special.
-- Entities are dotted paths forming a tree. Dispatch needs `.execute` on **every ancestor** of the target (like directory x bits), then the method's declared class on the target itself.
-- Classes resolve first-matching-class-wins: an owner match is judged by owner bits alone even if group/other would grant more — exactly POSIX.
-- A missing ACL record means `permissionDenied`, and existence is never leaked. If discovery shows fewer methods than the server defines, that's traversal filtering, not a bug.
-- Grants are per-entity-per-mode, never per-method: a mode bit admits every method of that access class. In multi-family daemons, declare a route's targets — `On(Journal.read, Accepts("journal.*")) { ... }` (subtree), `Accepts("system.log")` (exact), `Accepts("tenants.*.journal.*")` (a `*` segment = exactly one segment; trailing `.*` = any depth), `Accepts(.root, .all)` (root opt-in); unaccepted targets are denied before any ACL lookup. A route naming exactly one concrete entity also accepts an entity-less call — the server infers the target.
-- Authorization runs before a single payload byte is decoded.
-- Metrics: the library emits swift-metrics instruments (stable `mm_server_*`/`mm_client_*` labels — never rename them) but bootstraps no backend and opens no port; the host calls `MetricsSystem.bootstrap(...)` once, or everything is a no-op. Label inventory lives in the IntegrationGuide's Observability section.
+- Identity comes from kernel-attested peer credentials on Unix sockets. TCP peers are `anonymous`. No token crosses the wire. uid 0 is not special.
+- Entities are dotted paths in a tree. Dispatch needs `.execute` on **every ancestor** of the target (like directory x bits), then the method's declared class on the target.
+- The first matching class wins, as in POSIX. An owner match uses only owner bits, even if group or other bits would grant more.
+- A missing ACL record means `permissionDenied`. Existence never leaks. If discovery shows fewer methods than the server defines, that is traversal filtering, not a bug.
+- Grants are per entity and per mode, never per method. A mode bit admits every method of that access class. In multi-family daemons, declare each route's targets:
+  - `On(Journal.read, Accepts("journal.*")) { ... }`: subtree.
+  - `Accepts("system.log")`: exact entity.
+  - `Accepts("tenants.*.journal.*")`: a `*` segment matches exactly one segment. A trailing `.*` matches any depth.
+  - `Accepts(.root, .all)`: root opt-in.
+  - Unaccepted targets are denied before any ACL lookup. A route naming exactly one concrete entity also accepts entity-less calls (the server infers the target).
+- Authorization runs before any payload byte is decoded.
+- Metrics: the library emits swift-metrics instruments with stable `mm_server_*`/`mm_client_*` labels. Never rename them. It bootstraps no backend and opens no port. The host calls `MetricsSystem.bootstrap(...)` once, or all metrics are no-ops. The label list is in the IntegrationGuide's Observability section.
 
 ## House rules that apply to any code you write here
 
-Swift 6 strict concurrency, macOS 15+/Linux. No Dispatch/GCD, no free-floating `Task {}`, no `.wait()`, no `print()`, no `Date()`, no `@unchecked Sendable`. Public APIs surface failures as typed `Result`s (`MMCallError`, `MMWireError`, `MMError`), not thrown errors. Tests use Swift Testing (`@Test`/`#expect`), in the repo's three tiers: `EmbeddedChannel` for handlers, plain value tests for domain logic, real temp-dir Unix sockets for integration. Read this skill and the integration guide (`Sources/MMServer/MMServer.docc/IntegrationGuide.md`) before deviating from anything.
+- Swift 6.4+ with strict concurrency, macOS 15+/Linux.
+- Never use Dispatch/GCD, free-floating `Task {}`, `.wait()`, `print()`, `Date()`, or `@unchecked Sendable`.
+- Public APIs return typed `Result`s (`MMCallError`, `MMWireError`, `MMError`), not thrown errors.
+- Tests use Swift Testing (`@Test`/`#expect`) in three tiers: `EmbeddedChannel` for handlers, plain value tests for domain logic, real temp-dir Unix sockets for integration.
+- Before deviating from anything, read this skill and the integration guide (`Sources/MMServer/MMServer.docc/IntegrationGuide.md`).
 
 ## Verify your work
 
-1. `swift build` — the `For` cross-check and macro fidelity are compile/boot-time gates.
-2. Boot the daemon: `contract.verify(against:)` must pass and log clean.
-3. Run the client against it end-to-end (the repo's own pair: `swift run mm-example-daemon` + `swift run mm-example-client`), including one deliberate denial to confirm the ACL table does what you think.
-4. `swift test` — add tests in the tier that matches what you touched.
+1. `swift build`. The `For` cross-check and macro output are checked at compile and boot time.
+2. Boot the daemon. `contract.verify(against:)` must pass with a clean log.
+3. Run the client against it end to end (`swift run mm-example-daemon` + `swift run mm-example-client`). Include one deliberate denial to confirm the ACL table.
+4. `swift test`. Add tests in the tier that matches what you changed.
 
 ## Where to go deeper
 
-- `Sources/MMWire/MMWire.docc/WireProtocol.md` — the normative byte-level spec (framing, hello, envelope kinds 0–6, termination matrix, fingerprint, conformance vectors).
-- `Sources/MMServer/MMServer.docc/IntegrationGuide.md` — production embedding: SQLite-backed ACL provider, hardening knobs, operational defaults.
-- `Sources/MMServer/MMServer.docc/RemoteAccess.md` — SSH socket forwarding, systemd/launchd recipes, TCP caveats.
-- `Examples/` — the runnable daemon + client pair mirroring everything above.
+- `Sources/MMWire/MMWire.docc/WireProtocol.md`: normative byte-level spec (framing, hello, envelope kinds 0 to 6, termination matrix, fingerprint, conformance vectors).
+- `Sources/MMServer/MMServer.docc/IntegrationGuide.md`: production embedding (SQLite-backed ACL provider, hardening options, operational defaults).
+- `Sources/MMServer/MMServer.docc/RemoteAccess.md`: SSH socket forwarding, systemd/launchd recipes, TCP caveats.
+- `Examples/`: the runnable daemon + client pair for everything above.

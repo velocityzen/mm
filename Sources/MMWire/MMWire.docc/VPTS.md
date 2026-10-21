@@ -1,25 +1,25 @@
-# VPTS — Variable-Precision Timestamp
+# VPTS: Variable-Precision Timestamp
 
-The binary codec behind the wire time kinds: a bitmask-headed, variable-precision, bytewise-sortable calendar value.
+The binary codec for the wire time kinds: a calendar value with a bitmask header and variable precision. Its bytes sort chronologically.
 
-> Note: This article is the normative VPTS specification. The wire protocol (<doc:WireProtocol>, section 8.3) constrains which VPTS shapes each schema kind admits; `MMVPTS` in MMSchema is the reference implementation.
+> Note: This article is the normative VPTS specification. The wire protocol (<doc:WireProtocol>, section 8.3) defines which VPTS shapes each schema kind accepts. `MMVPTS` in MMSchema is the reference implementation.
 
 **Version:** 0.2-draft
 **Status:** Draft
 
 ## 1. Overview
 
-VPTS is a compact binary encoding of Gregorian date-time values with explicit, variable precision. Like ISO 8601 reduced representations, a value may stop at any granularity (year, year-month, date, …, sub-second), but presence is declared by a bitmask header rather than by string length. All multi-byte fields are big-endian.
+VPTS is a compact binary encoding of Gregorian date-time values with explicit, variable precision. As in ISO 8601 reduced representations, a value can stop at any granularity (year, year-month, date, and so on down to sub-second). A bitmask header, not string length, declares which fields are present. All multi-byte fields are big-endian.
 
-Design goals, in order:
+Design goals, in priority order:
 
-1. Precision is explicit and part of the value (a "2026-07" is not a "2026-07-01").
-2. Coarse values cost few bytes; a full nanosecond timestamp with offset costs 15 bytes.
-3. Trivial validation (mask checks only).
-4. Bytewise sort order equals chronological order for values of equal header.
-5. Extensible: the header grows one byte at a time via a continuation bit.
+1. Precision is explicit and part of the value. "2026-07" is not "2026-07-01".
+2. Coarse values use few bytes. A full nanosecond timestamp with offset uses 15 bytes.
+3. Validation is simple: mask checks only.
+4. For values with the same header, bytewise sort order equals chronological order.
+5. The format is extensible. A continuation bit adds one header byte at a time.
 
-VPTS encodes wall-clock calendar values. It is not a replacement for monotonic or epoch-based instants; use it where calendar semantics or declared precision matter.
+VPTS encodes wall-clock calendar values. It does not replace monotonic or epoch-based instants. Use it when calendar semantics or declared precision matter.
 
 ## 2. Wire layout
 
@@ -43,11 +43,11 @@ VPTS encodes wall-clock calendar values. It is not a replacement for monotonic o
 | 6   | FRACTION | fraction field present |
 | 7   | EXT      | extension header byte follows |
 
-Header `0x00` encodes the **null timestamp** (total size: 1 byte). Schemas that require a value MUST reject it.
+Header `0x00` encodes the **null timestamp**. Its total size is 1 byte. Schemas that require a value MUST reject it.
 
 ### 2.2 Extension header byte
 
-Present iff EXT is set. MUST NOT be `0x00` (an empty extension is non-canonical and invalid).
+Present if and only if EXT is set. It MUST NOT be `0x00`. An empty extension is non-canonical and invalid.
 
 | Bit | Name   | Meaning |
 |-----|--------|---------|
@@ -55,54 +55,54 @@ Present iff EXT is set. MUST NOT be `0x00` (an empty extension is non-canonical 
 | 1   | WIDE   | year is 8 bytes; fraction (if present) is 8 bytes |
 | 2–7 | —      | reserved, MUST be 0 |
 
-Bit 7 of the extension byte is reserved for a further continuation byte in future versions and MUST be 0 in v0.2.
+Bit 7 of the extension byte is reserved for a further continuation byte in future versions. It MUST be 0 in v0.2.
 
 ### 2.3 Fields
 
-Present fields are concatenated in this order: year, month, day, hour, minute, second, fraction, offset. No padding, no alignment.
+Present fields are concatenated in this order: year, month, day, hour, minute, second, fraction, offset. There is no padding and no alignment.
 
 | Field    | Narrow type | Wide type (WIDE set) | Range / meaning |
 |----------|-------------|----------------------|------------------|
-| year     | uint16 BE (2) | uint64 BE (8) | Biased: wire value = proleptic Gregorian year + 2¹⁵ (narrow) or + 2⁶³ (wide). Narrow covers −32768…32767; wide covers the full int64 range. |
-| month    | uint8 (1)   | —                    | 1–12 |
-| day      | uint8 (1)   | —                    | 1–31; must be valid for the given year/month |
-| hour     | uint8 (1)   | —                    | 0–23 |
-| minute   | uint8 (1)   | —                    | 0–59 |
-| second   | uint8 (1)   | —                    | 0–60 (60 only for a positive leap second) |
-| fraction | uint32 BE (4) | uint64 BE (8)      | Narrow: nanoseconds, 0–999 999 999. Wide: attoseconds (10⁻¹⁸ s), 0–999 999 999 999 999 999. |
+| year     | uint16 BE (2) | uint64 BE (8) | Biased. Wire value = proleptic Gregorian year + 2¹⁵ (narrow) or + 2⁶³ (wide). Narrow covers −32768…32767. Wide covers the full int64 range. |
+| month    | uint8 (1)   | —                    | 1 to 12 |
+| day      | uint8 (1)   | —                    | 1 to 31. Must be valid for the given year and month. |
+| hour     | uint8 (1)   | —                    | 0 to 23 |
+| minute   | uint8 (1)   | —                    | 0 to 59 |
+| second   | uint8 (1)   | —                    | 0 to 60 (60 only for a positive leap second) |
+| fraction | uint32 BE (4) | uint64 BE (8)      | Narrow: nanoseconds, 0 to 999 999 999. Wide: attoseconds (10⁻¹⁸ s), 0 to 999 999 999 999 999 999. |
 | offset   | int16 BE (2) | —                    | Minutes east of UTC, −1439…+1439 |
 
-Attoseconds are exactly 18 decimal digits, so the lossless ISO 8601 fraction mapping (§8) is preserved in wide mode; 1 ns = 10⁹ as, so narrow→wide conversion is exact.
+Attoseconds have exactly 18 decimal digits. Wide mode therefore keeps the lossless ISO 8601 fraction mapping (§8). 1 ns = 10⁹ as, so conversion from narrow to wide is exact.
 
-WIDE applies to both the year field and (if present) the fraction field. A narrow year cannot be combined with a wide fraction, or vice versa.
+WIDE applies to the year field and, if present, to the fraction field. A narrow year cannot be combined with a wide fraction, or the reverse.
 
 ## 3. Validity rules
 
-A decoder MUST reject an encoding unless all of the following hold. Let `b1` be the header, `b2` the extension byte (0 if absent), `m = b1 & 0x3F`:
+A decoder MUST reject an encoding unless all of these rules hold. Let `b1` be the header, `b2` the extension byte (0 if absent), and `m = b1 & 0x3F`:
 
-1. **Contiguity.** `(m & (m + 1)) == 0`. Valid `m`: `0x00, 0x01, 0x03, 0x07, 0x0F, 0x1F, 0x3F`.
+1. **Contiguity.** `(m & (m + 1)) == 0`. Valid `m` values: `0x00, 0x01, 0x03, 0x07, 0x0F, 0x1F, 0x3F`.
 2. **FRACTION requires SECOND** (b1 bit 6 ⇒ b1 bit 5).
 3. **EXT canonicality.** If EXT is set, `b2 != 0x00` and `b2 & 0xFC == 0`.
-4. **OFFSET requires HOUR** (b2 bit 0 ⇒ b1 bit 3). Offsets attach to times, as in ISO 8601.
+4. **OFFSET requires HOUR** (b2 bit 0 ⇒ b1 bit 3). Offsets belong to times, as in ISO 8601.
 5. **WIDE requires a year** (b2 bit 1 ⇒ `m != 0`).
-6. Every present field is within its range, including calendar validity of `day` and the fraction upper bounds.
-7. The input contains exactly the number of bytes implied by the header(s). Field lengths are fully determined by `b1`/`b2`, so VPTS is self-delimiting inside any framing.
+6. Every present field is within its range. This includes calendar validity of `day` and the fraction upper bounds.
+7. The input contains exactly the number of bytes the header(s) imply. `b1` and `b2` fully determine the field lengths, so VPTS is self-delimiting inside any framing.
 
 ## 4. Semantics
 
-**Precision.** Absent trailing fields mean *unspecified*, not zero. `2026-07` denotes the month, not its first instant. Two values with different headers are never equal; range or containment comparisons across precisions are application-defined.
+**Precision.** An absent trailing field means *unspecified*, not zero. `2026-07` denotes the whole month, not its first instant. Two values with different headers are never equal. The application defines range or containment comparisons across precisions.
 
-**Fraction.** Presence of FRACTION declares sub-second precision even when the value is 0 (`12:00:00.000000000` ≠ `12:00:00`). Encoders MUST NOT add FRACTION merely because a zero is available, and MUST NOT use WIDE when the value fits the narrow forms — encode the precision and range the source data actually has.
+**Fraction.** If FRACTION is present, the value has sub-second precision, even when the fraction is 0 (`12:00:00.000000000` ≠ `12:00:00`). Encoders MUST NOT add FRACTION only because a zero is available. Encoders MUST NOT use WIDE when the value fits the narrow forms. Encode only the precision and range the source data actually has.
 
-**Offset.** When present, the encoded fields are local wall-clock time and `UTC = local − offset`, matching ISO 8601. When absent, interpretation is context/local time; a protocol embedding VPTS SHOULD declare a default (UTC is RECOMMENDED). Offset `0` means UTC ("Z").
+**Offset.** When the offset is present, the encoded fields are local wall-clock time and `UTC = local − offset`, as in ISO 8601. When the offset is absent, the value is context-defined or local time. A protocol that embeds VPTS SHOULD declare a default (UTC is RECOMMENDED). Offset `0` means UTC ("Z").
 
-**Leap second.** `second = 60` is permitted only when a positive leap second actually occurred at that instant; decoders MAY accept it without verifying.
+**Leap second.** `second = 60` is permitted only when a positive leap second actually occurred at that instant. Decoders MAY accept it without checking this.
 
 ## 5. Ordering
 
-For two encodings with the **same header and extension byte** and no OFFSET bit, unsigned lexicographic comparison of the full byte sequence equals chronological comparison. This follows from big-endian fields, most-significant-first field order, and the year bias (which holds in both narrow and wide forms).
+For two encodings with the **same header and extension byte** and no OFFSET bit, unsigned lexicographic comparison of the full byte sequence equals chronological comparison. This follows from big-endian fields, most-significant-first field order, and the year bias (in both narrow and wide forms).
 
-Values with offsets or differing headers MUST be compared after decoding.
+Values with offsets or with different headers MUST be compared after decoding.
 
 ## 6. Sizes
 
@@ -119,7 +119,7 @@ Values with offsets or differing headers MUST be compared after decoding.
 | wide year only                   | `81 02`    | 10          | varies |
 | … + attoseconds + offset (max)   | `FF 03`    | 25          | 44  |
 
-Size formula: `1 + [EXT] + Y·[m≠0] + popcount(m>>1) + F·[FRACTION] + 2·[OFFSET]`, where `Y = 8` if WIDE else `2`, and `F = 8` if WIDE else `4`.
+Size formula: `1 + [EXT] + Y·[m≠0] + popcount(m>>1) + F·[FRACTION] + 2·[OFFSET]`, where `Y = 8` if WIDE, else `2`, and `F = 8` if WIDE, else `4`.
 
 ## 7. Test vectors
 
@@ -133,9 +133,15 @@ Size formula: `1 + [EXT] + Y·[m≠0] + popcount(m>>1) + F·[FRACTION] + 2·[OFF
 | year −13 800 000 000 (wide) | `81 02 7F FF FF FC C9 74 B6 00` |
 | `2026-07-22T14:30:00.000000000000000001Z` | `FF 03 80 00 00 00 00 00 07 EA 07 16 0E 1E 00 00 00 00 00 00 00 00 01 00 00` |
 
-Workings: year 2026 + 2¹⁵ = 34794 = `0x87EA`; year 2026 + 2⁶³ = `0x80000000000007EA`; 2⁶³ − 13 800 000 000 = `0x7FFFFFFCC974B600`; fraction 123 456 789 ns = `0x075BCD15`; offset −240 min = `0xFF10`.
+Calculations:
 
-Invalid examples a decoder MUST reject:
+- year 2026 + 2¹⁵ = 34794 = `0x87EA`
+- year 2026 + 2⁶³ = `0x80000000000007EA`
+- 2⁶³ − 13 800 000 000 = `0x7FFFFFFCC974B600`
+- fraction 123 456 789 ns = `0x075BCD15`
+- offset −240 min = `0xFF10`
+
+A decoder MUST reject these invalid examples:
 
 | Bytes | Reason |
 |---|---|
@@ -149,7 +155,11 @@ Invalid examples a decoder MUST reject:
 
 ## 8. ISO 8601 mapping
 
-Every valid VPTS value maps to exactly one ISO 8601 reduced representation and back, with these caveats: years outside 0000–9999 require ISO's expanded-year form (mutual agreement in ISO; native in VPTS); decimal fractions longer than 9 digits (narrow) or 18 digits (wide) are unrepresentable; and ISO ordinal/week dates have no VPTS form — convert to calendar dates first.
+Every valid VPTS value maps to exactly one ISO 8601 reduced representation and back, with these exceptions:
+
+- Years outside 0000 to 9999 require the ISO expanded-year form. ISO allows this form only by mutual agreement. VPTS supports it natively.
+- Decimal fractions longer than 9 digits (narrow) or 18 digits (wide) cannot be represented.
+- ISO ordinal dates and week dates have no VPTS form. Convert them to calendar dates first.
 
 ## 9. Reference validation
 
@@ -166,7 +176,7 @@ valid(b1, b2) =                       // b2 = 0 when EXT clear
 
 ## 10. Changes from 0.1
 
-- Header bit 7 repurposed from OFFSET to EXT (continuation).
-- OFFSET moved to extension bit 0; offset-bearing values grow by 1 byte.
+- Header bit 7 changed from OFFSET to EXT (continuation).
+- OFFSET moved to extension bit 0. Values with an offset are 1 byte larger.
 - WIDE added (extension bit 1): 64-bit biased year, 64-bit attosecond fraction.
 - Extension byte bit 7 reserved as a further continuation bit.

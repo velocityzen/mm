@@ -1,21 +1,35 @@
 # Remote access
 
-matter-in-motion authorizes every request by the peer's kernel-attested identity: on a Unix domain socket the server captures the client's uid/gid at accept (`LOCAL_PEERCRED` on Darwin, `SO_PEERCRED` on Linux) and evaluates filesystem-style ACLs against it. That identity does not exist on a raw network connection, so the blessed remote path is not TCP — it is **SSH Unix-socket forwarding**, which preserves per-user authorization end to end. This chapter is the deployment recipe: the exact `ssh` incantations, systemd and launchd unit files, and a troubleshooting map grounded in what the server and client actually log and return.
+matter-in-motion authorizes each request by the peer identity that the kernel reports. On a Unix domain socket, the server reads the client's uid and gid at accept (`LOCAL_PEERCRED` on Darwin, `SO_PEERCRED` on Linux) and checks filesystem-style ACLs against them. A raw network connection has no such identity. So the supported remote path is **SSH Unix-socket forwarding**, not TCP. It keeps per-user authorization from end to end. This page gives the `ssh` commands, systemd and launchd unit files, and a troubleshooting list based on what the server and client log and return.
 
-One fact drives everything below: **the server always binds its own socket.** `MMService` creates the `AF_UNIX` descriptor itself, `bind(2)`s it, `chmod(2)`s the socket file to `MMServerConfiguration.unixSocketMode` *between bind and listen* (so no connection is ever accepted under a more permissive umask-derived mode), and hands the descriptor to SwiftNIO, which performs the `listen(2)`. Before binding it runs a stale-socket check: a leftover socket file at the path is liveness-probed with `connect(2)` — refused means a dead predecessor and the file is unlinked; a successful connect means a live server and startup fails with `socketPathInUse`; anything that is not a socket fails startup with `socketPathOccupied` and is never deleted. On graceful shutdown the server unlinks the socket file last, guarded by a device/inode comparison so it never deletes a successor's socket. **There is no systemd socket-activation or launchd `Sockets`-key support in v1** — the server cannot adopt a listening descriptor from an init system, and an init system that binds the path first will make the server's startup probe find a live listener and fail.
+One rule applies to everything below: **the server always binds its own socket.** `MMService`:
+
+- creates the `AF_UNIX` descriptor and calls `bind(2)` on it.
+- sets the socket file mode to `MMServerConfiguration.unixSocketMode` with `chmod(2)` *between bind and listen*. So it never accepts a connection under a looser mode derived from the umask.
+- passes the descriptor to SwiftNIO, which calls `listen(2)`.
+
+Before binding, the server tests any leftover socket file at the path with `connect(2)`:
+
+- Refused: the old server is dead. The server deletes the file.
+- Connected: a live server owns the path. Startup fails with `socketPathInUse`.
+- Not a socket: startup fails with `socketPathOccupied`. The server never deletes this file.
+
+On graceful shutdown, the server deletes the socket file last. It first compares device and inode numbers, so it never deletes a newer server's socket.
+
+**v1 does not support systemd socket activation or the launchd `Sockets` key.** The server cannot take a listening descriptor from an init system. If an init system binds the path first, the server's startup check finds a live listener and startup fails.
 
 ## 1. SSH Unix-socket forwarding
 
 ### Why this is the remote path
 
-When you forward a Unix socket over SSH, the process that connects to the daemon's socket on the server machine is sshd, running *as the SSH-authenticated user* (sshd drops to that user after authentication). The daemon's peer-credential capture therefore sees that user's real uid and gids, and every ACL check — traversal `x` on ancestors, first-matching-class-wins on the target — works exactly as if the user were logged in locally. No tokens, no TLS certificates, no second identity system: SSH is the authentication layer, the kernel is the attestation layer, and the daemon never knows it is being used remotely.
+With SSH socket forwarding, sshd is the process that connects to the daemon's socket on the server machine. sshd runs *as the SSH-authenticated user* (it switches to that user after authentication). So the daemon reads that user's real uid and gids, and every ACL check works as for a local user: traversal `x` on ancestors, first-matching-class-wins on the target. You need no tokens, no TLS certificates, and no second identity system. SSH authenticates the user, the kernel reports the identity, and the daemon does not know the client is remote.
 
-Two consequences worth internalizing:
+Two consequences:
 
-- The daemon sees **the forwarding user**, not whoever touches the forwarded socket on the other end. Anyone who can connect to your local end of the tunnel speaks to the remote daemon *as you*. Protect the local socket file accordingly (see below).
-- The remote socket file's mode still gates the connection: sshd's `connect(2)` to the daemon's socket is subject to the same `unixSocketMode` and directory permissions as a local client. If the SSH user cannot connect locally on that machine, forwarding does not help — which is the point.
+- The daemon sees **the forwarding user**, not whoever connects to the other end of the tunnel. Anyone who can connect to your local end talks to the remote daemon *as you*. Protect the local socket file (see below).
+- The remote socket file's mode still applies. sshd's `connect(2)` to the daemon's socket is subject to the same `unixSocketMode` and directory permissions as a local client. If the SSH user cannot connect locally on that machine, forwarding does not help. This is intended.
 
-Unix-domain socket forwarding requires **OpenSSH 6.7 or newer** on both ends (released 2014; anything current qualifies). In `ssh -L`/`-R`, an argument containing a `/` is interpreted as a Unix-domain socket path instead of a TCP port.
+Unix-domain socket forwarding needs **OpenSSH 6.7 or newer** on both ends (released 2014, so any current version works). In `ssh -L`/`-R`, an argument that contains a `/` is a Unix-domain socket path, not a TCP port.
 
 ### Local forwarding: use a remote daemon from your machine
 
@@ -39,19 +53,19 @@ let connection = try await MMClientConnection.connect(
 ).get()
 ```
 
-Flag by flag:
+What each option does:
 
-- `-L local_socket:remote_socket` — the ssh client listens on `~/.mm/mm.sock` locally; each connection is carried over the SSH channel and sshd connects to `/run/mm/mm.sock` on the server as `alice`. The daemon sees `alice`'s uid/gid.
-- `-N` — no remote command; the session exists only to forward.
-- `-f` — background ssh after authentication, so the tunnel survives the launching shell. Combine with `ExitOnForwardFailure=yes` so a failed bind kills the backgrounded process instead of leaving a tunnel that forwards nothing.
-- `StreamLocalBindUnlink=yes` — remove a stale socket file from a previous tunnel before binding. The OpenSSH default is `no`, and without it a reconnect fails with `bind: Address already in use` (Unix sockets do not benefit from `SO_REUSEADDR`; the file must be unlinked).
-- `StreamLocalBindMask=0177` — the umask applied to the socket file ssh creates. `0177` (the OpenSSH default, restated here because it is load-bearing) yields mode `0600`: only you can connect to the local end, so only you can borrow your remote identity. Do not loosen this to "share" a tunnel — every connection through it is authorized as you.
+- `-L local_socket:remote_socket`: ssh listens on `~/.mm/mm.sock` locally and carries each connection over SSH. sshd connects to `/run/mm/mm.sock` on the server as `alice`, so the daemon sees `alice`'s uid and gid.
+- `-N`: run no remote command. The session only forwards.
+- `-f`: go to the background after authentication, so the tunnel keeps running after the shell exits. Use it with `ExitOnForwardFailure=yes`. Then a failed bind ends the process, instead of leaving a tunnel that forwards nothing.
+- `StreamLocalBindUnlink=yes`: delete a stale socket file from an earlier tunnel before binding. The OpenSSH default is `no`. Without it, a reconnect fails with `bind: Address already in use`. `SO_REUSEADDR` does not help with Unix sockets: the file must be deleted.
+- `StreamLocalBindMask=0177`: the umask for the socket file that ssh creates. `0177` gives mode `0600`, so only you can connect to the local end and use your remote identity. It is the OpenSSH default. The command sets it explicitly because security depends on it. Do not loosen it to share a tunnel: every connection through the tunnel is authorized as you.
 
-Create the directory for the local end once, privately: `mkdir -m 0700 ~/.mm`. On Linux, `$XDG_RUNTIME_DIR/mm.sock` is a good alternative (per-user, `0700`, cleaned at logout); macOS has no equivalent, hence the dotdir. Keep the full path short — `sockaddr_un.sun_path` caps it at 103 bytes on Darwin, 107 on Linux, on both the ssh side and the `MMEndpoint.unix` side.
+Create the local directory once, with private permissions: `mkdir -m 0700 ~/.mm`. On Linux, `$XDG_RUNTIME_DIR/mm.sock` also works (per-user, `0700`, cleaned at logout). macOS has no equivalent, so use a dot directory. Keep the full path short. `sockaddr_un.sun_path` allows 103 bytes on Darwin and 107 on Linux, for both ssh and `MMEndpoint.unix`.
 
 ### Remote forwarding: expose a local daemon to a remote machine
 
-The mirror image — a daemon on your machine, a client on the server:
+The reverse case: the daemon runs on your machine, and the client runs on the server:
 
 ```sh
 ssh -N -f \
@@ -60,17 +74,17 @@ ssh -N -f \
   alice@server.example.com
 ```
 
-`-R remote_socket:local_socket`: sshd binds `/run/user/1000/mm.sock` on the remote machine; connections to it are carried back and the ssh *client* process connects to your local `/run/mm/mm.sock`. Your local daemon therefore sees the peer credentials of your ssh client process — again, the forwarding user. For the remote end, `StreamLocalBindUnlink` and `StreamLocalBindMask` must be set in the *server's* `sshd_config` (both options exist on both sides; for `-R` the socket is created by sshd, so the client-side options do not apply). `AllowStreamLocalForwarding` in `sshd_config` must not have been disabled (default `yes`).
+`-R remote_socket:local_socket`: sshd binds `/run/user/1000/mm.sock` on the remote machine. Connections to it come back over SSH, and the ssh *client* process connects to your local `/run/mm/mm.sock`. So your local daemon sees the credentials of your ssh client process, which is again the forwarding user. For `-R`, sshd creates the socket, so set `StreamLocalBindUnlink` and `StreamLocalBindMask` in the *server's* `sshd_config`. Both options exist on both sides, but the client-side ones do not apply here. `AllowStreamLocalForwarding` in `sshd_config` must stay enabled (default `yes`).
 
 ### Tunnel hygiene
 
-- **Stale forwarded sockets** are the most common failure. ssh does not remove its socket file on exit; without `StreamLocalBindUnlink=yes` the next tunnel fails to bind, and with `ExitOnForwardFailure` unset that failure is silent under `-f`. Set both, always.
-- **Idle reaping is expected.** The server closes a connection with no traffic in either direction for `MMServerConfiguration.idleTimeout` (default 120 s). SSH keepalives (`ServerAliveInterval`) keep the *tunnel* alive but generate no matter-in-motion frames, so an idle client is still reaped — the client observes `ClientState.closed`. Reconnection is out of scope for v1; the application reconnects (through the still-open tunnel) when it next needs the daemon.
-- The tunnel forwards one Unix socket to one Unix socket. The daemon's connection cap, per-connection in-flight cap, frame cap, and hello exchange all apply unchanged; SSH is invisible above the transport.
+- **Stale forwarded sockets** are the most common failure. ssh does not delete its socket file on exit. Without `StreamLocalBindUnlink=yes`, the next tunnel cannot bind. Without `ExitOnForwardFailure`, this failure is silent under `-f`. Always set both.
+- **Idle connections are closed. This is expected.** The server closes a connection with no traffic in either direction for `MMServerConfiguration.idleTimeout` (default 120 s). SSH keepalives (`ServerAliveInterval`) keep the *tunnel* open but send no matter-in-motion frames. So the server still closes an idle client, and the client sees `ClientState.closed`. v1 has no automatic reconnect. The application reconnects through the open tunnel when it next needs the daemon.
+- The tunnel connects one Unix socket to another. The connection cap, per-connection in-flight cap, frame cap, and hello exchange apply unchanged. SSH affects only the transport.
 
 ## 2. systemd service recipe (Linux)
 
-A plain service unit — **not** a socket unit. Do not write a `.socket` file for this daemon: systemd would bind and listen on the path itself, and the daemon's startup liveness probe would then find a live listener and fail with `socketPathInUse`. The daemon binds its own socket; systemd's job is the process, the runtime directory, and the signals.
+Use a plain service unit, **not** a socket unit. Do not write a `.socket` file for this daemon. With one, systemd binds and listens on the path itself, and the daemon's startup check then fails with `socketPathInUse`. The daemon binds its own socket. systemd manages the process, the runtime directory, and the signals.
 
 ```ini
 # /etc/systemd/system/mm.service
@@ -90,17 +104,17 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-Division of labor, which matters:
+Who does what:
 
-- **`RuntimeDirectory=mm`** makes systemd create `/run/mm` at service start, owned by `User=`/`Group=`, and remove it at stop. `/run` is a tmpfs, so this is also what makes the path exist after reboot. **`RuntimeDirectoryMode=0750`** (systemd's default is `0755`) sets the *directory* mode — the outer gate: a peer needs execute on the directory to reach the socket at all. Members of group `mm` get through; others are stopped at the directory.
-- **The socket file's own mode is not systemd's job.** The server `chmod(2)`s the socket to `MMServerConfiguration.unixSocketMode` (default `0o660`, owner+group read/write) between `bind` and `listen`. Do not set `UMask=` hoping to shape the socket mode — the server's explicit chmod supersedes the umask-derived creation mode before any connection can be accepted, which is exactly why the configuration value is authoritative.
-- Grant access by group membership: run the daemon with a dedicated group (`Group=mm`), add client users to it (`usermod -aG mm alice`), and keep directory `0750` + socket `0660`. For a strictly single-user daemon set `unixSocketMode: 0o600` in code and there is nothing to add here. Note that connect-level access is only the outer boundary — everything past connect is decided per-entity by the ACL provider, per user, which is what the SSH path preserves.
+- **`RuntimeDirectory=mm`**: systemd creates `/run/mm` at start, owned by `User=`/`Group=`, and removes it at stop. `/run` is a tmpfs, so this setting is also what creates the path after a reboot. **`RuntimeDirectoryMode=0750`** (systemd default `0755`) sets the *directory* mode. This is the outer access check: a peer needs execute permission on the directory to reach the socket. Members of group `mm` pass. Other users do not.
+- **systemd does not set the socket file's mode.** Between `bind` and `listen`, the server sets it to `MMServerConfiguration.unixSocketMode` (default `0o660`, owner and group read/write) with `chmod(2)`. Do not set `UMask=` to control the socket mode. The explicit chmod replaces the umask-derived mode before the server accepts any connection. So the configuration value is the one that applies.
+- Grant access by group. Run the daemon with a dedicated group (`Group=mm`), add client users to it (`usermod -aG mm alice`), and keep the directory at `0750` and the socket at `0660`. For a single-user daemon, set `unixSocketMode: 0o600` in code and add nothing here. Connect access is only the outer boundary. After connect, the ACL provider decides access per entity and per user. The SSH path keeps this per-user check.
 
-Stop/restart behaves correctly out of the box: systemd's default stop signal is SIGTERM, which the recommended `ServiceGroup` wiring maps to graceful shutdown (stop accepting, drain in-flight handlers, close connections, unlink the socket file last). `RuntimeDirectory` removal then sweeps the directory. On a crash, the leftover socket file is handled by the next start's liveness probe — refused connect, unlink, rebind; no `ExecStartPre=rm ...` incantations needed, and none should be added (the server refuses to delete non-socket files at its path on purpose).
+Stop and restart work with no extra setup. systemd's default stop signal is SIGTERM. The recommended `ServiceGroup` setup maps SIGTERM to graceful shutdown: stop accepting, drain in-flight handlers, close connections, and delete the socket file last. systemd then removes the `RuntimeDirectory`. After a crash, the next start's check handles the leftover socket file: the connect is refused, so the server deletes the file and binds again. Do not add `ExecStartPre=rm ...`. It is not needed, and the server deliberately refuses to delete non-socket files at its path.
 
 ## 3. launchd recipe (macOS)
 
-The equivalent LaunchDaemon. The same rule applies: **no `Sockets` key.** launchd's `Sockets` mechanism creates and listens on the socket itself and hands descriptors to the job over check-in — an API this server does not speak in v1. If launchd binds the path first, the daemon's startup probe finds a live listener and fails with `socketPathInUse`. The daemon binds its own socket; the plist just runs the program.
+The equivalent LaunchDaemon follows the same rule: **no `Sockets` key.** With `Sockets`, launchd creates the socket, listens on it, and passes descriptors to the job at check-in. This server does not support that API in v1. If launchd binds the path first, the daemon's startup check finds a live listener and fails with `socketPathInUse`. The daemon binds its own socket. The plist only runs the program.
 
 ```xml
 <!-- /Library/LaunchDaemons/com.example.mm.plist -->
@@ -132,7 +146,7 @@ The equivalent LaunchDaemon. The same rule applies: **no `Sockets` key.** launch
 </plist>
 ```
 
-macOS ships no `_mm` account, and launchd refuses to spawn a job whose `UserName` does not resolve — create the role account and group once at install time, before loading the plist. Underscore-prefixed names are Apple's convention for system accounts; pick an unused id in the 200–400 range (`dscl . -list /Users UniqueID | sort -n -k2` shows what is taken):
+macOS has no `_mm` account, and launchd does not start a job whose `UserName` does not exist. Create the role account and group once at install time, before you load the plist. Apple names system accounts with a leading underscore. Pick an unused id from 200 to 400 (`dscl . -list /Users UniqueID | sort -n -k2` shows the ids in use):
 
 ```sh
 sudo dscl . -create /Groups/_mm PrimaryGroupID 300
@@ -141,34 +155,48 @@ sudo dscl . -create /Users/_mm PrimaryGroupID 300
 sudo dscl . -create /Users/_mm UserShell /usr/bin/false
 ```
 
-Load with `sudo launchctl bootstrap system /Library/LaunchDaemons/com.example.mm.plist`. On stop, launchd sends SIGTERM (SIGKILL after `ExitTimeOut`, default 20 s) — again the graceful-shutdown path.
+Load with `sudo launchctl bootstrap system /Library/LaunchDaemons/com.example.mm.plist`. On stop, launchd sends SIGTERM (then SIGKILL after `ExitTimeOut`, default 20 s). SIGTERM starts the same graceful shutdown.
 
-Socket directory: launchd has no `RuntimeDirectory` equivalent, and `/var/run` is root-owned and **cleared at every boot**, so a daemon running as `_mm` cannot create its directory there. Use a persistent per-app directory instead and create it once at install time:
+Socket directory: launchd has no `RuntimeDirectory` equivalent. `/var/run` is owned by root and **cleared at every boot**, so a daemon running as `_mm` cannot create its directory there. Use a persistent directory for the app instead, and create it once at install time:
 
 ```sh
 sudo mkdir -m 0750 /var/db/mm
 sudo chown _mm:_mm /var/db/mm
 ```
 
-Ownership and mode of that directory are the outer gate, exactly as with systemd; the socket file's mode is again applied by the server from `unixSocketMode`. Add client users to the `_mm` group for the default `0o660` socket. If you insist on `/var/run`, the daemon must run as root (don't) or a separate root pre-flight job must recreate the directory each boot — the persistent `/var/db` directory avoids both. A stale `mm.sock` surviving reboot in `/var/db/mm` is not a problem: the startup probe unlinks it.
+As with systemd, the owner and mode of this directory are the outer access check, and the server sets the socket file's mode from `unixSocketMode`. For the default `0o660` socket, add client users to the `_mm` group. To use `/var/run`, the daemon must run as root (do not do this), or a separate root job must create the directory again at each boot. The persistent `/var/db` directory avoids both. A stale `mm.sock` in `/var/db/mm` after a reboot is not a problem: the startup check deletes it.
 
 ## 4. Raw TCP: trusted networks only
 
-`MMEndpoint.tcp(host:port:)` works, and you should read this paragraph before using it across anything you do not fully control.
+`MMEndpoint.tcp(host:port:)` works. Read this section before you use it on any network that you do not fully control.
 
-> **TCP connections have no identity and no encryption in v1.** Every TCP peer is `PeerIdentity.anonymous` — there are no kernel credentials on a TCP socket, and v1 defines no substitute. The anonymous identity is `uid = uid_t.max, gid = gid_t.max` and is not special-cased in classification; because no real entity should be owned by those values, it classifies as **other** in practice on every entity: the other-class `rwx` bits decide *everything*, for *every* peer that can reach the port. Never create an ACL with owner `4294967295` or group `4294967295` (a `-1` uid/gid cast leaking into the ACL store) — such a record grants its owner- or group-class bits to every anonymous TCP peer. There is no TLS: frames travel in cleartext and nothing authenticates the server to the client or vice versa. The design leaves a seam for an optional NIOSSL handler ahead of the frame decoder (planned as a package trait so UDS-only consumers never link TLS), but that is future work, not a v1 feature. Peer identity over TCP (token- or client-cert-derived) is deferred to a v1.1 hello extension.
+> **TCP connections have no identity and no encryption in v1.** Every TCP peer is `PeerIdentity.anonymous`. A TCP socket has no kernel credentials, and v1 has no replacement. The anonymous identity is `uid = uid_t.max, gid = gid_t.max`, and classification has no special case for it. No real entity should be owned by those values, so in practice it is in the **other** class on every entity. The other-class `rwx` bits decide *everything*, for *every* peer that can reach the port.
+>
+> Never create an ACL with owner `4294967295` or group `4294967295` (a `-1` uid/gid cast that leaked into the ACL store). Such a record gives its owner-class or group-class bits to every anonymous TCP peer.
+>
+> There is no TLS. Frames travel in cleartext, and nothing authenticates the server to the client or the client to the server. The design allows an optional NIOSSL handler before the frame decoder in the future (planned as a package trait, so UDS-only users never link TLS). This is not a v1 feature. Peer identity over TCP (from a token or a client certificate) is deferred to a v1.1 hello extension.
 
-Legitimate uses: loopback (`tcp(host: "127.0.0.1", ...)`) when a UDS path is impractical, and closed lab/cluster networks where "anyone who can reach the port" is an acceptable principal. In both cases author the ACLs knowing that only other-bits apply — an entity with other `---` is invisible and untouchable over TCP (provided no ACL carries the `uid_t.max`/`gid_t.max` sentinel, per the warning above), and an entity with other `rw-` is world-writable to the segment. For anything else, use SSH forwarding; if you are tempted to expose TCP across a real network because tunnels feel inconvenient, `ssh -N -f -L` above is the supported answer. (`TCP_NODELAY` is set on all TCP channels; `unixSocketMode` is ignored for TCP.)
+Valid uses:
+
+- Loopback (`tcp(host: "127.0.0.1", ...)`) when a UDS path is not practical.
+- Closed lab or cluster networks where "anyone who can reach the port" is an acceptable principal.
+
+In both cases, write the ACLs knowing that only the other-class bits apply:
+
+- An entity with other `---` is invisible and inaccessible over TCP, provided no ACL uses the `uid_t.max`/`gid_t.max` value (see the warning above).
+- An entity with other `rw-` can be read and written by anyone on the network segment.
+
+For everything else, use SSH forwarding. If tunnels seem inconvenient, the supported answer is still `ssh -N -f -L` (above), not TCP on a real network. `TCP_NODELAY` is set on all TCP channels. `unixSocketMode` is ignored for TCP.
 
 ## 5. Troubleshooting
 
-Each symptom below maps to what the code actually does, so you can tell the failures apart from the logs and returned errors alone.
+Each item matches what the code does, so you can tell failures apart from the logs and returned errors alone.
 
-- **Client: `MMCallError.denied` on a call.** Wire error code 2 (`permissionDenied`) from the server: ACL denial (missing `x` on an ancestor, target class bits insufficient, no ACL record for the entity, or a root-targeted request to a route that does not accept root). The server logs `authorization denied` at **debug** level with `method`, `entity`, and `reason` metadata and bumps its denials counter — raise the server's log level to debug to see which check failed. Over TCP, remember: you are the other class, always.
-- **Client: `MMClientError.transport` / `MMCallError.transport` with "connection refused".** A socket file exists but nothing is listening — daemon down, still starting, or draining. Distinct from a *missing* file (`ENOENT` in the description: wrong path, tunnel not up, or `RuntimeDirectory` already swept). No server log entry exists for either — the kernel refuses before the server is involved. The daemon itself never suffers from a stale file: its startup probe unlinks refused sockets automatically.
-- **Client: transport error with "permission denied" (`EACCES`) on connect.** The outer boundary: socket file mode (`unixSocketMode`) or a missing `x` on a directory in the path. Also kernel-level, also invisible to the server. Check group membership against the socket's group and the directory modes at both ends of a tunnel — on the server end the relevant user is the *SSH* user, not whoever runs the client.
-- **Server startup fails: `socketPathInUse`.** The liveness probe's `connect(2)` succeeded: a live listener already owns the path. Either a second daemon instance, or an init system that bound the socket for you — remove any `.socket` unit or launchd `Sockets` key; v1 daemons bind their own socket.
-- **Server startup fails: `socketPathOccupied`.** Something that is not a socket sits at the path. The server refuses to delete unknown files by design; inspect and remove it manually.
-- **ssh: `bind: Address already in use` when opening a tunnel.** Stale forwarded-socket file from a previous tunnel. `StreamLocalBindUnlink=yes` (client config for `-L`, `sshd_config` for `-R`). With `-f` but without `ExitOnForwardFailure=yes` this failure is easy to miss — the backgrounded ssh keeps running while forwarding nothing.
-- **Connection drops after ~2 minutes idle.** The server's all-traffic idle timeout (default 120 s, `idleTimeout`) — deliberate reaping. The reap is silent server-side: the connection's inbound stream ends cleanly and no log line is emitted; only the client observes it, as `ClientState.closed`. SSH keepalives do not count as traffic. Reconnect on demand, or raise the timeout.
-- **Connection closes immediately after connect, no error frame.** Over the connection cap (`maxConnections`): the server closes without a busy frame — pre-hello there is no msgid to address an error to — logging `connection rejected` with `reason: connection_cap` at debug and counting a rejection. Also the fate of non-protocol probes (`nc`, stray HTTP): the first frame must be a valid hello or the connection is dropped.
+- **Client: `MMCallError.denied` on a call.** The server returned wire error code 2 (`permissionDenied`): an ACL denial. Causes: missing `x` on an ancestor, insufficient class bits on the target, no ACL record for the entity, or a root-targeted request to a route that does not accept root. The server logs `authorization denied` at **debug** level with `method`, `entity`, and `reason` metadata, and increments its denials counter. Set the server's log level to debug to see which check failed. Over TCP, you are always in the other class.
+- **Client: `MMClientError.transport` / `MMCallError.transport` with "connection refused".** A socket file exists, but nothing listens on it: the daemon is down, starting, or draining. A *missing* file is a different case (`ENOENT` in the description): wrong path, tunnel not up, or `RuntimeDirectory` already removed. The server logs neither case, because the kernel refuses the connection before the server is involved. Stale files never block the daemon itself: its startup check deletes refused sockets automatically.
+- **Client: transport error with "permission denied" (`EACCES`) on connect.** This is the outer boundary: the socket file mode (`unixSocketMode`) or a missing `x` on a directory in the path. The kernel also refuses this one, so the server does not see it. Check group membership against the socket's group, and check directory modes at both ends of a tunnel. On the server end, the relevant user is the *SSH* user, not the user who runs the client.
+- **Server startup fails: `socketPathInUse`.** The startup check's `connect(2)` succeeded: a live listener already owns the path. This is either a second daemon instance or an init system that bound the socket. Remove any `.socket` unit or launchd `Sockets` key. v1 daemons bind their own socket.
+- **Server startup fails: `socketPathOccupied`.** A file that is not a socket is at the path. The server deliberately does not delete unknown files. Inspect the file and remove it manually.
+- **ssh: `bind: Address already in use` when opening a tunnel.** A stale forwarded-socket file from an earlier tunnel. Set `StreamLocalBindUnlink=yes` (client config for `-L`, `sshd_config` for `-R`). With `-f` but without `ExitOnForwardFailure=yes`, this failure is easy to miss: the background ssh keeps running and forwards nothing.
+- **Connection drops after about 2 minutes idle.** The server's idle timeout (`idleTimeout`, default 120 s, counts traffic in both directions) closed it on purpose. The server side is silent: the inbound stream ends cleanly and nothing is logged. Only the client sees it, as `ClientState.closed`. SSH keepalives do not count as traffic. Reconnect when needed, or raise the timeout.
+- **Connection closes right after connect, with no error frame.** The server is over its connection cap (`maxConnections`). It closes without a busy frame, because before the hello there is no msgid to send an error to. It logs `connection rejected` with `reason: connection_cap` at debug level and counts a rejection. Non-protocol clients (`nc`, stray HTTP) are also dropped: the first frame must be a valid hello.
