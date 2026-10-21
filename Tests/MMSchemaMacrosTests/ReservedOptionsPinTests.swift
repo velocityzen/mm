@@ -1,19 +1,18 @@
 import ArgumentParser
 import MMCLI
-import MMSchemaMacros
-import MMTestSupport
+import MMSchemaCodeGenerator
 import Testing
 
 /// Pins the two restatements of the shared option surface to each other and
 /// to reality, so adding an option to `MMCLIOptions` without updating the
-/// macro's reserved list (or vice versa) fails here instead of surfacing as a
+/// generator's reserved list (or vice versa) fails here instead of surfacing as a
 /// runtime `--option` collision in a generated command.
 @Suite("Reserved option names stay in lockstep")
 struct ReservedOptionsPinTests {
-    @Test("the macro's reserved list is MMCLIOptions's surface plus help/version")
-    func macroListMatchesOptions() {
+    @Test("the generator's reserved list is MMCLIOptions's surface plus help/version")
+    func generatorListMatchesOptions() {
         #expect(
-            SchemaContractMacro.reservedLongOptionNames
+            SchemaCodeGenerator.reservedLongOptionNames
                 == MMCLIOptions.declaredLongOptionNames.union(["help", "version"]))
     }
 

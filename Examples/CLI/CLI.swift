@@ -3,9 +3,10 @@ import MMCLI
 import MMExampleAPI
 
 /// The generated command-line face of the example daemon: every subcommand
-/// under `journal` was emitted by the schema's `CLI(.enabled)` entry in
-/// JournalAPI.swift — names, help text, and argument shapes all come from the
-/// one contract declaration (with `journal.append` renamed to `journal add`
+/// under `journal` is generated into this target by the `MMCLIGeneratorPlugin`
+/// plugin from the schema's `CLI(.enabled)` entry in JournalAPI.swift (which
+/// itself depends on MMSchema only, so the daemon links no CLI code) — names,
+/// help text, and argument shapes all come from the one contract declaration (with `journal.append` renamed to `journal add`
 /// by its `CLI(.command("add"))` overlay).
 ///
 /// ```sh

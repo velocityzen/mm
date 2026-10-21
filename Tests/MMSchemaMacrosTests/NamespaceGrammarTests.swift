@@ -1,8 +1,8 @@
 import Testing
 
-@testable import MMSchemaMacros
+import MMSchemaCodeGenerator
 
-/// The macro restates `EntityName.parse`'s grammar (it cannot call the
+/// The generator restates `EntityName.parse`'s grammar (it cannot call the
 /// runtime); this case table mirrors the rules in
 /// Sources/MMSchema/EntityName.swift so a grammar change on either side
 /// fails here.

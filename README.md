@@ -8,7 +8,7 @@ A Swift library implementing a binary RPC protocol over Unix domain sockets and 
 
 ## Modules
 
-One package, `MatterInMotion`, six library products:
+One package, `MatterInMotion`, six library products and one build-tool plugin:
 
 - `MMWire` — MessagePack coder over `ByteBuffer`, `[u32 LE length][payload]` framing, the RPC envelope, the hello preamble. Depends on NIOCore and `MMSchema` only.
 - `MMSchema` — Method descriptors, `TypeSchema` and the schema fingerprint, `EntityACL`, `PeerIdentity`. Pure values: no NIO import, no IO.
@@ -16,6 +16,7 @@ One package, `MatterInMotion`, six library products:
 - `MMClient` — `MMClientConnection`: typed unary and streaming calls with msgid multiplexing, credit-based flow control, schema discovery.
 - `MMClientService` — `MMClientService`, the swift-service-lifecycle `Service` adapter for daemon-style clients. Separate so plain clients and CLIs don't link swift-service-lifecycle.
 - `MMCLI` — the runtime behind schema-generated command-line tools (swift-argument-parser): connection options, exit-code mapping, stream drivers, `discover` and raw `call` commands.
+- `MMCLIGeneratorPlugin` — generates a `#schema`'s `CLI(.enabled)` commands into the command-line target, keeping the shared API module (and the daemon) free of MMCLI and swift-argument-parser.
 
 Dependency direction: `MMSchema` depends on nothing internal; `MMWire` depends on `MMSchema` (the wire time kinds' VPTS codec lives there); `MMServer` and `MMClient` depend on both; `MMClientService` and `MMCLI` sit on `MMClient`. `MMSchema` stays importable by client-only processes.
 
@@ -170,7 +171,22 @@ Daemons add the `MMClientService` product and drop `MMClientService(connection:)
 
 ### CLI
 
-The same declaration can generate a command-line tool. A top-level `CLI(.enabled)` entry in the block additionally emits one swift-argument-parser command per call — names, `--help` text, and argument shapes all from the contract — plus a namespace group; the file then imports `ArgumentParser` and `MMCLI`. A per-call `CLI(...)` part renames or omits commands, `Field(..., cli:)` shapes arguments (positional, flag, short — explicit or `short: .auto` deriving `-x` from the long name — renamed, omitted), and a `Field(..., default:)` literal makes the option hybrid: a bare `--format` means the default (`default: .now` on date/time fields stamps the invocation moment), and none of it touches the wire: the overlay is never served, fingerprinted, or compared.
+The same declaration can generate a command-line tool. A top-level `CLI(.enabled)` entry in the block asks for one swift-argument-parser command per call — names, `--help` text, and argument shapes all from the contract — plus a namespace group. The commands are generated into the CLI target by the `MMCLIGeneratorPlugin` build-tool plugin, so the API module shared with the daemon still depends on `MMSchema` only — the daemon never links MMCLI or swift-argument-parser:
+
+```swift
+.executableTarget(
+    name: "JournalCLI",
+    dependencies: [
+        "JournalAPI",
+        .product(name: "MMCLI", package: "mm"),
+        .product(name: "MMSchema", package: "mm"),
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
+    ],
+    plugins: [.plugin(name: "MMCLIGeneratorPlugin", package: "mm")]
+)
+```
+
+A per-call `CLI(...)` part renames or omits commands, `Field(..., cli:)` shapes arguments (positional, flag, short — explicit or `short: .auto` deriving `-x` from the long name — renamed, omitted), and a `Field(..., default:)` literal makes the option hybrid: a bare `--format` means the default (`default: .now` on date/time fields stamps the invocation moment), and none of it touches the wire: the overlay is never served, fingerprinted, or compared.
 
 ```swift
 Call("append", description: "Appends one line to a journal") {

@@ -53,12 +53,13 @@
 /// runtime conditionals, and no `payload:`/`.bytes` shapes (those need
 /// hand-written types with the runtime DSL). Expansion happens at member
 /// scope; `#schema` cannot be used at file scope.
-/// CLI generation (a top-level `CLI(.enabled)` entry in the block)
-/// additionally emits one swift-argument-parser command per non-omitted call
-/// plus a namespace command group (`Journal.Command`), shaped by the
-/// declaration's per-call `CLI(...)` parts and `Field(..., cli:)` hints. The
-/// expanding file must import `ArgumentParser` and `MMCLI` — the generated
-/// commands reference both.
+/// A top-level `CLI(.enabled)` entry marks the schema for CLI generation: one
+/// swift-argument-parser command per non-omitted call plus a namespace
+/// command group (`Journal.Command`), shaped by the declaration's per-call
+/// `CLI(...)` parts and `Field(..., cli:)` hints. The macro only validates
+/// those hints; the commands are generated into the command-line target by
+/// the `MMCLIGeneratorPlugin` build-tool plugin, so the module expanding `#schema`
+/// (shared with the daemon) depends on MMSchema alone.
 @freestanding(declaration, names: arbitrary)
 public macro schema(
     _ namespace: String,

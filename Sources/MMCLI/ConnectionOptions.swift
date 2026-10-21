@@ -63,8 +63,8 @@ public struct MMCLIOptions: ParsableArguments, Sendable {
     public var noVerify: Bool = false
 
     /// The long option names this type declares — update in lockstep with the
-    /// property wrappers above. `SchemaContractMacro.reservedLongOptionNames`
-    /// restates this list (the macro cannot import MMCLI);
+    /// property wrappers above. `SchemaCodeGenerator.reservedLongOptionNames`
+    /// restates this list (the generator cannot import MMCLI);
     /// ReservedOptionsPinTests keeps the two in agreement.
     public static let declaredLongOptionNames: Set<String> = [
         "socket",

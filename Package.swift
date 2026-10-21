@@ -14,25 +14,19 @@ let package = Package(
         .library(name: "MMClient", targets: ["MMClient"]),
         .library(name: "MMClientService", targets: ["MMClientService"]),
         .library(name: "MMCLI", targets: ["MMCLI"]),
+        .plugin(name: "MMCLIGeneratorPlugin", targets: ["MMCLIGeneratorPlugin"]),
         .executable(name: "mm-example-daemon", targets: ["MMExampleDaemon"]),
         .executable(name: "mm-example-client", targets: ["MMExampleClient"]),
         .executable(name: "mm-example-cli", targets: ["MMExampleCLI"]),
     ],
     dependencies: [
-        // 2.82 floor: ByteBuffer.peekInteger / peekMultipleIntegers.
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.82.0"),
         .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.6.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
-        // 2.11 floor: Timer.record(duration:).
         .package(url: "https://github.com/apple/swift-metrics.git", from: "2.11.0"),
-        // 1.8.0 floor: generated commands use @Option(defaultAsFlag:) (1.8.0)
-        // and CommandConfiguration(aliases:) (1.7.0).
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.0"),
-        // Compile-time only (the #schema macro plugin); never linked into products.
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0"..<"700.0.0"),
-        // Functional Result/Optional utilities (async map/match/tap).
         .package(url: "https://github.com/velocityzen/fp-swift.git", from: "3.0.0"),
-        // Monadic acquire/use/release for resources with a lifecycle.
         .package(url: "https://github.com/velocityzen/fp-swift-bracket.git", from: "1.1.0"),
     ],
     targets: [
@@ -43,9 +37,17 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
             ]
         ),
+        .target(
+            name: "MMSchemaCodeGenerator",
+            dependencies: [
+                .product(name: "SwiftSyntax", package: "swift-syntax"),
+                .product(name: "SwiftSyntaxBuilder", package: "swift-syntax"),
+            ]
+        ),
         .macro(
             name: "MMSchemaMacros",
             dependencies: [
+                "MMSchemaCodeGenerator",
                 .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
                 .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
             ]
@@ -84,8 +86,6 @@ let package = Package(
         ),
         .target(
             name: "MMClientService",
-            // The ServiceGroup adapter, split out so plain clients and CLIs
-            // don't link swift-service-lifecycle (and its swift-async-algorithms).
             dependencies: [
                 "MMClient",
                 .product(name: "NIOCore", package: "swift-nio"),
@@ -99,23 +99,28 @@ let package = Package(
                 "MMSchema",
                 "MMWire",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
-                // UnixSignals only: the ServiceLifecycle product would drag in
-                // swift-async-algorithms.
                 .product(name: "UnixSignals", package: "swift-service-lifecycle"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ]
         ),
+        .executableTarget(
+            name: "MMCLIGenerator",
+            dependencies: [
+                "MMSchemaCodeGenerator",
+                .product(name: "SwiftParser", package: "swift-syntax"),
+                .product(name: "SwiftSyntax", package: "swift-syntax"),
+            ]
+        ),
+        .plugin(
+            name: "MMCLIGeneratorPlugin",
+            capability: .buildTool(),
+            dependencies: ["MMCLIGenerator"]
+        ),
         .target(
             name: "MMExampleAPI",
-            // ArgumentParser + MMCLI activate `#schema` CLI generation — the
-            // documented tradeoff: the daemon transitively links both (inert).
-            dependencies: [
-                "MMSchema",
-                "MMCLI",
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
-            ],
+            dependencies: ["MMSchema"],
             path: "Examples/API"
         ),
         .executableTarget(
@@ -126,7 +131,8 @@ let package = Package(
                 "MMCLI",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
-            path: "Examples/CLI"
+            path: "Examples/CLI",
+            plugins: ["MMCLIGeneratorPlugin"]
         ),
         .executableTarget(
             name: "MMExampleDaemon",
@@ -152,10 +158,6 @@ let package = Package(
         ),
         .target(
             name: "MMTestSupport",
-            // Shared test harness (deadlines, temp sockets, ServiceGroup and
-            // client run-loop choreography, wire fixtures). Lives under
-            // Tests/, is depended on only by test targets, and ships in no
-            // product.
             dependencies: [
                 "MMWire",
                 "MMSchema",
@@ -184,7 +186,10 @@ let package = Package(
             name: "MMSchemaMacrosTests",
             dependencies: [
                 "MMSchemaMacros",
+                "MMSchemaCodeGenerator",
                 "MMSchema",
+                "MMCLI",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
             ]
         ),
@@ -222,14 +227,12 @@ let package = Package(
                 "MMClient",
                 "MMServer",
                 "MMWire",
-                // The reserved-option pin test compares the macro's literal
-                // list against MMCLIOptions's declared surface.
-                "MMSchemaMacros",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "Logging", package: "swift-log"),
-            ]
+            ],
+            plugins: ["MMCLIGeneratorPlugin"]
         ),
         .testTarget(
             name: "MMIntegrationTests",
