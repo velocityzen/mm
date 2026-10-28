@@ -326,7 +326,7 @@ package struct ServerRuntime: Sendable {
             Self.removeSocketFile(path: path, owned: fileIdentity, logger: logger)
         }
         let bound = try await Self.boundServer(server, transport: .unix, removeFiles: removeFiles)
-        self.logger.info("server listening", metadata: ["path": "\(path)"])
+        self.logger.info("listening", metadata: ["path": "\(path)"])
         return bound
     }
 
@@ -344,7 +344,7 @@ package struct ServerRuntime: Sendable {
                 self.initializeChildChannel(channel)
             }
         let bound = try await Self.boundServer(server, transport: .tcp, removeFiles: {})
-        self.logger.info("server listening", metadata: ["address": "\(bound.localAddress)"])
+        self.logger.info("listening", metadata: ["address": "\(bound.localAddress)"])
         return bound
     }
 
