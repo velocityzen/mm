@@ -22,8 +22,8 @@ public struct MMCLIOutput: Sendable {
     /// ``OutputFormat/raw`` currently renders as compact JSON (a dedicated
     /// raw renderer is a later phase; the flag exists so scripts written
     /// today keep working). ``OutputFormat/text`` renders through the first
-    /// of: the tool's per-type ``Format(_:_:)`` entry (bound in
-    /// ``MMCLIDefaults/formatters``); the type's own
+    /// of: the tool's per-type ``Format(_:_:)-(_,(T)->String)`` entry (bound
+    /// in ``MMCLIDefaults/formatters``); the type's own
     /// `CustomStringConvertible` conformance — the Swift-native way to give
     /// a generated response or element its text form, no registry needed
     /// (`extension Journal.ReadResponse: CustomStringConvertible { ... }`);

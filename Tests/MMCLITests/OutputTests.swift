@@ -176,4 +176,16 @@ struct OutputTests {
         let unbound = try MMCLIOutput.render(Fixture(count: 2, line: "hi"), format: .text)
         #expect(unbound == #"{"count":2,"line":"hi"}"#)
     }
+
+    @Test("a Format entry whose closure takes no parameter renders its text for any value")
+    func textFormatWithoutValue() throws {
+        try MMCLIDefaults.$current.withValue(
+            MMCLIDefaults(formatters: [
+                Format(OtherFixture.self) { "acknowledged" }
+            ])
+        ) {
+            let rendered = try MMCLIOutput.render(OtherFixture(ok: true), format: .text)
+            #expect(rendered == "acknowledged")
+        }
+    }
 }

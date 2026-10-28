@@ -22,7 +22,7 @@ The generated commands contain little code. All runtime behavior lives in this m
 - Verification also runs **automatically**, never manually. Every generated command passes its contract to the runner (`invoke(_:verifying:_:)`). The runner confirms the namespace with one scoped discovery diff before dispatch. Drift exits 76. `--no-verify` turns it off. Denied discovery skips the check with a note. Purpose-built tools can declare ``MMCLIServerContract`` with ``Contract(_:)``. `.complete([...])` computes the expected whole-server hello fingerprint at startup, including builtins and any `sharedTypes:` declarations. (A server that registers shared `Types(...)` containers never matches a claim that omits them.) A matching hello then proves the whole composition with no discovery round-trip. A mismatch falls back to the scoped diff.
 - ``MMCLIFailure`` maps `MMCallError` to sysexits-style exit codes: denied 77, unknown method 64, malformed params 65, transport 69, SIGINT 130. Application `MMError`s exit 1 and print `error <code>: <message>` on stderr. It also validates entity arguments. The `<entity>` positional is optional on every command. Without it, the request is root-targeted. The daemon accepts that only when the route's `Accepts` names exactly one concrete entity, which it infers. Other routes return an ordinary denial.
 - ``MMCLIOutput`` renders responses as JSON. Generated payload structs keep field names in their `CodingKeys`' `stringValue`, so `JSONEncoder` prints named keys with no schema code. This type does all stdout and stderr writing. `--output text` uses the first match:
-  1. A ``Format(_:_:)`` entry in the ``MMCLI(_:)`` block, or ``Format(_:)`` without the metatype: `Format { (event: ChangeEvent) in ... }` infers the type from the closure parameter. Entries are keyed by the generated response or element *type*: one entry matches one command's output or one stream's elements.
+  1. A ``Format(_:_:)-(_,(T)->String)`` entry in the ``MMCLI(_:)`` block, or ``Format(_:)`` without the metatype: `Format { (event: ChangeEvent) in ... }` infers the type from the closure parameter. Text that doesn't depend on the value takes a closure with no parameter, ``Format(_:_:)-(_,()->String)``: `Format(Journal.AppendResponse.self) { "appended" }`. Entries are keyed by the generated response or element *type*: one entry matches one command's output or one stream's elements.
   2. The type's `CustomStringConvertible` conformance (`extension Journal.ReadResponse: CustomStringConvertible { ... }`), which needs no registry.
   3. Compact JSON.
 
@@ -81,8 +81,9 @@ A tool with a hand-written root uses the `run:` form: `await MMCLI { Contract(..
 - ``withCLI(_:_:)``
 - ``OutputFormat``
 - ``MMCLIFormatters``
-- ``Format(_:_:)``
+- ``Format(_:_:)-(_,(T)->String)``
 - ``Format(_:)``
+- ``Format(_:_:)-(_,()->String)``
 
 ### Running a command
 

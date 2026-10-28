@@ -12,9 +12,10 @@ public enum OutputFormat: String, ExpressibleByArgument, CaseIterable, Sendable 
     /// Reserved for a future raw renderer; currently identical to ``json``
     /// (documented on ``MMCLIOutput/emit(_:format:)``).
     case raw
-    /// Human-readable, resolved per value type: a ``Format(_:_:)``
-    /// declaration, else the type's own `CustomStringConvertible`
-    /// conformance, else compact JSON. Stream elements and terminals alike.
+    /// Human-readable, resolved per value type: a
+    /// ``Format(_:_:)-(_,(T)->String)`` declaration, else the type's own
+    /// `CustomStringConvertible` conformance, else compact JSON. Stream
+    /// elements and terminals alike.
     case text
 }
 

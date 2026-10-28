@@ -27,9 +27,9 @@ public struct MMCLIDefaults: Sendable {
     /// tool whose scripts opt into JSON with `--output json`.
     public var output: OutputFormat?
     /// The tool's per-type renderers for ``OutputFormat/text`` — built from
-    /// ``Format(_:_:)`` entries, keyed by the rendered value's type (which
-    /// is per-command: every response and stream element has its own
-    /// generated type). Types without an entry render as compact JSON.
+    /// ``Format(_:_:)-(_,(T)->String)`` entries, keyed by the rendered value's
+    /// type (which is per-command: every response and stream element has its
+    /// own generated type). Types without an entry render as compact JSON.
     public var formatters: MMCLIFormatters
 
     /// The binding commands read; empty unless the tool declared one via
@@ -49,8 +49,8 @@ public struct MMCLIDefaults: Sendable {
     }
 }
 
-/// The tool's per-type text renderers, collected from ``Format(_:_:)``
-/// entries (array-literal friendly):
+/// The tool's per-type text renderers, collected from
+/// ``Format(_:_:)-(_,(T)->String)`` entries (array-literal friendly):
 ///
 /// ```swift
 /// MMCLIDefaults(formatters: [
@@ -106,9 +106,9 @@ public func Format<T: Encodable & Sendable>(
     )
 }
 
-/// ``Format(_:_:)`` with the rendered type inferred from the closure's
-/// parameter — no metatype spelling, at the cost of naming and annotating
-/// the parameter (there is nothing else to pin the type):
+/// ``Format(_:_:)-(_,(T)->String)`` with the rendered type inferred from the
+/// closure's parameter — no metatype spelling, at the cost of naming and
+/// annotating the parameter (there is nothing else to pin the type):
 ///
 /// ```swift
 /// Format { (event: ChangeEvent) in "\(event.count)\t\(event.line)" }
@@ -119,12 +119,26 @@ public func Format<T: Encodable & Sendable>(
     Format(T.self, render)
 }
 
+/// ``Format(_:_:)-(_,(T)->String)`` for a type whose text doesn't depend on
+/// the value, such as an acknowledgment. The closure takes no parameter, so
+/// there is no `_ in` to write (Swift won't let a closure ignore one):
+///
+/// ```swift
+/// Format(Journal.AppendResponse.self) { "appended" }
+/// ```
+public func Format<T: Encodable & Sendable>(
+    _ type: T.Type,
+    _ render: @Sendable @escaping () -> String
+) -> MMCLIFormatEntry {
+    Format(type) { _ in render() }
+}
+
 // MARK: - The declarative entry point
 
 /// One declaration in an ``MMCLI(_:)`` block: the root command's
 /// shape, the claim, the endpoint, the default output, or a per-type text
 /// renderer. Constructed by ``Configuration(_:)``, ``Contract(_:)``,
-/// ``Endpoint(_:)``, ``Output(_:)``, and ``Format(_:_:)``.
+/// ``Endpoint(_:)``, ``Output(_:)``, and ``Format(_:_:)-(_,(T)->String)``.
 public struct MMCLIPart: Sendable {
     enum Kind: Sendable {
         case configuration(CommandConfiguration)
@@ -229,9 +243,10 @@ public enum MMCLIBuilder: MMListBuilding {
 /// ```
 ///
 /// Declaring ``Contract(_:)``, ``Endpoint(_:)``, or ``Output(_:)`` twice is a
-/// programmer error caught at startup; a repeated ``Format(_:_:)`` type keeps
-/// the last entry. ``withCLI(_:_:)`` and ``MMCLIDefaults`` remain the
-/// value-level spelling underneath.
+/// programmer error caught at startup; a repeated
+/// ``Format(_:_:)-(_,(T)->String)`` type keeps the last entry.
+/// ``withCLI(_:_:)`` and ``MMCLIDefaults`` remain the value-level spelling
+/// underneath.
 @discardableResult
 public nonisolated(nonsending) func MMCLI<Value>(
     @MMCLIBuilder _ parts: () -> [MMCLIPart],
