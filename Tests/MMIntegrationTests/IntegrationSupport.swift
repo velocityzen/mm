@@ -7,7 +7,6 @@ import MMWire
 import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
-import ServiceLifecycle
 
 #if canImport(Darwin)
 import Darwin
@@ -18,11 +17,11 @@ import Musl
 #endif
 
 // MARK: - Deterministic signalling (no sleeps)
-// Deadlines, temp sockets, the ServiceGroup and client run-loop choreography,
+// Deadlines, temp sockets, the server and client run-loop choreography,
 // and the echo/envelope wire fixtures come from MMTestSupport.
 
 /// A one-shot, multi-waiter signal carrying a value. Fire-side is synchronous
-/// (callable from `onBind` and handler closures); wait-side suspends on a
+/// (callable from harness and handler closures); wait-side suspends on a
 /// continuation — never polls, never sleeps — and **observes task
 /// cancellation**: a cancelled waiter throws `CancellationError` instead of
 /// parking forever. That property is load-bearing for the harness's "never
@@ -390,7 +389,7 @@ struct TestServer {
     /// (16), so all of them are admitted and truly concurrent.
     static let burstConcurrency = 8
 
-    var service: MMService
+    var service: ServerRuntime
     var bound: Signal<SocketAddress>
     /// Fired by `slow.wait` when its handler starts running.
     var slowStarted: Signal<Void>
@@ -449,11 +448,10 @@ func makeTestServer(
     // Quiet by default; flip to .trace when debugging a failing test.
     var debugLogger = Logger(label: "mm.test.server")
     debugLogger.logLevel = .warning
-    let service = MMService(
+    let service = ServerRuntime(
         configuration: configuration,
         aclProvider: InMemoryACLProvider(fixtureACLs()),
-        logger: debugLogger,
-        onBind: { address in bound.fire(address) }
+        logger: debugLogger
     ) {
         Handle(TestMethods.echo) { request, _ in
             .success(EchoResponse(value: request.value))
@@ -687,18 +685,16 @@ func makeTestServer(
     )
 }
 
-/// Boots the service in a `ServiceGroup`, waits (bounded) for the bind signal,
-/// runs `body`, then triggers graceful shutdown and joins — the shared
-/// ``withServiceGroup(_:logger:ready:onBodyError:_:)`` choreography, plus the
+/// Listens with the service, fires the fixture's `bound` signal, runs `body`
+/// with the bound address, then drains and joins — the shared
+/// ``withListeningServer(_:seconds:onBodyError:_:)`` choreography, plus the
 /// gate-opening failure hook this fixture needs.
 func withRunningServer<T: Sendable>(
     _ server: TestServer,
-    _ body: (ServiceGroup) async throws -> T
+    _ body: @escaping @Sendable (SocketAddress) async throws -> T
 ) async throws -> T {
-    let bound = server.bound
-    return try await withServiceGroup(
+    try await withListeningServer(
         server.service,
-        ready: { _ = try await bound.wait() },
         onBodyError: {
             // A failed body may have left slow.wait, burst.wait, or a gated
             // follow handler parked; open every gate so the drain can never
@@ -708,9 +704,60 @@ func withRunningServer<T: Sendable>(
             server.slowGate.fire(())
             server.burstGate.fire(())
             server.followGate.fire(())
-        },
-        body
-    )
+        }
+    ) { address in
+        server.bound.fire(address)
+        return try await body(address)
+    }
+}
+
+/// Runs the server until `drain` fires, then lets the bracket's body return,
+/// so dispose drains gracefully — what a host's first shutdown signal does.
+/// Returns once the drain finished and the socket file is gone; throws the
+/// bracket's failure. Fires the fixture's `bound` signal once listening, and
+/// is bounded by its own deadline (past it, the drain becomes a teardown).
+///
+/// Run it beside the test's own flow (`async let`, a task group): that flow
+/// keeps its connections and in-flight calls while the server drains.
+func runServerUntilDrained(_ server: TestServer, drain: Signal<Void>) async throws {
+    let result = try await withDeadline(seconds: 60) {
+        let withServer = server.service.start()
+        return await withServer { address in
+            server.bound.fire(address)
+            // Signal.wait observes cancellation: a failing test that never
+            // fires `drain` cancels this, and dispose then tears down.
+            _ = try? await drain.wait()
+            return .success(())
+        }
+    }
+    try result.get()
+}
+
+/// Runs the service until `stop` fires, then cancels it: the hard-death
+/// path (a host's cancellation stage), with no drain — dispose runs in a
+/// cancelled task and tears every connection down at once. Fires the
+/// fixture's `bound` signal once listening; bounded by its own deadline.
+func runServerUntilCancelled(_ server: TestServer, stop: Signal<Void>) async {
+    try? await withDeadline(seconds: 60) {
+        await withThrowingTaskGroup(of: Void.self) { serverGroup in
+            serverGroup.addTask {
+                let withServer = server.service.start()
+                _ = await withServer { address in
+                    server.bound.fire(address)
+                    // Parks until the group cancels it (Signal.wait observes
+                    // cancellation), so dispose runs cancelled.
+                    _ = try? await Signal<Void>().wait()
+                    return .success(())
+                }
+            }
+            serverGroup.addTask {
+                try await stop.wait()
+                throw DeadlineExceeded()  // any throw cancels the server
+            }
+            _ = try? await serverGroup.next()
+            serverGroup.cancelAll()
+        }
+    }
 }
 
 // MARK: - Raw NIO test client

@@ -4,7 +4,6 @@ import MMServer
 import MMTestSupport
 import MMWire
 import NIOCore
-import ServiceLifecycle
 import Testing
 
 #if canImport(Darwin)
@@ -465,31 +464,33 @@ struct ServerIntegrationTests {
     func gracefulShutdownDrainsInFlight() async throws {
         try await withTempSocketPath { path in
             let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
-            try await withRunningServer(server) { group in
-                try await withWireSession(unixPath: path) { session in
-                    _ = try await session.handshake()
-                    try await session.send(
-                        request(
-                            msgid: 9, method: "slow.wait", entity: entity("box.item"),
-                            TargetRequest(entity: entity("box.item"))
-                        )
+            let drain = Signal<Void>()
+            async let served: Void = runServerUntilDrained(server, drain: drain)
+            _ = try await withDeadline { try await server.bound.wait() }
+            try await withWireSession(unixPath: path) { session in
+                _ = try await session.handshake()
+                try await session.send(
+                    request(
+                        msgid: 9, method: "slow.wait", entity: entity("box.item"),
+                        TargetRequest(entity: entity("box.item"))
                     )
-                    _ = try await withDeadline { try await server.slowStarted.wait() }
-                    await group.triggerGracefulShutdown()
-                    // Drain window, observed directly: new connects are refused
-                    // (listener closed) while the in-flight request is still
-                    // parked and the socket file still exists — response
-                    // delivery strictly precedes file removal.
-                    try await expectConnectRefused(unixPath: path)
-                    #expect(statMode(path: path) != nil)
-                    server.slowGate.fire(())
-                    let reply = try await session.response(msgid: 9)
-                    #expect(reply.error == nil)
-                    #expect(try decodeResult(EchoResponse.self, from: reply.result).value == 99)
-                }
+                )
+                _ = try await withDeadline { try await server.slowStarted.wait() }
+                drain.fire(())
+                // Drain window, observed directly: new connects are refused
+                // (listener closed) while the in-flight request is still
+                // parked and the socket file still exists — response
+                // delivery strictly precedes file removal.
+                try await expectConnectRefused(unixPath: path)
+                #expect(statMode(path: path) != nil)
+                server.slowGate.fire(())
+                let reply = try await session.response(msgid: 9)
+                #expect(reply.error == nil)
+                #expect(try decodeResult(EchoResponse.self, from: reply.result).value == 99)
             }
-            // withRunningServer joined: run() returned, and the socket file was
+            // The bracket's dispose joined the drain, and the socket file was
             // removed last.
+            try await served
             #expect(statMode(path: path) == nil)
         }
     }
@@ -503,19 +504,21 @@ struct ServerIntegrationTests {
             let server = makeTestServer(
                 configuration: .init(endpoint: .unix(path: path), idleTimeout: .seconds(600))
             )
-            try await withRunningServer(server) { group in
-                try await withWireSession(unixPath: path) { session in
-                    _ = try await session.expectServerHello()
-                    // No client hello: the server connection task is parked in
-                    // its pre-hello read when shutdown fires.
-                    await group.triggerGracefulShutdown()
-                    // The input-half close ends the hello read; the server
-                    // closes the connection well inside the 15 s watchdog
-                    // (a server that ignores pre-hello connections would stall
-                    // until the watchdog and fail this assertion).
-                    #expect(await session.drainUntilClosedByServer())
-                }
+            let drain = Signal<Void>()
+            async let served: Void = runServerUntilDrained(server, drain: drain)
+            _ = try await withDeadline { try await server.bound.wait() }
+            try await withWireSession(unixPath: path) { session in
+                _ = try await session.expectServerHello()
+                // No client hello: the server connection task is parked in
+                // its pre-hello read when shutdown fires.
+                drain.fire(())
+                // The input-half close ends the hello read; the server
+                // closes the connection well inside the 15 s watchdog
+                // (a server that ignores pre-hello connections would stall
+                // until the watchdog and fail this assertion).
+                #expect(await session.drainUntilClosedByServer())
             }
+            try await served
             #expect(statMode(path: path) == nil)
         }
     }
@@ -524,15 +527,12 @@ struct ServerIntegrationTests {
     func shutdownUnlinkSparesSuccessorSocket() async throws {
         try await withTempSocketPath { path in
             let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
-            let group = ServiceGroup(
-                configuration: .init(
-                    services: [.init(service: server.service)],
-                    logger: Logger(label: "mm.test.group")
-                )
-            )
+            let drain = Signal<Void>()
+            let oldServerStopped = Signal<Void>()
             try await withThrowingTaskGroup(of: Void.self) { tasks in
                 tasks.addTask {
-                    try await withDeadline(seconds: 60) { try await group.run() }
+                    try await runServerUntilDrained(server, drain: drain)
+                    oldServerStopped.fire(())
                 }
                 _ = try await withDeadline { try await server.bound.wait() }
                 try await withWireSession(unixPath: path) { session in
@@ -544,7 +544,7 @@ struct ServerIntegrationTests {
                         )
                     )
                     _ = try await withDeadline { try await server.slowStarted.wait() }
-                    await group.triggerGracefulShutdown()
+                    drain.fire(())
                     try await expectConnectRefused(unixPath: path)
                     // The old server is now draining: listener closed, socket
                     // file present but refusing — exactly what a successor's
@@ -552,23 +552,29 @@ struct ServerIntegrationTests {
                     // replaces the file and starts serving.
                     let successor = makeTestServer(
                         configuration: .init(endpoint: .unix(path: path)))
-                    try await withRunningServer(successor) { _ in
-                        // Complete the old server's drain while the successor
-                        // is live, and join its run() — its shutdown unlink
-                        // has then executed.
-                        server.slowGate.fire(())
-                        let reply = try await session.response(msgid: 1)
-                        #expect(reply.error == nil)
-                        #expect(await session.drainUntilClosedByServer())
-                        try await tasks.waitForAll()
-                        // The successor's socket must have survived the old
-                        // server's unlink, and must still serve.
-                        #expect(statMode(path: path) != nil)
-                        try await withWireSession(unixPath: path) { fresh in
-                            _ = try await fresh.handshake()
-                        }
+                    let successorDone = Signal<Void>()
+                    async let successorRun: Void = withRunningServer(successor) { _ in
+                        _ = try await successorDone.wait()
                     }
+                    _ = try await withDeadline { try await successor.bound.wait() }
+                    // Complete the old server's drain while the successor is
+                    // live, and join it — its shutdown unlink has then
+                    // executed.
+                    server.slowGate.fire(())
+                    let reply = try await session.response(msgid: 1)
+                    #expect(reply.error == nil)
+                    #expect(await session.drainUntilClosedByServer())
+                    _ = try await withDeadline { try await oldServerStopped.wait() }
+                    // The successor's socket must have survived the old
+                    // server's unlink, and must still serve.
+                    #expect(statMode(path: path) != nil)
+                    try await withWireSession(unixPath: path) { fresh in
+                        _ = try await fresh.handshake()
+                    }
+                    successorDone.fire(())
+                    try await successorRun
                 }
+                try await tasks.waitForAll()
             }
         }
     }
@@ -618,8 +624,9 @@ struct ServerIntegrationTests {
             let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
             try await withRunningServer(server) { _ in
                 let contender = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+                let withContender = contender.service.start()
                 await #expect(throws: MMServiceError.socketPathInUse(path: path)) {
-                    try await contender.service.run()
+                    try await withContender { _ in .success(()) }.get()
                 }
                 // The refused contender must not have unlinked the live socket.
                 #expect(statMode(path: path) != nil)

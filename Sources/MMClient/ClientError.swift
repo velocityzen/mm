@@ -20,9 +20,6 @@ public enum MMClientError: Error, Equatable, Sendable {
     /// The server violated the protocol (a frame that does not decode as an
     /// envelope). The connection is closed.
     case protocolViolation(description: String)
-    /// `run()` was called while a previous `run()` on the same connection was
-    /// already consuming the inbound stream.
-    case alreadyRunning
 }
 
 /// Per-call failures of `call(_:on:_:)` and its streaming
@@ -92,8 +89,6 @@ extension MMClientError: CustomStringConvertible {
                 return "transport failure: \(description)"
             case .protocolViolation(let description):
                 return "protocol violation: \(description)"
-            case .alreadyRunning:
-                return "run() called while the inbound loop is already running"
         }
     }
 }
@@ -166,7 +161,7 @@ public enum ClientState: Sendable, Equatable {
     /// The hello exchange completed and the connection is usable.
     case connected
     /// The connection is gone. `reason` is `nil` for a clean close (EOF or a
-    /// local `close()`/cancellation) and carries the lifecycle error
+    /// the bracket's dispose) and carries the lifecycle error
     /// otherwise.
     case closed(reason: MMClientError?)
 }

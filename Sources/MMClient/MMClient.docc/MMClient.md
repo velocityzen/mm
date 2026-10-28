@@ -4,42 +4,46 @@ The typed client: unary and streaming calls with msgid multiplexing, credit-base
 
 ## Overview
 
-The simplest way to connect is the bracket, ``MMClientConnection/with(_:configuration:eventLoopGroup:logger:_:)``. One scope handles connect, the inbound loop, your body, close, and the join:
+``MMClient`` is the client as an FPBracket resource, declared with a builder the same way the server's `MMService` is:
 
 ```swift
-let reply = await MMClientConnection.with(.unix(path: socketPath)) { connection in
-    await connection.call(Journal.append, on: notes, request)
+let journal = MMClient {
+    Configuration(endpoint: .unix(path: socketPath))
+    Schema(.complete([Journal.contract]))
+}
+
+let outcome = await journal { connection in
+    if case .failure(let error) = await connection.call(Journal.append, on: notes, request) {
+        logger.warning("journal.append failed: \(error)")  // the connection is still up
+    }
+    return .success(())
 }
 ```
 
-`with` is a shorthand for ``MMClientConnection/open(_:configuration:eventLoopGroup:logger:)``, which returns the **live** connection as an FPBracket resource:
-
 - Acquire connects and starts the inbound loop.
+- The body makes the calls on the live ``MMClientConnection``.
 - Dispose closes the connection, joins the loop, and returns the loop's outcome as the release verdict.
 
-It composes with other bracketed resources through `flatMap`/`BracketAsyncDo`.
+There is no connection outside the bracket, so there is nothing to leak. ``ClientPart`` lists the builder elements: exactly one `Configuration` (the endpoint and tunables), and at most one `Schema` and `Log`. ``MMClient`` also has a parameter initializer taking an endpoint and an ``MMClientConfiguration``.
 
-The bracket returns `.failure` if connect failed **or** the connection did not survive the scope (a transport error or protocol violation while the body ran). A clean EOF or the bracket's own close releases successfully. Per-call failures stay in the body's return value.
+The bracket returns `.failure` if connect failed **or** the connection did not survive the scope (a transport error or protocol violation while the body ran). A clean EOF or the bracket's own close releases successfully. A call's own failure (``MMCallError``) leaves the connection up, so handle it in the body, where the call was made, and the bracket's failure means only the connection.
 
-One connection multiplexes many calls. Calls are matched by msgid, and ``MMClientConfiguration/maxInFlightCalls`` limits how many run at once. Open one connection per unit of work, not per call.
+One connection multiplexes many calls. Calls are matched by msgid, and ``MMClientConfiguration/maxInFlightCalls`` limits how many run at once. Run the bracket once per unit of work, not per call.
 
 Put custom coordination, such as stream drainers or staged teardown, *inside* the bracket body as structured child tasks (`async let`, a local group). The bracket still owns the lifecycle around it.
 
-Daemons connect manually instead:
-
-- ``MMClientConnection/connect(to:configuration:eventLoopGroup:logger:)`` sets up the transport and exchanges hellos. Version negotiation picks the lower version. A fingerprint mismatch never disconnects: ``ServerInfo`` reports it, and it should trigger discovery.
-- `MMClientService` runs the inbound loop under a `ServiceGroup`. It is a separate product, so plain clients and CLIs do not link swift-service-lifecycle.
+Daemons compose the client with their other resources, and run the result with their lifecycle (fp-swift-service, for example):
 
 ```swift
-let connection = try await MMClientConnection.connect(
-    to: .unix(path: "/var/run/echo/rpc.sock")).get()
-let group = ServiceGroup(configuration: .init(
-    services: [.init(service: MMClientService(connection: connection))],
-    gracefulShutdownSignals: [.sigterm],
-    logger: logger
-))
-try await group.run()
+let withDaemon = BracketAsyncDo<DaemonError>()
+    .bind { withStore().mapError(DaemonError.store) }
+    .bind { _ in journal.mapError(DaemonError.client) }
+let result = await Service(withDaemon, shutdownSignals: [SIGTERM, SIGINT])()
 ```
+
+The bracket runs on the caller's actor (fp-swift-bracket 2), and so do the connection's calls and stream handles (the module builds with `NonisolatedNonsendingByDefault`), so `@MainActor` code can use them directly. Only `withStream`'s `each` runs in a task of its own (`@concurrent`). It is not `Sendable`: build it where it runs, or hand it to `Service`, which takes it as `sending`.
+
+Acquire sends the client hello and requires the server's hello as the first frame. Version negotiation picks the lower version. A fingerprint mismatch never disconnects: ``ServerInfo`` reports it, and it should trigger discovery.
 
 `call(_:on:_:)` has overloads for all four method shapes. The open envelope carries the `on:` entity. The default is root, which means an entity-less call. This is valid only for a route whose server-side `Accepts` names exactly one concrete entity; the server infers and authorizes the target. Any other route answers `.denied`.
 
@@ -61,6 +65,9 @@ The connection lifecycle is intentionally simple. ``ClientState`` is `.connected
 
 ### Connection
 
+- ``MMClient``
+- ``ClientPart``
+- ``ClientBuilder``
 - ``MMClientConnection``
 - ``MMClientConfiguration``
 - ``ServerInfo``

@@ -52,11 +52,12 @@ private func openParams(_ raw: String = "e") -> ByteBuffer {
 
 private func makeRuntime(
     funnel: RecordingFunnel,
-    maxStreams: Int = 8
+    maxStreams: Int = 8,
+    factory: CapturingMetricsFactory = CapturingMetricsFactory()
 ) -> StreamRuntime {
     StreamRuntime(
         writer: funnel,
-        metrics: MMStreamMetrics(),
+        metrics: MMStreamMetrics(factory: factory),
         maxConcurrentStreams: maxStreams,
         logger: Logger(label: "test")
     )
@@ -117,9 +118,10 @@ struct StreamRuntimeTests {
     }
 
     @Test("a server stream past the initial window parks until a routed credit frame")
-    func responseCreditFlowThroughRuntime() async {
+    func responseCreditFlowThroughRuntime() async throws {
         let funnel = RecordingFunnel()
-        let runtime = makeRuntime(funnel: funnel)
+        let factory = CapturingMetricsFactory()
+        let runtime = makeRuntime(funnel: funnel, factory: factory)
         let sentNine = AsyncRelease()
         let route = Handle(
             ServerStreamMethod<StreamReq, Int, Ack>(name: "s.push", access: .read)
@@ -139,15 +141,18 @@ struct StreamRuntimeTests {
             Issue.record("open accepted")
             return
         }
-        await withDiscardingTaskGroup { group in
-            group.addTask { await plan.run() }
-            group.addTask {
-                // Let the handler drain its window and park on the 9th.
-                try? await Task.sleep(nanoseconds: 30_000_000)
-                #expect(funnel.items.filter { $0.msgid == 60 }.count == 8)
-                // Grant 1 credit: the parked 9th send proceeds.
-                await runtime.route(.credit(msgid: 60, credits: 1), framesDropped: droppedCounter())
-                await sentNine.wait()
+        try await withDeadline {
+            await withDiscardingTaskGroup { group in
+                group.addTask { await plan.run() }
+                group.addTask {
+                    // The 9th send stalls only after the window's 8 were written.
+                    await factory.reached(StreamCounter.creditStalls, 1)
+                    #expect(funnel.items.filter { $0.msgid == 60 }.count == 8)
+                    // Grant 1 credit: the parked 9th send proceeds.
+                    await runtime.route(
+                        .credit(msgid: 60, credits: 1), framesDropped: droppedCounter())
+                    await sentNine.wait()
+                }
             }
         }
         #expect(funnel.items.filter { $0.msgid == 60 }.map(\.seq) == Array(UInt32(0)..<9))
@@ -261,9 +266,10 @@ struct StreamRuntimeTests {
     // MARK: - Inbound watermark credit grant (gap coverage)
 
     @Test("a request stream whose window fills then drains emits a watermark credit grant")
-    func inboundWatermarkGrant() async {
+    func inboundWatermarkGrant() async throws {
         let funnel = RecordingFunnel()
-        let runtime = makeRuntime(funnel: funnel)
+        let factory = CapturingMetricsFactory()
+        let runtime = makeRuntime(funnel: funnel, factory: factory)
         let release = AsyncRelease()
         let route = Handle(
             ClientStreamMethod<StreamReq, Int, Ack>(name: "c.grant", access: .write)
@@ -283,23 +289,25 @@ struct StreamRuntimeTests {
             Issue.record("open accepted")
             return
         }
-        await withDiscardingTaskGroup { group in
-            group.addTask { await plan.run() }
-            group.addTask {
-                // Fill the initial window (8 items) while the handler is parked.
-                for seq in UInt32(0)..<8 {
-                    let item = try! MMPackEncoder().encode(Int(seq)).get()
-                    await runtime.route(
-                        .item(msgid: 71, seq: seq, item: item), framesDropped: droppedCounter()
-                    )
+        try await withDeadline {
+            await withDiscardingTaskGroup { group in
+                group.addTask { await plan.run() }
+                group.addTask {
+                    // Fill the initial window (8 items) while the handler is parked.
+                    for seq in UInt32(0)..<8 {
+                        let item = try! MMPackEncoder().encode(Int(seq)).get()
+                        await runtime.route(
+                            .item(msgid: 71, seq: seq, item: item), framesDropped: droppedCounter()
+                        )
+                    }
+                    // Release: the handler drains all 8; the source grants credit
+                    // back as it crosses the low watermark.
+                    await release.release()
+                    // End only once the pump has taken a grant to write.
+                    await factory.reached(StreamCounter.creditGrantsOut, 1)
+                    // End the request stream so the handler returns.
+                    await runtime.route(.end(msgid: 71), framesDropped: droppedCounter())
                 }
-                // Release: the handler drains all 8; the source grants credit
-                // back as it crosses the low watermark.
-                await release.release()
-                // Let the drain + grant pump run before we end the stream.
-                try? await Task.sleep(nanoseconds: 50_000_000)
-                // End the request stream so the handler returns.
-                await runtime.route(.end(msgid: 71), framesDropped: droppedCounter())
             }
         }
         // At least one additive credit grant reached the writer, and no grant
@@ -316,9 +324,10 @@ struct StreamRuntimeTests {
     // MARK: - Client STOP on a response stream → .peerStopped
 
     @Test("client STOP on a server stream surfaces as .peerStopped to the handler")
-    func clientStopPeerStopped() async {
+    func clientStopPeerStopped() async throws {
         let funnel = RecordingFunnel()
-        let runtime = makeRuntime(funnel: funnel)
+        let factory = CapturingMetricsFactory()
+        let runtime = makeRuntime(funnel: funnel, factory: factory)
         let sawStop = AsyncFlag()
         let route = Handle(
             ServerStreamMethod<StreamReq, Int, Ack>(name: "s.tick", access: .read)
@@ -343,12 +352,15 @@ struct StreamRuntimeTests {
             Issue.record("open accepted")
             return
         }
-        await withDiscardingTaskGroup { group in
-            group.addTask { await plan.run() }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: 20_000_000)
-                await runtime.route(.stop(msgid: 80, code: 0), framesDropped: droppedCounter())
-                await sawStop.wait()
+        try await withDeadline {
+            await withDiscardingTaskGroup { group in
+                group.addTask { await plan.run() }
+                group.addTask {
+                    // STOP the handler while it is parked past its window.
+                    await factory.reached(StreamCounter.creditStalls, 1)
+                    await runtime.route(.stop(msgid: 80, code: 0), framesDropped: droppedCounter())
+                    await sawStop.wait()
+                }
             }
         }
         #expect(funnel.terminalCode(msgid: 80) == .some(.none))

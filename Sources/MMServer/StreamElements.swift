@@ -64,6 +64,10 @@ public struct MMRequestStream<Element: Codable & Sendable>: AsyncSequence, Senda
         /// up — the grant fires on the *consumption* edge, not only when the
         /// producer buffer happens to hit its high watermark (which a fast
         /// handler never reaches).
+        ///
+        /// `@concurrent`, like the NIO iterator it wraps: that iterator is not
+        /// `Sendable`, so it is only ever advanced off the caller's actor.
+        @concurrent
         public mutating func next() async -> Element? {
             let element = await self.base.next()
             if element != nil { self.source.didConsume() }

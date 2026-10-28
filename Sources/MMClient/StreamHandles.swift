@@ -62,6 +62,10 @@ public struct InboundStreamHandle<
         /// task's own cancellation handler; a bare task cancellation is a local
         /// stop of *reading*, per the same discipline as a unary call (no wire
         /// frame is sent from a synchronous cancellation path).
+        ///
+        /// `@concurrent`, like the NIO iterator it wraps: that iterator is not
+        /// `Sendable`, so it is only ever advanced off the caller's actor.
+        @concurrent
         public mutating func next() async -> Element? {
             let element = await self.base.next()
             if element != nil, let credits = self.state.creditToGrantAfterConsume() {
@@ -133,8 +137,10 @@ public struct InboundStreamHandle<
 /// - Parameters:
 ///   - handle: The inbound stream to consume (a server-stream handle, or a
 ///     bidirectional call's `inbound` half).
-///   - each: Runs for every element, in order.
-///   - body: The main flow, running concurrently with consumption.
+///   - each: Runs for every element, in order, in a sibling task
+///     (`@concurrent`).
+///   - body: The main flow, running concurrently with consumption on the
+///     caller's actor.
 /// - Returns: `body`'s value.
 public func withStream<
     Element: Codable & Sendable,
@@ -143,7 +149,7 @@ public func withStream<
     Value
 >(
     _ handle: InboundStreamHandle<Element, OutboundElement, Response>,
-    each: @escaping @Sendable (Element) async -> Void,
+    each: @escaping @Sendable @concurrent (Element) async -> Void,
     _ body: () async -> Value
 ) async -> Value {
     async let drained: Void = {

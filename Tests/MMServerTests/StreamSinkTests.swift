@@ -23,12 +23,13 @@ private func encoded(_ value: Int) -> ByteBuffer {
 }
 
 private func makeSink(
-    _ recorder: ItemRecorder
+    _ recorder: ItemRecorder,
+    factory: CapturingMetricsFactory = CapturingMetricsFactory()
 ) -> (MMResponseSink<Int>, MMResponseSinkState) {
     let state = MMResponseSinkState(
         msgid: 1,
         itemSink: { seq, item in await recorder.sink(seq, item) },
-        metrics: MMStreamMetrics()
+        metrics: MMStreamMetrics(factory: factory)
     )
     return (MMResponseSink<Int>(state: state), state)
 }
@@ -47,19 +48,21 @@ struct StreamSinkTests {
     }
 
     @Test("a send at zero credit parks until a grant, then proceeds")
-    func parkThenGrant() async {
+    func parkThenGrant() async throws {
         let recorder = ItemRecorder()
-        let (sink, state) = makeSink(recorder)
+        let factory = CapturingMetricsFactory()
+        let (sink, state) = makeSink(recorder, factory: factory)
         // Drain the initial window.
         for value in 0..<8 { #expect(await sink.send(value) == .sent) }
 
-        // The 9th send has no credit: it parks. Launch it, then grant.
-        let parked = Task { await sink.send(99) }
-        // Give the parked send a moment to actually suspend, then grant 2.
-        await Task.yield()
-        try? await Task.sleep(nanoseconds: 20_000_000)
-        state.grant(2)
-        #expect(await parked.value == .sent)
+        // The 9th send has no credit: it parks. Grant 2 once it has.
+        let outcome = try await withDeadline {
+            async let parked = sink.send(99)
+            await factory.reached(StreamCounter.creditStalls, 1)
+            state.grant(2)
+            return await parked
+        }
+        #expect(outcome == .sent)
         // 9 delivered, seq 8 for the parked send.
         #expect(recorder.count == 9)
         #expect(recorder.seqs.last == 8)
@@ -84,49 +87,58 @@ struct StreamSinkTests {
     }
 
     @Test("a parked send resumes .peerStopped when the client STOPs")
-    func parkedResumesPeerStopped() async {
+    func parkedResumesPeerStopped() async throws {
         let recorder = ItemRecorder()
-        let (sink, state) = makeSink(recorder)
+        let factory = CapturingMetricsFactory()
+        let (sink, state) = makeSink(recorder, factory: factory)
         for value in 0..<8 { _ = await sink.send(value) }
-        let parked = Task { await sink.send(99) }
-        await Task.yield()
-        try? await Task.sleep(nanoseconds: 20_000_000)
-        state.peerStop()
-        #expect(await parked.value == .peerStopped)
+        let outcome = try await withDeadline {
+            async let parked = sink.send(99)
+            await factory.reached(StreamCounter.creditStalls, 1)
+            state.peerStop()
+            return await parked
+        }
+        #expect(outcome == .peerStopped)
         #expect(recorder.count == 8)  // the parked item was not delivered
     }
 
     @Test("end() makes send report .callEnded; a parked send resumes .callEnded")
-    func ended() async {
+    func ended() async throws {
         let recorder = ItemRecorder()
-        let (sink, state) = makeSink(recorder)
+        let factory = CapturingMetricsFactory()
+        let (sink, state) = makeSink(recorder, factory: factory)
         for value in 0..<8 { _ = await sink.send(value) }
-        let parked = Task { await sink.send(99) }
-        await Task.yield()
-        try? await Task.sleep(nanoseconds: 20_000_000)
-        state.end()
-        #expect(await parked.value == .callEnded)
+        let outcome = try await withDeadline {
+            async let parked = sink.send(99)
+            await factory.reached(StreamCounter.creditStalls, 1)
+            state.end()
+            return await parked
+        }
+        #expect(outcome == .callEnded)
         // After end, every send short-circuits .callEnded.
         #expect(await sink.send(1) == .callEnded)
         #expect(recorder.count == 8)
     }
 
     @Test("grants are additive across several batches")
-    func additiveGrants() async {
+    func additiveGrants() async throws {
         let recorder = ItemRecorder()
-        let (sink, state) = makeSink(recorder)
+        let factory = CapturingMetricsFactory()
+        let (sink, state) = makeSink(recorder, factory: factory)
         for value in 0..<8 { _ = await sink.send(value) }
         // No credit. Grant 3 then 2 with no send in between: they add to 5.
         state.grant(3)
         state.grant(2)
         for _ in 0..<5 { #expect(await sink.send(0) == .sent) }
         #expect(recorder.count == 13)
-        // Now empty again → the next send parks.
-        let parked = Task { await sink.send(0) }
-        await Task.yield()
-        try? await Task.sleep(nanoseconds: 20_000_000)
-        state.grant(1)
-        #expect(await parked.value == .sent)
+        // Now empty again → the next send parks (the first stall of this sink).
+        let outcome = try await withDeadline {
+            async let parked = sink.send(0)
+            await factory.reached(StreamCounter.creditStalls, 1)
+            state.grant(1)
+            return await parked
+        }
+        #expect(outcome == .sent)
         #expect(recorder.count == 14)
     }
 }

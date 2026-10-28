@@ -8,58 +8,6 @@ import Testing
 
 @testable import MMServer
 
-/// A capturing ``MetricsFactory`` that records counter increments by label into
-/// a shared registry, so a test can assert exactly which stream counters
-/// advanced and by how much. Injected into ``MMStreamMetrics`` per test (never
-/// bootstrapped globally), so it is isolated from every other suite and safe
-/// under parallel test execution.
-final class CapturingMetricsFactory: MetricsFactory, Sendable {
-    private let totals = NIOLockedValueBox<[String: Int64]>([:])
-
-    /// The recorded total for `label` (0 if the counter was never incremented).
-    func total(_ label: String) -> Int64 {
-        self.totals.withLockedValue { $0[label] ?? 0 }
-    }
-
-    private final class Handle: CounterHandler {
-        let label: String
-        let totals: NIOLockedValueBox<[String: Int64]>
-        init(label: String, totals: NIOLockedValueBox<[String: Int64]>) {
-            self.label = label
-            self.totals = totals
-        }
-        func increment(by amount: Int64) {
-            self.totals.withLockedValue { $0[self.label, default: 0] += amount }
-        }
-        func reset() { self.totals.withLockedValue { $0[self.label] = 0 } }
-    }
-
-    func makeCounter(label: String, dimensions: [(String, String)]) -> CounterHandler {
-        Handle(label: label, totals: self.totals)
-    }
-    func makeFloatingPointCounter(
-        label: String, dimensions: [(String, String)]
-    ) -> FloatingPointCounterHandler {
-        NOOPMetricsHandler.instance
-    }
-    func makeMeter(label: String, dimensions: [(String, String)]) -> MeterHandler {
-        NOOPMetricsHandler.instance
-    }
-    func makeRecorder(
-        label: String, dimensions: [(String, String)], aggregate: Bool
-    ) -> RecorderHandler {
-        NOOPMetricsHandler.instance
-    }
-    func makeTimer(label: String, dimensions: [(String, String)]) -> TimerHandler {
-        NOOPMetricsHandler.instance
-    }
-    func destroyCounter(_ handler: CounterHandler) {}
-    func destroyFloatingPointCounter(_ handler: FloatingPointCounterHandler) {}
-    func destroyMeter(_ handler: MeterHandler) {}
-    func destroyRecorder(_ handler: RecorderHandler) {}
-    func destroyTimer(_ handler: TimerHandler) {}
-}
-
 private struct MetricsReq: Codable, Sendable {
     var entity: EntityName
     enum CodingKeys: Int, CodingKey { case entity = 0 }
@@ -219,7 +167,7 @@ struct StreamMetricsTests {
     }
 
     @Test("a response send parking at zero credit advances the credit-stall counter")
-    func creditStallCounter() async {
+    func creditStallCounter() async throws {
         let factory = CapturingMetricsFactory()
         let runtime = self.makeRuntime(factory: factory)
         let sentNine = AsyncRelease()
@@ -239,15 +187,20 @@ struct StreamMetricsTests {
             Issue.record("open accepted")
             return
         }
-        await withDiscardingTaskGroup { group in
-            group.addTask { await plan.run() }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: 30_000_000)
-                await runtime.route(.credit(msgid: 1, credits: 1), framesDropped: metricsDropped())
-                await sentNine.wait()
+        try await withDeadline {
+            await withDiscardingTaskGroup { group in
+                group.addTask { await plan.run() }
+                group.addTask {
+                    // Grant only once the 9th send has parked at zero credit:
+                    // the stall is counted before the park registers, and the
+                    // park re-checks credit, so a grant from here on resumes it.
+                    await factory.reached(StreamCounter.creditStalls, 1)
+                    await runtime.route(.credit(msgid: 1, credits: 1), framesDropped: metricsDropped())
+                    await sentNine.wait()
+                }
             }
         }
-        // The 9th send parked once at zero credit.
+        // The 9th send parked exactly once at zero credit.
         #expect(factory.total("mm_server_stream_credit_stalls_total") == 1)
     }
 }

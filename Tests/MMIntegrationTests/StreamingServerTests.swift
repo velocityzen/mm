@@ -3,7 +3,6 @@ import MMWire
 import MMServer
 import MMTestSupport
 import NIOCore
-import ServiceLifecycle
 import Testing
 
 /// S3 server-side streaming, exercised end to end over a real temp-dir unix
@@ -751,38 +750,40 @@ struct StreamingServerTests {
     func gracefulShutdownWithLiveStream() async throws {
         try await withTempSocketPath { path in
             let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
-            try await withRunningServer(server) { group in
-                try await withWireSession(unixPath: path) { session in
-                    _ = try await session.handshake()
-                    let msgid: UInt32 = 11
-                    try await session.send(
-                        request(
-                            msgid: msgid, method: "box.followGated", entity: Self.followEntity,
-                            FollowRequest(entity: Self.followEntity, count: 1000)
-                        )
+            let drain = Signal<Void>()
+            async let served: Void = runServerUntilDrained(server, drain: drain)
+            _ = try await withDeadline { try await server.bound.wait() }
+            try await withWireSession(unixPath: path) { session in
+                _ = try await session.handshake()
+                let msgid: UInt32 = 11
+                try await session.send(
+                    request(
+                        msgid: msgid, method: "box.followGated", entity: Self.followEntity,
+                        FollowRequest(entity: Self.followEntity, count: 1000)
                     )
-                    _ = try await withDeadline { try await server.followStarted.wait() }
+                )
+                _ = try await withDeadline { try await server.followStarted.wait() }
 
-                    // Trigger shutdown: the drain cancels the live handler; its
-                    // terminal must flush through the writer before the channel
-                    // closes.
-                    await group.triggerGracefulShutdown()
+                // Trigger shutdown: the drain cancels the live handler; its
+                // terminal must flush through the writer before the channel
+                // closes.
+                drain.fire(())
 
-                    // The handler observes cancellation, and a terminal for the
-                    // stream reaches us (graceful nil-error from the fixture's
-                    // cancellation branch).
-                    _ = try await withDeadline { try await server.followCancelled.wait() }
-                    let terminal = try await Self.readTerminalTolerating(
-                        items: session, msgid: msgid)
-                    #expect(terminal.error == nil)
+                // The handler observes cancellation, and a terminal for the
+                // stream reaches us (graceful nil-error from the fixture's
+                // cancellation branch).
+                _ = try await withDeadline { try await server.followCancelled.wait() }
+                let terminal = try await Self.readTerminalTolerating(
+                    items: session, msgid: msgid)
+                #expect(terminal.error == nil)
 
-                    // The listener stops accepting; after the drain, the socket
-                    // file is removed.
-                    try await expectConnectRefused(unixPath: path)
-                }
+                // The listener stops accepting; after the drain, the socket
+                // file is removed.
+                try await expectConnectRefused(unixPath: path)
             }
-            // withRunningServer joins the group (shutdown complete) before it
-            // returns; the socket file is gone by then.
+            // The bracket's dispose joins the drain before it returns; the
+            // socket file is gone by then.
+            try await served
             #expect(statMode(path: path) == nil)
         }
     }

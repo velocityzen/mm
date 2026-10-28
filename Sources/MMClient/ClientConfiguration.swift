@@ -28,7 +28,7 @@ public struct MMClientConfiguration: Sendable {
     /// ``MMSchemaVerification/ok``) with zero round-trips. Anything else —
     /// a ``MMClientSchema/partial(_:)`` slice, or a complete
     /// expectation the hello contradicts — is confirmed with one scoped
-    /// discovery diff per contract as soon as ``MMClientConnection/run()``
+    /// discovery diff per contract as soon as the connection's inbound loop
     /// starts; the verdict is awaited via
     /// ``MMClientConnection/verify()``. A mismatch is **never**
     /// a disconnect (fixed wire decision). When `nil`, the hello carries `0`
@@ -49,10 +49,10 @@ public struct MMClientConfiguration: Sendable {
     /// Bound on the hello exchange, monotonic (`TimeAmount`, scheduled on the
     /// channel's event loop). If the server's hello has not arrived within
     /// this window after the transport connect, the channel is closed and
-    /// `connect` fails with `.transport` ("connection closed before server
-    /// hello"). Default 10 seconds. `nil` disables the bound — not
+    /// the bracket's acquire fails with `.transport` ("connection closed
+    /// before server hello"). Default 10 seconds. `nil` disables the bound — not
     /// recommended: a server that accepts the socket but never writes would
-    /// park `connect` until the peer acts (task cancellation still closes the
+    /// park acquire until the peer acts (task cancellation still closes the
     /// channel either way).
     public var helloTimeout: TimeAmount?
 

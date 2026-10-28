@@ -1,19 +1,23 @@
 import ArgumentParser
+import FP
+import FPBracket
 import MMClient
 import MMSchema
 
-/// Owns the connect → run → body → close lifecycle for one command
-/// invocation, so generated commands contain only their call and rendering.
+/// Owns the connection bracket for one command invocation, so generated
+/// commands contain only their call and rendering.
 public enum MMCLIRunner {
-    /// Connects to the endpoint the options describe, runs `body` against the
-    /// live connection, and closes cleanly.
+    /// Opens the connection the options describe, runs `body` against it, and
+    /// closes it when `body` returns.
     ///
-    /// The connection's inbound loop (`run()`) is a structured child for the
-    /// whole of `body` — never a free-floating task. `body` errors (typically
-    /// the `ExitCode` thrown by ``MMCLIFailure/unwrap(_:method:entity:)``)
-    /// propagate after the connection is closed and the loop has drained. A
-    /// connect failure renders a one-line hint to stderr and throws
-    /// `ExitCode(69)` (EX_UNAVAILABLE).
+    /// The connection is an `MMClient` bracket: acquire connects and starts
+    /// the inbound loop, dispose closes and joins it, so nothing outlives the
+    /// invocation. `body` errors (typically the
+    /// `ExitCode` thrown by ``MMCLIFailure/unwrap(_:method:entity:)``)
+    /// propagate after the connection is closed and the loop has drained.
+    /// Once `body` has run, its verdict is the command's: a connection that
+    /// dies under it surfaces through its calls. A connect failure renders a
+    /// one-line hint to stderr and throws `ExitCode(69)` (EX_UNAVAILABLE).
     ///
     /// ## Automatic schema verification
     ///
@@ -36,19 +40,41 @@ public enum MMCLIRunner {
         _ body: @Sendable @escaping (MMClientConnection) async throws -> T
     ) async throws -> T {
         let endpoint = options.endpoint
-        let connection: MMClientConnection
-        switch await MMClientConnection.connect(
-            to: endpoint,
-            configuration: options.clientConfiguration
-        ) {
-            case .failure(let error):
+        let client = MMClient(endpoint: endpoint, configuration: options.clientConfiguration)
+        // Set inside the bracket body, so `nil` afterwards means acquire
+        // failed and the command never ran.
+        var commandOutcome: Result<T, any Error>?
+        let connectionOutcome = await client { connection in
+            commandOutcome = await Result.fromAsync {
+                try await Self.run(
+                    body,
+                    on: connection,
+                    verifying: options.noVerify ? nil : contract,
+                    claim: claim
+                )
+            }
+            return .success(())
+        }
+        switch (commandOutcome, connectionOutcome) {
+            case (let command?, _):
+                return try command.get()
+            case (nil, .failure(let error)):
                 MMCLIOutput.note(
                     "connect failed: \(error) — is the daemon running at \(endpoint.cliDescription)?"
                 )
                 throw ExitCode(69)
-            case .success(let connected):
-                connection = connected
+            case (nil, .success):
+                preconditionFailure("a bracket that released successfully ran its body")
         }
+    }
+
+    /// The command inside the bracket: verification, then `body`.
+    private static func run<T: Sendable>(
+        _ body: @Sendable (MMClientConnection) async throws -> T,
+        on connection: MMClientConnection,
+        verifying contract: SchemaDeclaration?,
+        claim: MMCLIServerContract?
+    ) async throws -> T {
         // Layer 1: a matching completeness claim proves every declared
         // contract straight from the hello; anything else falls through to
         // the per-namespace diff.
@@ -63,25 +89,10 @@ public enum MMCLIRunner {
                 )
             }
         }
-        let verifying = (provenByClaim || options.noVerify) ? nil : contract
-        return try await withThrowingTaskGroup(of: Void.self) { tasks in
-            tasks.addTask { _ = await connection.run() }
-            // Capture the body's outcome so close-and-drain happens on both
-            // paths; the error (if any) propagates only after the connection
-            // is down.
-            let outcome: Result<T, any Error>
-            do {
-                if let verifying {
-                    try await Self.verify(verifying, on: connection)
-                }
-                outcome = .success(try await body(connection))
-            } catch {
-                outcome = .failure(error)
-            }
-            await connection.close()
-            try await tasks.waitForAll()
-            return try outcome.get()
+        if let contract, !provenByClaim {
+            try await Self.verify(contract, on: connection)
         }
+        return try await body(connection)
     }
 
     /// Layer 2: the scoped discovery diff for one contract (see `invoke`).

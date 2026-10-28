@@ -36,7 +36,7 @@ struct SocketFileGuardTests {
             let logger = Logger(label: "mm.test")
 
             try self.createFile(path: path)
-            let original = try #require(MMService.socketFileIdentity(path: path))
+            let original = try #require(ServerRuntime.socketFileIdentity(path: path))
 
             // Hold the original file open across the replacement: ext4 reuses
             // a freed inode number immediately, so without this the
@@ -53,16 +53,16 @@ struct SocketFileGuardTests {
             // the original instance is still draining.
             #expect(unlink(path) == 0)
             try self.createFile(path: path)
-            let replacement = try #require(MMService.socketFileIdentity(path: path))
+            let replacement = try #require(ServerRuntime.socketFileIdentity(path: path))
             #expect(original != replacement)
 
             // The old instance's shutdown unlink must not touch the new file…
-            MMService.removeSocketFile(path: path, owned: original, logger: logger)
-            #expect(MMService.socketFileIdentity(path: path) == replacement)
+            ServerRuntime.removeSocketFile(path: path, owned: original, logger: logger)
+            #expect(ServerRuntime.socketFileIdentity(path: path) == replacement)
 
             // …while the rightful owner removes it.
-            MMService.removeSocketFile(path: path, owned: replacement, logger: logger)
-            #expect(MMService.socketFileIdentity(path: path) == nil)
+            ServerRuntime.removeSocketFile(path: path, owned: replacement, logger: logger)
+            #expect(ServerRuntime.socketFileIdentity(path: path) == nil)
         }
     }
 
@@ -71,19 +71,19 @@ struct SocketFileGuardTests {
         try withTempPath { path in
             let logger = Logger(label: "mm.test")
             // Path absent: nothing to do, no crash, regardless of identity.
-            MMService.removeSocketFile(
+            ServerRuntime.removeSocketFile(
                 path: path,
-                owned: MMService.SocketFileIdentity(
+                owned: ServerRuntime.SocketFileIdentity(
                     device: 1, inode: 1, changeTimeSeconds: 0, changeTimeNanoseconds: 0),
                 logger: logger
             )
-            #expect(MMService.socketFileIdentity(path: path) == nil)
+            #expect(ServerRuntime.socketFileIdentity(path: path) == nil)
 
             // Unknown identity (capture failed at bind): unconditional unlink,
             // the pre-guard behavior.
             try self.createFile(path: path)
-            MMService.removeSocketFile(path: path, owned: nil, logger: logger)
-            #expect(MMService.socketFileIdentity(path: path) == nil)
+            ServerRuntime.removeSocketFile(path: path, owned: nil, logger: logger)
+            #expect(ServerRuntime.socketFileIdentity(path: path) == nil)
         }
     }
 }
@@ -97,7 +97,7 @@ struct SocketFileGuardTests {
 struct SocketCloexecTests {
     @Test("a raw unix stream socket is created with FD_CLOEXEC")
     func rawSocketIsCloseOnExec() throws {
-        let descriptor = try MMService.makeUnixStreamSocket()
+        let descriptor = try ServerRuntime.makeUnixStreamSocket()
         defer { close(descriptor) }
         let flags = fcntl(descriptor, F_GETFD, 0)
         #expect(flags >= 0)
@@ -107,7 +107,7 @@ struct SocketCloexecTests {
     @Test("the bound listening descriptor keeps FD_CLOEXEC through bind and chmod")
     func boundListenerIsCloseOnExec() throws {
         try withTempPath { path in
-            let descriptor = try MMService.makeBoundUnixSocket(path: path, mode: 0o600)
+            let descriptor = try ServerRuntime.makeBoundUnixSocket(path: path, mode: 0o600)
             defer { close(descriptor) }
             let flags = fcntl(descriptor, F_GETFD, 0)
             #expect(flags >= 0)

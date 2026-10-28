@@ -1,8 +1,8 @@
+import FPService
 import Logging
 import MMExampleAPI
 import MMSchema
 import MMServer
-import ServiceLifecycle
 
 #if canImport(Darwin)
     import Darwin
@@ -15,8 +15,9 @@ import ServiceLifecycle
 /// A minimal but complete matter-in-motion daemon: entities with ACLs, a
 /// router built from the shared `Journal` namespace, correlated streaming for
 /// `journal.follow` (server → client) and `journal.import` (client → server),
-/// and lifecycle owned by a `ServiceGroup` (SIGTERM drains gracefully and
-/// removes the socket; SIGINT cancels).
+/// and lifecycle owned by fp-swift-service: the server is a bracket, and the
+/// first SIGTERM or SIGINT drains it gracefully and removes the socket; a
+/// second one cancels the drain.
 ///
 /// Run it, then talk to it with `swift run mm-example-client`:
 ///
@@ -95,10 +96,6 @@ struct ExampleDaemon {
                 Entity("server", owner: uid, group: gid, mode: 0o550)
             }
             Log(logger)
-            // OnBind { address in ... } is available when you need to learn
-            // the bound address (ephemeral TCP ports) or gate readiness on
-            // the socket actually listening; the server already logs
-            // "server listening" itself, so this example does not need it.
             For(Journal.self) {
                 JournalHandlers(store: store)
             }
@@ -109,14 +106,24 @@ struct ExampleDaemon {
             metadata: ["socket": "\(socketPath)", "owner-uid": "\(uid)"]
         )
 
-        let group = ServiceGroup(
-            configuration: .init(
-                services: [.init(service: service)],
-                gracefulShutdownSignals: [.sigterm],
-                cancellationSignals: [.sigint],
-                logger: logger
-            )
+        // `service` is the server as a bracket: acquire binds and starts
+        // accepting, dispose drains and removes the socket. A daemon with
+        // more resources composes them into one bracket (`BracketAsyncDo`):
+        // they start in order once the socket listens, and stop in reverse.
+        // The bracket's resource is the bound address; the default body
+        // below just waits for a shutdown signal.
+        let daemon = Service(
+            service,
+            shutdownSignals: [SIGTERM, SIGINT],
+            shutdownTimeout: .seconds(30)
         )
-        try await group.run()
+
+        switch await daemon() {
+            case .success(let outcome):
+                logger.info("example daemon stopped", metadata: ["outcome": "\(outcome)"])
+            case .failure(let error):
+                logger.critical("example daemon failed", metadata: ["error": "\(error)"])
+                throw error
+        }
     }
 }

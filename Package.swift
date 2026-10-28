@@ -5,14 +5,13 @@ import PackageDescription
 let package = Package(
     name: "MatterInMotion",
     platforms: [
-        .macOS(.v15)
+        .macOS(.v26)
     ],
     products: [
         .library(name: "MMWire", targets: ["MMWire"]),
         .library(name: "MMSchema", targets: ["MMSchema"]),
         .library(name: "MMServer", targets: ["MMServer"]),
         .library(name: "MMClient", targets: ["MMClient"]),
-        .library(name: "MMClientService", targets: ["MMClientService"]),
         .library(name: "MMCLI", targets: ["MMCLI"]),
         .plugin(name: "MMCLIGeneratorPlugin", targets: ["MMCLIGeneratorPlugin"]),
         .executable(name: "mm-example-daemon", targets: ["MMExampleDaemon"]),
@@ -21,13 +20,13 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.82.0"),
-        .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.6.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
         .package(url: "https://github.com/apple/swift-metrics.git", from: "2.11.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.0"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0"..<"700.0.0"),
-        .package(url: "https://github.com/velocityzen/fp-swift.git", from: "3.0.0"),
-        .package(url: "https://github.com/velocityzen/fp-swift-bracket.git", from: "1.1.0"),
+        .package(url: "https://github.com/velocityzen/fp-swift.git", from: "4.0.0"),
+        .package(url: "https://github.com/velocityzen/fp-swift-bracket.git", from: "2.0.0"),
+        .package(url: "https://github.com/velocityzen/fp-swift-service.git", branch: "main"),
     ],
     targets: [
         .target(
@@ -35,7 +34,8 @@ let package = Package(
             dependencies: [
                 "MMSchema",
                 .product(name: "NIOCore", package: "swift-nio"),
-            ]
+            ],
+            swiftSettings: callerIsolation
         ),
         .target(
             name: "MMSchemaCodeGenerator",
@@ -54,7 +54,8 @@ let package = Package(
         ),
         .target(
             name: "MMSchema",
-            dependencies: ["MMSchemaMacros"]
+            dependencies: ["MMSchemaMacros"],
+            swiftSettings: callerIsolation
         ),
         .target(
             name: "MMServer",
@@ -62,13 +63,15 @@ let package = Package(
                 "MMWire",
                 "MMSchema",
                 .product(name: "FP", package: "fp-swift"),
+                .product(name: "FPBracket", package: "fp-swift-bracket"),
+                .product(name: "FPService", package: "fp-swift-service"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
-                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Metrics", package: "swift-metrics"),
-            ]
+            ],
+            swiftSettings: callerIsolation
         ),
         .target(
             name: "MMClient",
@@ -82,15 +85,8 @@ let package = Package(
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Metrics", package: "swift-metrics"),
-            ]
-        ),
-        .target(
-            name: "MMClientService",
-            dependencies: [
-                "MMClient",
-                .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
-            ]
+            ],
+            swiftSettings: callerIsolation
         ),
         .target(
             name: "MMCLI",
@@ -98,12 +94,15 @@ let package = Package(
                 "MMClient",
                 "MMSchema",
                 "MMWire",
+                .product(name: "FP", package: "fp-swift"),
+                .product(name: "FPBracket", package: "fp-swift-bracket"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
-                .product(name: "UnixSignals", package: "swift-service-lifecycle"),
+                .product(name: "ProcessSignals", package: "fp-swift-service"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
-            ]
+            ],
+            swiftSettings: callerIsolation
         ),
         .executableTarget(
             name: "MMCLIGenerator",
@@ -140,7 +139,8 @@ let package = Package(
                 "MMExampleAPI",
                 "MMSchema",
                 "MMServer",
-                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
+                .product(name: "FPBracket", package: "fp-swift-bracket"),
+                .product(name: "FPService", package: "fp-swift-service"),
                 .product(name: "Logging", package: "swift-log"),
             ],
             path: "Examples/Daemon"
@@ -163,8 +163,9 @@ let package = Package(
                 "MMSchema",
                 "MMClient",
                 .product(name: "NIOCore", package: "swift-nio"),
+                "MMServer",
+                .product(name: "FPBracket", package: "fp-swift-bracket"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
-                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "Logging", package: "swift-log"),
             ],
             path: "Tests/MMTestSupport"
@@ -229,7 +230,6 @@ let package = Package(
                 "MMWire",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "Logging", package: "swift-log"),
             ],
             plugins: ["MMCLIGeneratorPlugin"]
@@ -240,16 +240,20 @@ let package = Package(
                 "MMTestSupport",
                 "MMServer",
                 "MMClient",
-                "MMClientService",
                 "MMWire",
                 "MMSchema",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
-                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
+                .product(name: "FPBracket", package: "fp-swift-bracket"),
+                .product(name: "FPService", package: "fp-swift-service"),
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),
     ],
     swiftLanguageModes: [.v6]
 )
+
+/// The library targets' async functions and closures run on the caller's
+/// actor unless marked `@concurrent`, matching the fp-swift packages.
+var callerIsolation: [SwiftSetting] { [.enableUpcomingFeature("NonisolatedNonsendingByDefault")] }

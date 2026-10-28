@@ -116,13 +116,15 @@ struct DeathTests {
         }
     }
 
-    @Test("run() may only be started once")
-    func secondRunIsRejected() async throws {
-        let (second, first) = try await withRunningConnection { client in
-            await client.connection.run()
+    @Test("a second run() while the loop is live is programmer error")
+    func secondRunTraps() async throws {
+        // Whichever of the two runs reaches the lifecycle check second traps;
+        // neither can finish first while the body holds the connection open.
+        await #expect(processExitsWith: .failure) {
+            _ = try await withRunningConnection { client in
+                await client.connection.run()
+            }
         }
-        #expect(failure(second) == .alreadyRunning)
-        #expect(failure(first) == nil)
     }
 
     @Test("a state stream subscribed after death yields the terminal state and finishes")

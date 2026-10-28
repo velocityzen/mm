@@ -10,7 +10,7 @@ matter-in-motion is a binary RPC library: length-prefixed MessagePack envelopes 
 Choose products by role. Keep this dependency direction:
 
 - Shared contract module: `MMSchema` only. Never import server or client.
-- Daemon: `MMServer` + `MMSchema` (+ swift-service-lifecycle, swift-log).
+- Daemon: `MMServer` + `MMSchema` (+ fp-swift-bracket to compose, fp-swift-service to run, swift-log).
 - Client process: `MMClient` + `MMSchema`. Never link `MMServer`.
 
 ## Step 1: declare the contract once, with `#schema`
@@ -76,13 +76,13 @@ Rules that keep the wire stable:
 
 ## Step 2: the server
 
-Declare the daemon as data in `MMService { ... }` and pass it to a `ServiceGroup`. Verify the contract before listening, so drift fails at boot, not on the wire:
+Declare the daemon as data in `MMService { ... }`. The value is the server as a `BracketAsync<SocketAddress, MMServiceError>`: acquire binds and starts accepting, dispose drains and removes the socket; the resource is the bound address. Run it (or the bracket you composed it into) with fp-swift-service. Verify the contract before listening, so drift fails at boot, not on the wire:
 
 ```swift
+import FPService
 import Logging
 import MMSchema
 import MMServer
-import ServiceLifecycle
 
 switch journalContract.verify(against: Journal.self) {
     case .failure(let error): fatalError("schema probe failed: \(error)")
@@ -110,13 +110,9 @@ let service = MMService {
     }
 }
 
-let group = ServiceGroup(configuration: .init(
-    services: [.init(service: service)],
-    gracefulShutdownSignals: [.sigterm],   // drains, removes the socket
-    cancellationSignals: [.sigint],
-    logger: logger
-))
-try await group.run()
+// First SIGTERM/SIGINT drains and removes the socket; a second cancels.
+let withService = Service(service, shutdownSignals: [SIGTERM, SIGINT], shutdownTimeout: .seconds(30))
+let result = await withService()   // Result<ServiceOutcome, ServiceError<MMServiceError>>
 ```
 
 Put handlers in a reusable `RouteGroup` in its own file, holding its dependencies. `On` has one overload per method shape. The context (`auth` below) always carries the already-authorized `entity`:
@@ -162,34 +158,51 @@ Server facts to design around:
 - Cross-connection fan-out (one connection's append feeding another's `follow` stream) is application code. For the safe registry pattern, see `Examples/Daemon/FollowerHub.swift`: synchronous `onTermination`, idempotent removal, never finish under the lock.
 - Root-targeted requests (empty entity) are denied unless the route accepts them: `On(method, Accepts(.root, .all)) { ... }`.
 - Dynamic authorization (SQLite, for example): implement `EntityACLProvider` and pass `ACLProvider(provider)`. The builder tree is shorthand for `InMemoryACLProvider`.
-- Startup order (ServiceLifecycle starts services concurrently): `Ready(readiness)` fires a `ServiceReadiness` at bind. Wrap dependents in `GatedService` to start after it. `OnBind { address in }` reports ephemeral TCP ports.
+- Isolation: mm's library targets build with `NonisolatedNonsendingByDefault`, so its async APIs run on the caller's actor. Handlers, `EntityACLProvider` methods, and `withStream`'s `each` are `@concurrent`: they run in tasks of their own, off any actor.
+- Startup order is bracket composition: the server's acquire returns once the socket listens, so with `BracketAsyncDo().bind { server.mapError(...) }.bind { address in ... }` a dependent starts after the bind and stops before the drain. Unify error types with `mapError`. The yielded `SocketAddress` reports ephemeral TCP ports.
 
 ## Step 3: the client
 
-For simple call-and-return clients, use the bracket: one scope owns connect, run, close, and join. `with` is shorthand for `MMClientConnection.open`, the live connection as an FPBracket resource (acquire = connect + start the loop, dispose = close + join). Compose `open` with other brackets via `flatMap`/`BracketAsyncDo`:
+Declare the client the same way as the server: `MMClient { ... }` is a `BracketAsync<MMClientConnection, MMClientError>` (acquire = connect + start the loop, dispose = close + join; there is no public connect/run/close). One `Configuration(endpoint:...)` is required; `Schema(...)` and `Log(...)` are optional. Call it with a body, or compose it with other brackets via `flatMap`/`BracketAsyncDo`:
 
 ```swift
-let reply = await MMClientConnection.with(.unix(path: socketPath)) { connection in
-    await connection.call(Journal.append, on: notes, Journal.AppendRequest(line: "hi"))
+let journal = MMClient {
+    Configuration(endpoint: .unix(path: socketPath))
+    Schema(.complete([journalContract]))
 }
-// Result<Result<AppendResponse, MMCallError>, MMClientError>: connection vs call
-// failure. Dispose returns the loop's outcome: bracket .failure = connect failed OR
-// the connection died mid-scope (transport error / protocol violation); clean EOF
-// or the bracket's own close is .success.
+
+let outcome = await journal { connection in
+    // A failed call (denied, a remote error) leaves the connection up: handle
+    // it here, where the call was made, and keep the bracket for the connection.
+    if case .failure(let error) = await connection.call(
+        Journal.append, on: notes, Journal.AppendRequest(line: "hi")
+    ) {
+        logger.warning("journal.append failed: \(error)")
+    }
+    return .success(())
+}
+// Result<Void, MMClientError>: .failure only when the connection failed. Dispose
+// returns the loop's outcome: connect failed OR the connection died mid-scope
+// (transport error / protocol violation); clean EOF or the bracket's own close
+// is .success.
 ```
 
-One connection multiplexes many calls (msgids, concurrent callers, `maxInFlightCalls` limit). Open one per unit of work, never one per call.
+One connection multiplexes many calls (msgids, concurrent callers, `maxInFlightCalls` limit). Run the client once per unit of work, never once per call. The bracket runs on the caller's actor, so `@MainActor` code can call it directly; it is not `Sendable`, so build it where it runs, or hand it to `Service`, which takes it as `sending`.
 
 Run custom flows (streams in sibling tasks, staged teardown) as structured children *inside* the bracket body. The bracket still owns the lifecycle:
 
 ```swift
 import MMClient
 
-let outcome = await MMClientConnection.with(.unix(path: socketPath)) { connection in
+let outcome = await journal { connection in
     let notes = try! EntityName.parse("journal.notes").get() // validated dotted path
 
-    // Unary: Result<Journal.AppendResponse, MMCallError>
-    let reply = await connection.call(Journal.append, on: notes, Journal.AppendRequest(line: "hi"))
+    // Unary: Result<Journal.AppendResponse, MMCallError>, handled in place.
+    if case .failure(let error) = await connection.call(
+        Journal.append, on: notes, Journal.AppendRequest(line: "hi")
+    ) {
+        logger.warning("journal.append failed: \(error)")
+    }
 
     // Server-stream: withStream consumes in a structured sibling (iterating
     // grants credit) while the body drives the connection; the join is built
@@ -202,19 +215,23 @@ let outcome = await MMClientConnection.with(.unix(path: socketPath)) { connectio
     }) {
         _ = await connection.call(Journal.append, on: notes, Journal.AppendRequest(line: "more"))
     }
-    _ = await follow.result()          // Result<Journal.FollowSummary, MMCallError>
+    if case .failure(let error) = await follow.result() {  // Result<FollowSummary, MMCallError>
+        logger.warning("journal.follow ended: \(error)")
+    }
 
     // Client-stream: send through the credit-gated writer, END, await terminal.
     let imp = await connection.call(Journal.import, on: notes, Journal.ImportRequest())
     _ = await imp.send(Journal.ImportLine(line: "bulk"))
     await imp.finish()
-    _ = await imp.result()
+    if case .failure(let error) = await imp.result() {
+        logger.warning("journal.import failed: \(error)")
+    }
 
-    return reply
+    return .success(())
 }
 ```
 
-In a daemon-style client, skip the bracket. Call `MMClientConnection.connect` and add `MMClientService(connection: connection)` to the `ServiceGroup`. It is a separate product: depend on `MMClientService` and `import MMClientService`.
+In a daemon-style client, compose the `MMClient` bracket into the daemon's own bracket, next to its other resources, and run that with fp-swift-service.
 
 Verify the schema like the server does:
 
@@ -275,7 +292,7 @@ A top-level `CLI(.enabled)` entry in the schema block generates one swift-argume
 
 ## House rules that apply to any code you write here
 
-- Swift 6.4+ with strict concurrency, macOS 15+/Linux.
+- Swift 6.4+ with strict concurrency, macOS 26+/Linux.
 - Never use Dispatch/GCD, free-floating `Task {}`, `.wait()`, `print()`, `Date()`, or `@unchecked Sendable`.
 - Public APIs return typed `Result`s (`MMCallError`, `MMWireError`, `MMError`), not thrown errors.
 - Tests use Swift Testing (`@Test`/`#expect`) in three tiers: `EmbeddedChannel` for handlers, plain value tests for domain logic, real temp-dir Unix sockets for integration.

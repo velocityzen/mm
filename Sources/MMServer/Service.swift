@@ -1,3 +1,6 @@
+import FP
+import FPBracket
+import FPService
 import Logging
 import MMSchema
 import MMWire
@@ -5,7 +8,6 @@ import Metrics
 import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
-import ServiceLifecycle
 
 #if canImport(Darwin)
 import Darwin
@@ -15,9 +17,10 @@ import Glibc
 import Musl
 #endif
 
-/// Startup failures of ``MMService``. Thrown from `run()` before the
-/// accept loop starts; steady-state failures never use this type — they are
-/// logged per connection and the connection closed.
+/// Failures of the ``MMService`` bracket. Acquire fails with one when the
+/// endpoint cannot be bound, before anything is accepted; dispose fails with
+/// one only when the accept loop itself failed. Per-connection failures never
+/// use this type — they are logged and the connection closed.
 public enum MMServiceError: Error, Sendable, Hashable {
     /// A live server is already listening on the unix socket path (the
     /// liveness probe's `connect(2)` succeeded). Startup fails rather than
@@ -28,72 +31,73 @@ public enum MMServiceError: Error, Sendable, Hashable {
     case socketPathOccupied(path: String)
     /// The unix socket path is empty or too long for `sockaddr_un.sun_path`.
     case invalidSocketPath(path: String)
-    /// A startup syscall failed in a non-branch-worthy way. Coarse by design:
-    /// startup infrastructure failures are for logs, not `switch`.
+    /// A socket operation failed in a non-branch-worthy way: a startup
+    /// syscall, the bind, or the accept loop. Coarse by design: transport
+    /// infrastructure failures are for logs, not `switch`.
     case io(description: String)
+
+    /// Bridges a thrown error into the typed channel: an `MMServiceError`
+    /// stays itself; anything else (an NIO bind or accept error) is `.io`.
+    static func from(_ error: any Error) -> MMServiceError {
+        error as? MMServiceError ?? .io(description: "\(error)")
+    }
 }
 
-/// The transport: binds an ``MMEndpoint``, accepts connections, runs the hello
-/// exchange and per-connection request loop, and dispatches through the
-/// ``Router``. Conforms to swift-service-lifecycle's `Service`.
+/// The server, as a scoped resource (fp-swift-bracket's `BracketAsync`):
+/// acquire binds the endpoint and starts accepting, so the server is
+/// listening once acquire returns; dispose drains it gracefully and joins it.
+/// The resource is the bound address — how hosts and tests learn the
+/// ephemeral port of a `tcp(host:port: 0)` endpoint.
 ///
-/// Every server auto-registers the builtin methods (`server.schema`,
-/// `server.entity`): the initializer constructs its ``Router`` with
-/// `registerBuiltins: true`, so discovery and ACL inspection exist without
-/// user code.
-///
-/// ## Lifecycle recipe (host application)
-///
-/// Run the service inside a `ServiceGroup` and map signals conventionally —
-/// SIGTERM (systemd/launchd stop) to graceful shutdown, SIGINT (dev Ctrl-C)
-/// to cancellation:
+/// Declare it with the builder, then compose it with the host's other
+/// resources — they start in order and stop in reverse — and run the result
+/// with the host's lifecycle, for instance fp-swift-service, which runs
+/// dispose on a shutdown signal:
 ///
 /// ```swift
-/// let server = MMService(configuration: config, aclProvider: acls) { … }
-/// let group = ServiceGroup(configuration: .init(
-///     services: [.init(service: server)],
-///     gracefulShutdownSignals: [.sigterm],
-///     cancellationSignals: [.sigint],
-///     logger: logger
-/// ))
-/// try await group.run()
+/// let server = MMService {
+///     Configuration(endpoint: .unix(path: sock))
+///     ACLProvider(provider)
+///     For(Journal.self) { JournalHandlers(store: store) }
+/// }
+/// let withService = Service(server, shutdownSignals: [SIGTERM, SIGINT])
+/// let result = await withService()
 /// ```
+///
+/// Every server auto-registers the builtin methods (`server.schema`,
+/// `server.entity`), so discovery and ACL inspection exist without user code.
+/// The routes are assembled and cross-checked when the value is built, so
+/// declaration mistakes stop the daemon before anything binds. The value is
+/// a reusable recipe: each run binds afresh.
+///
+/// - Acquire returns once the endpoint is bound and listening, so a resource
+///   composed after this one (`flatMap`, `BracketAsyncDo`) starts only once
+///   the server can take connections, and stops before it. It fails with an
+///   ``MMServiceError`` when the endpoint cannot be bound; the body and
+///   dispose are skipped then.
+/// - Dispose drains: it returns once every connection drained and closed and
+///   the socket file is gone. Run in a cancelled task, it tears connections
+///   down at once instead. It fails only when the accept loop failed.
 ///
 /// ## Graceful shutdown semantics
 ///
-/// On graceful shutdown the server (1) stops accepting — the listening channel
-/// closes; (2) every open connection — including one still waiting for its
-/// peer's hello — stops *reading* (input-half close) while in-flight handlers
-/// complete and their responses flush through the connection's writer;
-/// (3) connection channels close; (4) for unix endpoints, the socket file is
-/// removed, unless another server instance has already replaced it at the same
-/// path during the drain (the file's device/inode is compared against the one
-/// this instance bound — see `removeSocketFile`); then `run()` returns.
-/// Cancellation instead tears connections down immediately via
+/// On graceful shutdown (the bracket's dispose) the server (1) stops
+/// accepting — the listening channel closes; (2) every open connection —
+/// including one still waiting for its peer's hello — stops *reading*
+/// (input-half close) while in-flight handlers complete and their responses
+/// flush through the connection's writer; (3) connection channels close;
+/// (4) for unix endpoints, the socket file is removed, unless another server
+/// instance has already replaced it at the same path during the drain (the
+/// file's device/inode is compared against the one this instance bound — see
+/// `removeSocketFile`); then the dispose returns. Cancelling the task that
+/// runs dispose instead tears connections down immediately via
 /// `executeThenClose` and task-group cancellation — no descriptors leak on
 /// either path.
-public struct MMService: Service {
-    /// The assembled router, exposed for its `fingerprint` and `signatures`.
-    public let router: Router
+public typealias MMService = BracketAsync<SocketAddress, MMServiceError>
 
-    private let configuration: MMServerConfiguration
-    private let group: any EventLoopGroup
-    private let threadPool: NIOThreadPool
-    private let logger: Logger
-    private let onBind: (@Sendable (SocketAddress) -> Void)?
-    private let serverHello: MMHello
-
-    private let metrics: ServiceMetrics
-    /// Stream frames dropped for an unknown/retired msgid, or an advisory frame
-    /// legal to ignore (same label the router used transitionally in S1/S2).
-
-    private enum TransportKind: Sendable {
-        case unix
-        case tcp
-    }
-
-    /// Assembles a server: builds the router (with builtins), computes the
-    /// hello preamble from the router's fingerprint, and prepares metrics.
+extension BracketAsync where R == SocketAddress, E == MMServiceError {
+    /// Declares a server from explicit parameters; the builder form
+    /// (``ServerPart``) declares the same server.
     ///
     /// - Parameters:
     ///   - configuration: Endpoint and hardening caps.
@@ -109,9 +113,6 @@ public struct MMService: Service {
     ///     one-time `/proc` supplementary-groups read; defaults to the process
     ///     singleton.
     ///   - logger: Base logger; per-connection ids ride in metadata.
-    ///   - onBind: Invoked once with the bound local address before accepting
-    ///     — how hosts (and tests) learn the ephemeral port of a
-    ///     `tcp(host:port: 0)` endpoint.
     ///   - routes: The application's routes, built with `Handle`.
     public init(
         configuration: MMServerConfiguration,
@@ -121,7 +122,80 @@ public struct MMService: Service {
         eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
         threadPool: NIOThreadPool = .singleton,
         logger: Logger = Logger(label: "mm.server"),
-        onBind: (@Sendable (SocketAddress) -> Void)? = nil,
+        @RouterBuilder routes: sending () -> [Route]
+    ) {
+        self = ServerRuntime(
+            configuration: configuration,
+            namespaces: namespaces,
+            sharedTypes: sharedTypes,
+            aclProvider: aclProvider,
+            eventLoopGroup: eventLoopGroup,
+            threadPool: threadPool,
+            logger: logger,
+            routes: routes
+        )
+        .start()
+    }
+}
+
+/// The assembled server behind an ``MMService`` bracket: the router, the
+/// hello preamble, and the transport that binds an ``MMEndpoint``, accepts
+/// connections, runs the hello exchange and per-connection request loop, and
+/// dispatches through the ``Router``. Package-internal: hosts only ever hold
+/// the bracket; tests reach the router through it.
+package struct ServerRuntime: Sendable {
+    /// The assembled router; tests read its `fingerprint` and `signatures`.
+    package let router: Router
+
+    private let configuration: MMServerConfiguration
+    private let group: any EventLoopGroup
+    private let threadPool: NIOThreadPool
+    private let logger: Logger
+    private let serverHello: MMHello
+
+    private let metrics: ServiceMetrics
+    /// Stream frames dropped for an unknown/retired msgid, or an advisory frame
+    /// legal to ignore (same label the router used transitionally in S1/S2).
+
+    private enum TransportKind: Sendable {
+        case unix
+        case tcp
+    }
+
+    /// A bound, listening server channel, and how to undo what binding
+    /// created on disk.
+    private struct BoundServer: Sendable {
+        let channel: NIOAsyncChannel<NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>
+        let localAddress: SocketAddress
+        let transport: TransportKind
+        /// Removes the unix socket file (identity-guarded); nothing for TCP.
+        let removeFiles: @Sendable () -> Void
+    }
+
+    /// The bracket-owned running server behind `start()`. The accept loop
+    /// is NOT a free-floating `Task {}` (house rule): dispose is its
+    /// guaranteed owner — it requests the drain and joins the loop before the
+    /// scope returns, so the task can neither leak nor outlive the resource.
+    private struct RunningServer: Sendable {
+        let localAddress: SocketAddress
+        /// Requesting it starts the drain: the listener and every open
+        /// connection stop reading. Idempotent.
+        let shutdown: Shutdown
+        /// The accept loop; returns once every connection has closed.
+        let loop: Task<Result<Void, MMServiceError>, Never>
+    }
+
+    /// Assembles a server: builds the router (with builtins), computes the
+    /// hello preamble from the router's fingerprint, and prepares metrics.
+    /// Parameters as in the ``MMService`` parameter initializer.
+    package init(
+        configuration: MMServerConfiguration,
+        namespaces: [any MethodNamespace.Type] = [],
+        sharedTypes: [any TypeNamespace.Type] = [],
+        aclProvider: any EntityACLProvider,
+        eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
+        threadPool: NIOThreadPool = .singleton,
+        logger: Logger = Logger(label: "mm.server"),
         @RouterBuilder routes: () -> [Route]
     ) {
         var serviceLogger = logger
@@ -130,7 +204,6 @@ public struct MMService: Service {
         self.group = eventLoopGroup
         self.threadPool = threadPool
         self.logger = serviceLogger
-        self.onBind = onBind
         self.router = Router(
             namespaces: namespaces,
             sharedTypes: sharedTypes,
@@ -147,20 +220,65 @@ public struct MMService: Service {
         self.metrics = ServiceMetrics()
     }
 
-    // MARK: - Service
+    // MARK: - Start
 
-    public func run() async throws {
-        switch self.configuration.endpoint {
-            case .unix(let path):
-                try await self.runUnixDomainSocket(path: path)
-            case .tcp(let host, let port):
-                try await self.runTCP(host: host, port: port)
+    /// The server as a bracket: acquire binds and starts accepting; dispose
+    /// drains gracefully and joins (see ``MMService``).
+    package func start() -> MMService {
+        BracketAsync<RunningServer, MMServiceError>(
+            acquire: {
+                await self.bindEndpoint().map(self.startAccepting)
+            },
+            dispose: { running in
+                running.shutdown.request()
+                // Cancelling the disposing task (a host's second signal, its
+                // timeout) cancels the loop: the drain becomes a teardown.
+                return await withTaskCancellationHandler {
+                    await running.loop.value
+                } onCancel: {
+                    running.loop.cancel()
+                }
+            }
+        )
+        .map(\.localAddress)
+    }
+
+    /// Starts the accept loop in the task ``RunningServer`` owns: the loop
+    /// drains and closes every connection before it returns, so the socket
+    /// file goes last.
+    private func startAccepting(_ bound: BoundServer) -> RunningServer {
+        let shutdown = Shutdown()
+        let loop = Task {
+            let stopped = await self.acceptLoop(
+                server: bound.channel,
+                transport: bound.transport,
+                shutdown: shutdown
+            )
+            bound.removeFiles()
+            return stopped
         }
+        return RunningServer(
+            localAddress: bound.localAddress,
+            shutdown: shutdown,
+            loop: loop
+        )
     }
 
     // MARK: - Bind
 
-    private func runUnixDomainSocket(path: String) async throws {
+    private func bindEndpoint() async -> Result<BoundServer, MMServiceError> {
+        await Result.fromAsync {
+            switch self.configuration.endpoint {
+                case .unix(let path):
+                    try await self.bindUnixDomainSocket(path: path)
+                case .tcp(let host, let port):
+                    try await self.bindTCP(host: host, port: port)
+            }
+        }
+        .mapError(MMServiceError.from)
+    }
+
+    private func bindUnixDomainSocket(path: String) async throws -> BoundServer {
         // Startup socket work is blocking syscalls (connect probe, bind) —
         // run on the thread pool, never on a loop or the cooperative pool.
         try await self.threadPool.runIfActive {
@@ -203,23 +321,16 @@ public struct MMService: Service {
             Self.removeSocketFile(path: path, owned: fileIdentity, logger: self.logger)
             throw error
         }
+        let logger = self.logger
+        let removeFiles: @Sendable () -> Void = {
+            Self.removeSocketFile(path: path, owned: fileIdentity, logger: logger)
+        }
+        let bound = try await Self.boundServer(server, transport: .unix, removeFiles: removeFiles)
         self.logger.info("server listening", metadata: ["path": "\(path)"])
-        if let address = server.channel.localAddress {
-            self.onBind?(address)
-        }
-
-        do {
-            try await self.acceptLoop(server: server, transport: .unix)
-        } catch {
-            Self.removeSocketFile(path: path, owned: fileIdentity, logger: self.logger)
-            throw error
-        }
-        // Graceful-shutdown ordering: acceptLoop returns only after every
-        // connection drained and closed; the socket file goes last.
-        Self.removeSocketFile(path: path, owned: fileIdentity, logger: self.logger)
+        return bound
     }
 
-    private func runTCP(host: String, port: Int) async throws {
+    private func bindTCP(host: String, port: Int) async throws -> BoundServer {
         let server = try await ServerBootstrap(group: self.group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .serverChannelInitializer { channel in
@@ -232,16 +343,30 @@ public struct MMService: Service {
             .bind(host: host, port: port) { channel in
                 self.initializeChildChannel(channel)
             }
-        self.logger.info(
-            "server listening",
-            metadata: [
-                "address": "\(server.channel.localAddress.map(String.init(describing:)) ?? "-")"
-            ]
-        )
-        if let address = server.channel.localAddress {
-            self.onBind?(address)
+        let bound = try await Self.boundServer(server, transport: .tcp, removeFiles: {})
+        self.logger.info("server listening", metadata: ["address": "\(bound.localAddress)"])
+        return bound
+    }
+
+    /// Pairs a bound channel with its local address. A bound channel always
+    /// has one; should it not, the channel closes and what binding created is
+    /// removed, so a listener never exists without an address.
+    private static func boundServer(
+        _ channel: NIOAsyncChannel<NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>,
+        transport: TransportKind,
+        removeFiles: @escaping @Sendable () -> Void
+    ) async throws -> BoundServer {
+        guard let localAddress = channel.channel.localAddress else {
+            try? await channel.executeThenClose { _ in }
+            removeFiles()
+            throw MMServiceError.io(description: "the bound socket has no local address")
         }
-        try await self.acceptLoop(server: server, transport: .tcp)
+        return BoundServer(
+            channel: channel,
+            localAddress: localAddress,
+            transport: transport,
+            removeFiles: removeFiles
+        )
     }
 
     /// Server (listening) channel pipeline: just the accept-error filter that
@@ -308,76 +433,102 @@ public struct MMService: Service {
 
     // MARK: - Accept loop
 
+    /// Accepts until the graceful drain or cancellation ends the accept
+    /// stream, and returns once every connection has closed.
+    ///
+    /// - Returns: `.success` for a stop the owner asked for (a drain, or
+    ///   cancellation); `.io` when accepting itself failed.
     private func acceptLoop(
         server: NIOAsyncChannel<NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>,
-        transport: TransportKind
+        transport: TransportKind,
+        shutdown: Shutdown
+    ) async -> Result<Void, MMServiceError> {
+        await Result.fromAsync {
+            try await self.accept(server: server, transport: transport, shutdown: shutdown)
+        }
+        .flatMapError(Self.stopResult)
+    }
+
+    /// Cancellation is a stop the server's owner asked for, not a failure;
+    /// anything else ended accepting on its own.
+    private static func stopResult(_ error: any Error) -> Result<Void, MMServiceError> {
+        error is CancellationError ? .success(()) : .failure(.from(error))
+    }
+
+    private func accept(
+        server: NIOAsyncChannel<NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>,
+        transport: TransportKind,
+        shutdown: Shutdown
     ) async throws {
         // Shared with connection child tasks for the decrement, hence a locked
         // box rather than accept-loop-local state. A counter, not domain state.
         let activeConnections = NIOLockedValueBox(0)
         try await withThrowingDiscardingTaskGroup { connections in
             try await server.executeThenClose { acceptStream in
-                try await withGracefulShutdownHandler {
-                    var nextConnectionID: UInt64 = 0
-                    for try await connection in acceptStream {
-                        nextConnectionID &+= 1
-                        // Cap enforced AT accept, before any child task exists.
-                        let admitted = activeConnections.withLockedValue { count in
-                            guard count < self.configuration.maxConnections else { return false }
-                            count += 1
-                            return true
-                        }
-                        guard admitted else {
-                            // Busy-rejection choice: close immediately, no busy
-                            // frame. Pre-hello there is no msgid to correlate an
-                            // error response to, and inventing a hello-level busy
-                            // code is a capability for a future version. The
-                            // pipeline may already have flushed the server hello
-                            // at activation; a rejected peer can observe it
-                            // before the close.
-                            self.metrics.connectionsRejected.increment()
-                            self.logger.debug(
-                                "connection rejected",
-                                metadata: ["reason": "connection_cap"]
-                            )
-                            connections.addTask {
-                                // Empty executeThenClose is the sanctioned
-                                // teardown: it finishes the outbound writer and
-                                // closes the channel (a bare close would trip
-                                // NIOAsyncWriter's finish precondition).
-                                try? await connection.executeThenClose { _, _ in }
+                // Stop accepting on graceful shutdown; the accept stream
+                // finishes and the group then waits for open connections to
+                // drain.
+                try await withShutdownHandler(on: shutdown, { server.channel.close(promise: nil) }) {
+                    await Result.fromAsync {
+                        var nextConnectionID: UInt64 = 0
+                        for try await connection in acceptStream {
+                            nextConnectionID &+= 1
+                            // Cap enforced AT accept, before any child task exists.
+                            let admitted = activeConnections.withLockedValue { count in
+                                guard count < self.configuration.maxConnections else { return false }
+                                count += 1
+                                return true
                             }
-                            continue
-                        }
-                        self.metrics.connectionsAccepted.increment()
-                        self.metrics.activeConnections.record(
-                            activeConnections.withLockedValue { $0 }
-                        )
-                        let connectionID = nextConnectionID
-                        connections.addTask {
-                            // Task-local binding: hosts that bootstrap
-                            // swift-log with MMLogContext.metadataProvider get
-                            // the connection id on every log line in this task
-                            // tree, including application handler bodies.
-                            await MMLogContext.$connectionID.withValue(connectionID) {
-                                await self.handleConnection(
-                                    connection,
-                                    connectionID: connectionID,
-                                    transport: transport
+                            guard admitted else {
+                                // Busy-rejection choice: close immediately, no busy
+                                // frame. Pre-hello there is no msgid to correlate an
+                                // error response to, and inventing a hello-level busy
+                                // code is a capability for a future version. The
+                                // pipeline may already have flushed the server hello
+                                // at activation; a rejected peer can observe it
+                                // before the close.
+                                self.metrics.connectionsRejected.increment()
+                                self.logger.debug(
+                                    "connection rejected",
+                                    metadata: ["reason": "connection_cap"]
                                 )
+                                connections.addTask {
+                                    // Empty executeThenClose is the sanctioned
+                                    // teardown: it finishes the outbound writer and
+                                    // closes the channel (a bare close would trip
+                                    // NIOAsyncWriter's finish precondition).
+                                    try? await connection.executeThenClose { _, _ in }
+                                }
+                                continue
                             }
-                            let remaining = activeConnections.withLockedValue { count in
-                                count -= 1
-                                return count
+                            self.metrics.connectionsAccepted.increment()
+                            self.metrics.activeConnections.record(
+                                activeConnections.withLockedValue { $0 }
+                            )
+                            let connectionID = nextConnectionID
+                            connections.addTask {
+                                // Task-local binding: hosts that bootstrap
+                                // swift-log with MMLogContext.metadataProvider get
+                                // the connection id on every log line in this task
+                                // tree, including application handler bodies.
+                                await MMLogContext.$connectionID.withValue(connectionID) {
+                                    await self.handleConnection(
+                                        connection,
+                                        connectionID: connectionID,
+                                        transport: transport,
+                                        shutdown: shutdown
+                                    )
+                                }
+                                let remaining = activeConnections.withLockedValue { count in
+                                    count -= 1
+                                    return count
+                                }
+                                self.metrics.activeConnections.record(remaining)
                             }
-                            self.metrics.activeConnections.record(remaining)
                         }
                     }
-                } onGracefulShutdown: {
-                    // Stop accepting; the accept stream finishes and the group
-                    // then waits for open connections to drain.
-                    server.channel.close(promise: nil)
                 }
+                .get()
             }
         }
     }
@@ -387,7 +538,8 @@ public struct MMService: Service {
     private func handleConnection(
         _ connection: NIOAsyncChannel<ByteBuffer, ByteBuffer>,
         connectionID: UInt64,
-        transport: TransportKind
+        transport: TransportKind,
+        shutdown: Shutdown
     ) async {
         var logger = self.logger
         logger[metadataKey: "connection"] = "\(connectionID)"
@@ -402,16 +554,17 @@ public struct MMService: Service {
             // request loop alike (the inbound stream finishes), while
             // in-flight handlers still complete and their responses flush
             // through the writer before `executeThenClose` closes the channel.
-            try await withGracefulShutdownHandler {
-                try await self.serveConnection(
-                    connection,
-                    connectionID: connectionID,
-                    transport: transport,
-                    logger: logger
-                )
-            } onGracefulShutdown: {
-                channel.close(mode: .input, promise: nil)
+            try await withShutdownHandler(on: shutdown, { channel.close(mode: .input, promise: nil) }) {
+                await Result.fromAsync {
+                    try await self.serveConnection(
+                        connection,
+                        connectionID: connectionID,
+                        transport: transport,
+                        logger: logger
+                    )
+                }
             }
+            .get()
         } catch {
             // The per-connection do/catch — the only one on the data path.
             // Cancellation and transport failures both land here;

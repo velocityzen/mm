@@ -10,21 +10,20 @@ A Swift library for binary RPC over Unix domain sockets and TCP:
 - Filesystem-style (rwx, user/group/other) authorization, enforced by a router using kernel peer credentials.
 - Length-prefix framing with a compact tagged-array MessagePack envelope for calls, terminals, and stream frames.
 
-SwiftNIO is the async runtime. The public API uses structured concurrency and typed `Result` errors. swift-service-lifecycle manages the lifecycle.
+SwiftNIO is the async runtime. The public API uses structured concurrency and typed `Result` errors. The server (`MMService { ... }`) and the client (`MMClient { ... }`) are both [fp-swift-bracket](https://github.com/velocityzen/fp-swift-bracket) resources, declared the same way: you compose them with your own and run the result with any lifecycle, such as [fp-swift-service](https://github.com/velocityzen/fp-swift-service).
 
 ## Modules
 
-One package, `MatterInMotion`, with six library products and one build-tool plugin:
+One package, `MatterInMotion`, with five library products and one build-tool plugin:
 
 - `MMWire`: MessagePack coder over `ByteBuffer`, `[u32 LE length][payload]` framing, the RPC envelope, the hello preamble. Depends only on NIOCore and `MMSchema`.
 - `MMSchema`: method descriptors, `TypeSchema` and the schema fingerprint, `EntityACL`, `PeerIdentity`. Pure values: no NIO import, no IO.
-- `MMServer`: `Router` with a result-builder DSL, authorization, peer-credential capture, streaming handlers, `MMService` bootstrap.
-- `MMClient`: `MMClientConnection`, with typed unary and streaming calls, msgid multiplexing, credit-based flow control, and schema discovery.
-- `MMClientService`: `MMClientService`, the swift-service-lifecycle `Service` adapter for daemon-style clients. Separate, so plain clients and CLIs do not link swift-service-lifecycle.
+- `MMServer`: `Router` with a result-builder DSL, authorization, peer-credential capture, streaming handlers, and `MMService`, the server as a `BracketAsync`.
+- `MMClient`: `MMClient`, the client as a `BracketAsync`, and the `MMClientConnection` it yields, with typed unary and streaming calls, msgid multiplexing, credit-based flow control, and schema discovery.
 - `MMCLI`: runtime for schema-generated command-line tools (swift-argument-parser): connection options, exit-code mapping, stream drivers, `discover` and raw `call` commands.
 - `MMCLIGeneratorPlugin`: generates a `#schema`'s `CLI(.enabled)` commands into the command-line target, so the shared API module (and the daemon) does not depend on MMCLI or swift-argument-parser.
 
-`MMSchema` has no internal dependencies. `MMWire` depends on `MMSchema` (the VPTS codec for wire time kinds lives there). `MMServer` and `MMClient` depend on both. `MMClientService` and `MMCLI` depend on `MMClient`. Client-only processes can import `MMSchema`.
+`MMSchema` has no internal dependencies. `MMWire` depends on `MMSchema` (the VPTS codec for wire time kinds lives there). `MMServer` and `MMClient` depend on both. `MMCLI` depends on `MMClient`. Client-only processes can import `MMSchema`.
 
 ## Design principles
 
@@ -34,7 +33,8 @@ One package, `MatterInMotion`, with six library products and one build-tool plug
 - **Bounded everything.** Frame length, connections, in-flight calls, and per-direction stream windows are capped. Counts from the wire never size allocations. A slow consumer pauses the producer, so memory does not grow.
 - **Termination is graceful and typed.** See [Streaming](#streaming).
 - **Evolution without version bumps.** The protocol version is 1 and stays 1. See [Versioning](#versioning).
-- **Structured concurrency, no hidden tasks.** The client's inbound loop is a structured child of the host. `ServiceGroup` owns the lifecycle. No GCD, no unstructured tasks, no automatic reconnection. The application sets the retry policy, using `stateUpdates()`.
+- **Resources, not services.** The server and the client connection are brackets: acquire starts one, dispose stops it, and whatever runs in between is owned by that scope. The host composes them with its own resources and owns the lifecycle. No GCD, no free-floating tasks, no automatic reconnection. The application sets the retry policy, using `stateUpdates()`.
+- **Caller isolation.** Like the fp-swift packages, the library targets build with `NonisolatedNonsendingByDefault`: async APIs run on the caller's actor, so a `@MainActor` app uses the client without sending anything across. What mm runs in tasks of its own (handlers, ACL providers, `withStream`'s `each`) is `@concurrent`.
 
 ## Quick start
 
@@ -85,13 +85,12 @@ public enum Echo: MethodNamespace {
 
 ### Server
 
-Declare the whole server (configuration, ACL table, handlers) and run it in a `ServiceGroup`:
+Declare the whole server (configuration, ACL table, handlers), then run its bracket:
 
 ```swift
+import FPService
 import Foundation
-import Logging
 import MMServer
-import ServiceLifecycle
 
 let server = MMService {
     Configuration(endpoint: .unix(path: "/tmp/echo.sock"))
@@ -123,34 +122,53 @@ let server = MMService {
     }
 }
 
-let logger = Logger(label: "echo")
-let group = ServiceGroup(configuration: .init(
-    services: [.init(service: server)],
-    gracefulShutdownSignals: [.sigterm],
-    cancellationSignals: [.sigint],
-    logger: logger
-))
-try await group.run()
+// server is a BracketAsync<SocketAddress, MMServiceError>: acquire binds and
+// starts accepting, dispose drains in-flight calls and removes the socket.
+// fp-swift-service runs it: the first SIGTERM or SIGINT drains, a second
+// cancels the drain.
+let daemon = Service(
+  server, 
+  shutdownSignals: [SIGTERM, SIGINT], 
+  shutdownTimeout: .seconds(30)
+)
+
+let result = await daemon()
 ```
+
+Because the server is a bracket, it composes with the rest of your daemon. With `BracketAsyncDo`, resources start in order and stop in reverse. A resource bound after the server starts only once the socket accepts connections, and stops before the server drains. The bracket's resource is the bound address, such as the port of a `.tcp(host:port: 0)` endpoint.
 
 You can also put handlers in reusable `RouteGroup` types (with their own files and dependencies) and add them to the `For` block. Every server registers two builtins: `server.schema` (discovery, filtered by the caller's traversal rights) and `server.entity` (an entity's ACL record).
 
 ### Client
 
-The simplest form is the bracket: one scope owns connect → run → close, with no hidden tasks. `with` is shorthand for `MMClientConnection.open`, an FPBracket resource. Acquire connects and starts the inbound loop. Dispose closes and waits for the loop.
+Declare the client the same way, then call its bracket. Acquire connects and starts the inbound loop, the body makes the calls, and dispose closes and waits for the loop: there is no connection outside the bracket.
 
 ```swift
 import MMClient
 
-let main = try! EntityName.parse("echo.main").get()
-let reply = await MMClientConnection.with(.unix(path: "/tmp/echo.sock")) { connection in
-    await connection.call(Echo.run, on: main, Echo.RunRequest(value: 42, mode: .shouted))
+let echo = MMClient {
+    Configuration(endpoint: .unix(path: "/tmp/echo.sock"))
+    // The contracts this build was compiled against: the connection verifies
+    // itself (a matching hello proves the whole composition).
+    Schema(.complete([Echo.contract]))
 }
-// Result<Result<Echo.RunResponse, MMCallError>, MMClientError>:
-// the outer layer is the connection: .failure means connect failed or the
-// connection did not survive the scope (a transport error or protocol
-// violation while the body ran; a clean EOF or the bracket's own close
-// releases successfully). The inner layer is your call.
+
+let main = try! EntityName.parse("echo.main").get()
+let outcome = await echo { connection in
+    // A failed call (denied, a remote error) leaves the connection up:
+    // handle it here, where the call was made.
+    switch await connection.call(Echo.run, on: main, Echo.RunRequest(value: 42, mode: .shouted)) {
+        case .success(let response):
+            print("echoed \(response.value)")
+        case .failure(let error):
+            print("echo.run failed: \(error)")
+    }
+    return .success(())
+}
+// Result<Void, MMClientError>: .failure only when the connection failed.
+// Either connect failed, or the connection did not survive the scope (a
+// transport error or protocol violation while the body ran). A clean EOF or
+// the bracket's own close releases successfully.
 ```
 
 One connection carries many concurrent calls, correlated by msgid and limited by `maxInFlightCalls`. Open one connection per unit of work, not per call.
@@ -158,7 +176,7 @@ One connection carries many concurrent calls, correlated by msgid and limited by
 For concurrent streams or staged teardown, run structured child tasks *inside* the bracket. To consume a stream while making other calls, use `withStream(_:each:_:)`. `each` runs as a structured sibling and grants credit as it consumes. The trailing closure is your main flow and can use the connection. `withStream` returns after the stream ends.
 
 ```swift
-let outcome = await MMClientConnection.with(.unix(path: "/tmp/echo.sock")) { connection in
+let outcome = await echo { connection in
     let main = try! EntityName.parse("echo.main").get()
 
     // Server-streaming call: a typed, backpressured AsyncSequence of elements
@@ -168,16 +186,21 @@ let outcome = await MMClientConnection.with(.unix(path: "/tmp/echo.sock")) { con
     let reply = await withStream(watch, each: { event in
         print(event.value)              // ends on server END, terminal, or close
     }) {
-        // Typed call on the same connection while events flow:
-        // Result<Echo.RunResponse, MMCallError>.
+        // Typed call on the same connection while events flow.
         await connection.call(Echo.run, on: main, Echo.RunRequest(value: 42, mode: .shouted))
     }
-    let summary = await watch.result()  // Result<Echo.WatchResponse, MMCallError>
-    return (reply, summary)
+    // Call failures stay in the body; the bracket reports only the connection.
+    if case .failure(let error) = reply {
+        print("echo.run failed: \(error)")
+    }
+    if case .failure(let error) = await watch.result() {
+        print("echo.watch ended: \(error)")
+    }
+    return .success(())
 }
 ```
 
-Daemons instead add the `MMClientService` product and put `MMClientService(connection:)` in their `ServiceGroup`. The library never reconnects: a closed connection stays closed. The application owns retry policy, using `stateUpdates()`.
+Daemons compose the client into their own bracket, next to their other resources, exactly like the server. The library never reconnects: a closed connection stays closed. The application owns retry policy, using `stateUpdates()`.
 
 ### CLI
 
@@ -291,21 +314,23 @@ Server and client emit [swift-metrics](https://github.com/apple/swift-metrics) i
 
 ## Requirements
 
-- Swift 6.4+ (strict concurrency), macOS 15+ or Linux.
-- Runtime dependencies (complete list): [swift-nio](https://github.com/apple/swift-nio), [swift-service-lifecycle](https://github.com/swift-server/swift-service-lifecycle), [swift-log](https://github.com/apple/swift-log), [swift-metrics](https://github.com/apple/swift-metrics). MessagePack is implemented in this repository. [swift-syntax](https://github.com/swiftlang/swift-syntax) is a compile-time-only dependency of the `#schema` macro and the `MMCLIGeneratorPlugin`. It is never linked into products.
+- Swift 6.4+ (strict concurrency), macOS 26+ or Linux.
+- Runtime dependencies (complete list): [swift-nio](https://github.com/apple/swift-nio), [swift-log](https://github.com/apple/swift-log), [swift-metrics](https://github.com/apple/swift-metrics), [fp-swift](https://github.com/velocityzen/fp-swift), [fp-swift-bracket](https://github.com/velocityzen/fp-swift-bracket), and [fp-swift-service](https://github.com/velocityzen/fp-swift-service) (`FPService` for the server's shutdown fan-out, `ProcessSignals` for `MMCLI`). MessagePack is implemented in this repository. [swift-syntax](https://github.com/swiftlang/swift-syntax) is a compile-time-only dependency of the `#schema` macro and the `MMCLIGeneratorPlugin`. It is never linked into products.
 
 ## Installation
 
-Add the package and choose your products. Clients need only `MMClient` + `MMSchema`.
+Add the package and choose your products. Clients need only `MMClient` + `MMSchema`. A daemon also needs a lifecycle to run the server's bracket; the examples use fp-swift-service:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/velocityzen/mm.git", from: "1.0.0")
+    .package(url: "https://github.com/velocityzen/mm.git", from: "1.0.0"),
+    .package(url: "https://github.com/velocityzen/fp-swift-service.git", branch: "main"),
 ],
 targets: [
     .target(name: "MyDaemon", dependencies: [
         .product(name: "MMServer", package: "mm"),
         .product(name: "MMSchema", package: "mm"),
+        .product(name: "FPService", package: "fp-swift-service"),
     ])
 ]
 ```
@@ -318,7 +343,6 @@ The DocC API reference is built from `Sources/<Target>/<Target>.docc` and hosted
 - [MMSchema](https://swiftpackageindex.com/velocityzen/mm/documentation/mmschema): method descriptors, the contract DSL and `#schema` macro, ACLs, the fingerprint.
 - [MMServer](https://swiftpackageindex.com/velocityzen/mm/documentation/mmserver): router, authorization, streaming handlers, service bootstrap.
 - [MMClient](https://swiftpackageindex.com/velocityzen/mm/documentation/mmclient): typed calls, streaming handles, discovery.
-- [MMClientService](https://swiftpackageindex.com/velocityzen/mm/documentation/mmclientservice): the `ServiceGroup` adapter for daemon-style clients.
 - [MMCLI](https://swiftpackageindex.com/velocityzen/mm/documentation/mmcli): the schema-generated CLI runtime.
 
 Long-form guides are DocC articles in the same catalogs (also readable in the repository):

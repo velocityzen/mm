@@ -36,7 +36,7 @@ struct PipelineTests {
     @Test("child pipeline contains idle timeout, framing codec, and hello handler")
     func childPipelineAssembly() throws {
         let channel = EmbeddedChannel()
-        _ = try MMService.configureChildPipeline(
+        _ = try ServerRuntime.configureChildPipeline(
             channel: channel,
             maxFrameLength: 1024,
             idleTimeout: .seconds(30),

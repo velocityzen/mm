@@ -1,3 +1,4 @@
+import FPBracket
 import Logging
 import MMSchema
 import MMWire
@@ -12,7 +13,6 @@ import NIOPosix
 ///     Configuration(endpoint: .unix(path: socketPath))
 ///     ACLProvider(provider)
 ///     Log(logger)
-///     OnBind { address in logger.info("listening", metadata: ["address": "\(address)"]) }
 ///
 ///     For(Journal.self) {
 ///         // inline, right in the definition —
@@ -32,16 +32,13 @@ import NIOPosix
 /// declared) — the builder equivalent of the `namespaces:` parameter.
 ///
 /// Exactly one `Configuration` and exactly one `ACLProvider` are required;
-/// `Log` and `OnBind` are optional (at most one each). Violations are
-/// programmer error and fail at daemon startup, per the router's precondition
-/// discipline.
+/// `Log` is optional (at most one). Violations are programmer error and fail
+/// at daemon startup, per the router's precondition discipline.
 public struct ServerPart {
     enum Kind {
         case configuration(MMServerConfiguration)
         case aclProvider(any EntityACLProvider)
         case logger(Logger)
-        case onBind(@Sendable (SocketAddress) -> Void)
-        case ready(ServiceReadiness)
         case group(namespace: any MethodNamespace.Type, routes: [Route])
         case routes([Route])
         case sharedTypes(any TypeNamespace.Type)
@@ -97,7 +94,7 @@ public func Log(_ logger: Logger) -> ServerPart {
     ServerPart(kind: .logger(logger))
 }
 
-/// Label-and-level form: `Log(label: "eyed.rpc", level: .debug)`.
+/// Label-and-level form: `Log(label: "mm.example.daemon", level: .debug)`.
 public func Log(label: String = "mm.server", level: Logger.Level = .info) -> ServerPart {
     var logger = Logger(label: label)
     logger.logLevel = level
@@ -113,13 +110,6 @@ public func Log(
 ) -> ServerPart {
     ServerPart(
         kind: .logger(Logger(label: "mm.server", factory: { _ in ClosureLogHandler(sink: sink) })))
-}
-
-/// Invoked once the endpoint is bound, with the bound address — the hook
-/// tests and supervisors use to learn the ephemeral port or confirm the
-/// socket path. Optional, at most once.
-public func OnBind(_ body: @escaping @Sendable (SocketAddress) -> Void) -> ServerPart {
-    ServerPart(kind: .onBind(body))
 }
 
 /// Groups routes under a namespace and enrolls the namespace in the router's
@@ -146,11 +136,12 @@ public func Types(_ container: any TypeNamespace.Type) -> ServerPart {
 
 /// Registers a unary handler; identical to ``Handle(_:_:_:)-(Method<Request,Response>,_,_)``
 /// with the closure parameters in builder order — the authorized connection
-/// context first, then the decoded request.
+/// context first, then the decoded request. Like every handler, it runs in
+/// its call's own task (`@concurrent`), off any actor.
 public func On<Request: Codable & Sendable, Response: Codable & Sendable>(
     _ method: Method<Request, Response>,
     _ accepts: Accepts = Accepts(.all),
-    _ body: @escaping @Sendable (MMContext, Request) async -> Result<Response, MMError>
+    _ body: @escaping @Sendable @concurrent (MMContext, Request) async -> Result<Response, MMError>
 ) -> Route {
     Handle(method, accepts) { request, context in
         await body(context, request)
@@ -166,7 +157,7 @@ public func On<
     _ method: ServerStreamMethod<Request, Element, Response>,
     _ accepts: Accepts = Accepts(.all),
     _ body:
-        @escaping @Sendable (MMContext, Request, MMResponseSink<Element>) async ->
+        @escaping @Sendable @concurrent (MMContext, Request, MMResponseSink<Element>) async ->
         Result<Response, MMError>
 ) -> Route {
     Handle(method, accepts) { request, sink, context in
@@ -183,7 +174,7 @@ public func On<
     _ method: ClientStreamMethod<Request, Element, Response>,
     _ accepts: Accepts = Accepts(.all),
     _ body:
-        @escaping @Sendable (MMContext, Request, MMRequestStream<Element>) async ->
+        @escaping @Sendable @concurrent (MMContext, Request, MMRequestStream<Element>) async ->
         Result<Response, MMError>
 ) -> Route {
     Handle(method, accepts) { request, elements, context in
@@ -201,7 +192,7 @@ public func On<
     _ method: BidirectionalStreamMethod<Request, RequestElement, ResponseElement, Response>,
     _ accepts: Accepts = Accepts(.all),
     _ body:
-        @escaping @Sendable (
+        @escaping @Sendable @concurrent (
             MMContext, Request, MMRequestStream<RequestElement>,
             MMResponseSink<ResponseElement>
         ) async -> Result<Response, MMError>
@@ -254,10 +245,22 @@ public enum ServerBuilder: MMListBuilding {
     }
 }
 
-extension MMService {
-    /// Assembles a server from declarative parts. See ``ServerPart`` for the
+extension BracketAsync where R == SocketAddress, E == MMServiceError {
+    /// Declares a server from declarative parts. See ``ServerPart`` for the
     /// element inventory and the exactly-once rules.
     public init(
+        eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
+        threadPool: NIOThreadPool = .singleton,
+        @ServerBuilder _ content: sending () -> [ServerPart]
+    ) {
+        self = ServerRuntime(eventLoopGroup: eventLoopGroup, threadPool: threadPool, content)
+            .start()
+    }
+}
+
+extension ServerRuntime {
+    /// Assembles a server from declarative parts (see ``ServerPart``).
+    package init(
         eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
         threadPool: NIOThreadPool = .singleton,
         @ServerBuilder _ content: () -> [ServerPart]
@@ -265,8 +268,6 @@ extension MMService {
         var configuration: MMServerConfiguration?
         var aclProvider: (any EntityACLProvider)?
         var logger: Logger?
-        var onBind: (@Sendable (SocketAddress) -> Void)?
-        var readinessSignals: [ServiceReadiness] = []
         var namespaces: [any MethodNamespace.Type] = []
         var seenNamespaces: Set<ObjectIdentifier> = []
         var sharedTypes: [any TypeNamespace.Type] = []
@@ -283,11 +284,6 @@ extension MMService {
                 case .logger(let value):
                     precondition(logger == nil, "MMService declares Log twice")
                     logger = value
-                case .onBind(let value):
-                    precondition(onBind == nil, "MMService declares OnBind twice")
-                    onBind = value
-                case .ready(let readiness):
-                    readinessSignals.append(readiness)
                 case .group(let namespace, let groupRoutes):
                     precondition(
                         seenNamespaces.insert(ObjectIdentifier(namespace)).inserted,
@@ -313,17 +309,6 @@ extension MMService {
             preconditionFailure(
                 "MMService declares no ACLProvider — authorization is never defaulted")
         }
-        let userOnBind = onBind
-        let signals = readinessSignals
-        let combinedOnBind: (@Sendable (SocketAddress) -> Void)? =
-            signals.isEmpty
-            ? userOnBind
-            : { @Sendable address in
-                userOnBind?(address)
-                for signal in signals {
-                    signal.signalReady()
-                }
-            }
         self.init(
             configuration: configuration,
             namespaces: namespaces,
@@ -332,7 +317,6 @@ extension MMService {
             eventLoopGroup: eventLoopGroup,
             threadPool: threadPool,
             logger: logger ?? Logger(label: "mm.server"),
-            onBind: combinedOnBind,
             routes: { routes }
         )
     }

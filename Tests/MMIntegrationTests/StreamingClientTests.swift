@@ -4,7 +4,6 @@ import MMTestSupport
 import MMWire
 import NIOConcurrencyHelpers
 import NIOCore
-import ServiceLifecycle
 import Testing
 
 @testable import MMClient
@@ -155,7 +154,7 @@ struct StreamingClientTests {
             try await withRunningServer(server) { _ in
                 let (result, runResult) = try await withConnectedClient(unixPath: path) {
                     connection -> (
-                        outcomes: [MMClient.StreamSendOutcome],
+                        outcomes: [MMClient::StreamSendOutcome],
                         terminal: Result<StreamSummary, MMCallError>
                     ) in
                     let handle = await connection.call(
@@ -165,7 +164,7 @@ struct StreamingClientTests {
                     // Six elements ride the implicit initial window with no grant
                     // needed; each `send` is accepted. `finish()` sends END, which
                     // ends the handler's request sequence and yields the terminal.
-                    var outcomes: [MMClient.StreamSendOutcome] = []
+                    var outcomes: [MMClient::StreamSendOutcome] = []
                     for value in 0..<6 {
                         outcomes.append(await handle.send(StreamItem(value: value)))
                     }
@@ -199,7 +198,7 @@ struct StreamingClientTests {
             try await withRunningServer(server) { _ in
                 let (result, runResult) = try await withConnectedClient(unixPath: path) {
                     connection -> (
-                        outcomes: [MMClient.StreamSendOutcome],
+                        outcomes: [MMClient::StreamSendOutcome],
                         terminal: Result<StreamSummary, MMCallError>
                     ) in
                     let handle = await connection.call(
@@ -208,7 +207,7 @@ struct StreamingClientTests {
                     )
                     // 20 > the initial window of 8: sends 9..<20 can only land if
                     // the server grants request credit as the handler drains.
-                    var outcomes: [MMClient.StreamSendOutcome] = []
+                    var outcomes: [MMClient::StreamSendOutcome] = []
                     for value in 0..<20 {
                         outcomes.append(await handle.send(StreamItem(value: value)))
                     }
@@ -403,7 +402,7 @@ struct StreamingClientTests {
             try await withRunningServer(server) { _ in
                 let (result, runResult) = try await withConnectedClient(unixPath: path) {
                     connection -> (
-                        outcomes: [MMClient.StreamSendOutcome],
+                        outcomes: [MMClient::StreamSendOutcome],
                         terminal: Result<StreamSummary, MMCallError>
                     ) in
                     // `stopAfter: 1` STOPs after the very first item, well within
@@ -415,7 +414,7 @@ struct StreamingClientTests {
                     )
                     // First send: accepted (`.sent`). The server consumes it and
                     // issues its server-initiated STOP, then fires `importStopSent`.
-                    var outcomes: [MMClient.StreamSendOutcome] = [
+                    var outcomes: [MMClient::StreamSendOutcome] = [
                         await handle.send(StreamItem(value: 0))
                     ]
                     // Bound the STOP's arrival on the signal (the server reports the
@@ -609,17 +608,7 @@ struct StreamingClientTests {
                 // The server's task tree, killed by cancellation on the stop
                 // signal — the SIGINT-equivalent hard-death pattern (no drain).
                 tasks.addTask {
-                    try? await withDeadline(seconds: 60) {
-                        await withThrowingTaskGroup(of: Void.self) { serverGroup in
-                            serverGroup.addTask { try await server.service.run() }
-                            serverGroup.addTask {
-                                try await stopServer.wait()
-                                throw DeadlineExceeded()  // any throw cancels run()
-                            }
-                            _ = try? await serverGroup.next()
-                            serverGroup.cancelAll()
-                        }
-                    }
+                    await runServerUntilCancelled(server, stop: stopServer)
                 }
                 _ = try await withDeadline { try await server.bound.wait() }
 

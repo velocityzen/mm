@@ -1,12 +1,10 @@
 import Logging
-import MMClientService
 import MMSchema
 import MMTestSupport
 import MMWire
 import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
-import ServiceLifecycle
 import Testing
 
 @testable import MMClient
@@ -64,12 +62,16 @@ struct ClientIntegrationTests {
                     }
                 }
                 let outcome = try await withDeadline {
-                    await MMClientConnection.with(.unix(path: path)) { connection in
+                    let client = MMClient {
+                        Configuration(endpoint: .unix(path: path))
+                    }
+                    return await client { connection in
                         // The call can only end via the death (the raw server
                         // never dispatches); its failure stays in the body value.
-                        await connection.call(
-                            TestMethods.echo, on: entity("box.item"),
-                            EchoRequest(entity: entity("box.item"), value: 1))
+                        .success(
+                            await connection.call(
+                                TestMethods.echo, on: entity("box.item"),
+                                EchoRequest(entity: entity("box.item"), value: 1)))
                     }
                 }
                 // Tear the fake server down before asserting so no failure
@@ -89,8 +91,8 @@ struct ClientIntegrationTests {
         try await withTempSocketPath { path in
             let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
             try await withRunningServer(server) { _ in
-                let withConnection = MMClientConnection.open(.unix(path: path))
-                let outcome = await withConnection { connection in
+                let client = MMClient(endpoint: .unix(path: path))
+                let outcome = await client { connection in
                     // A round-trip inside the scope proves the bracket-owned
                     // loop is live (no loop, no response routing).
                     let reply = await connection.call(
@@ -115,21 +117,24 @@ struct ClientIntegrationTests {
         try await withTempSocketPath { path in
             let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
             try await withRunningServer(server) { _ in
-                let outcome = await MMClientConnection.with(.unix(path: path)) { connection in
-                    await connection.call(
-                        TestMethods.echo, on: entity("box.item"),
-                        EchoRequest(entity: entity("box.item"), value: 7))
+                let client = MMClient {
+                    Configuration(endpoint: .unix(path: path))
+                }
+                let outcome = await client { connection in
+                    .success(
+                        await connection.call(
+                            TestMethods.echo, on: entity("box.item"),
+                            EchoRequest(entity: entity("box.item"), value: 7)))
                 }
                 #expect(outcome == .success(.success(EchoResponse(value: 7))))
             }
         }
         // Connect failure is the bracket's own failure channel; the body
         // never runs.
-        let refused = await MMClientConnection.with(
-            .unix(path: "/nonexistent/mm-bracket.sock")
-        ) { _ in
+        let unreachable = MMClient(endpoint: .unix(path: "/nonexistent/mm-bracket.sock"))
+        let refused = await unreachable { _ in
             Issue.record("body must not run when connect fails")
-            return false
+            return .success(false)
         }
         guard case .failure(.transport) = refused else {
             Issue.record("expected .failure(.transport), got \(refused)")
@@ -306,8 +311,7 @@ struct ClientIntegrationTests {
         let server = makeTestServer(
             configuration: .init(endpoint: .tcp(host: "127.0.0.1", port: 0))
         )
-        try await withRunningServer(server) { _ in
-            let address = try await withDeadline { try await server.bound.wait() }
+        try await withRunningServer(server) { address in
             let port = try #require(address.port)
             let (replies, runResult) = try await withConnectedClient(
                 to: .tcp(host: "127.0.0.1", port: port)
@@ -393,33 +397,37 @@ struct ClientIntegrationTests {
     func gracefulShutdownCompletesInFlightCall() async throws {
         try await withTempSocketPath { path in
             let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
-            try await withRunningServer(server) { group in
-                _ = try await withConnectedClient(unixPath: path) { connection in
-                    try await withThrowingTaskGroup(of: Void.self) { calls in
-                        calls.addTask {
-                            let reply = await connection.call(
-                                TestMethods.slow, on: entity("box.item"),
-                                TargetRequest(entity: entity("box.item"), ))
-                            #expect(reply == .success(EchoResponse(value: 99)))
-                        }
-                        _ = try await withDeadline { try await server.slowStarted.wait() }
-                        // Drain begins with the call still parked server-side.
-                        await group.triggerGracefulShutdown()
-                        server.slowGate.fire(())
-                        try await calls.waitForAll()
-                        // The server drained and closed; the client observes it
-                        // as a clean close, not an error.
-                        let terminal = try await withDeadline { () -> ClientState? in
-                            var states = connection.stateUpdates().makeAsyncIterator()
-                            while let state = await states.next() {
-                                if case .closed = state { return state }
-                            }
-                            return nil
-                        }
-                        #expect(terminal == .closed(reason: nil))
+            let drain = Signal<Void>()
+            async let served: Void = runServerUntilDrained(server, drain: drain)
+            _ = try await withDeadline { try await server.bound.wait() }
+            _ = try await withConnectedClient(unixPath: path) { connection in
+                try await withThrowingTaskGroup(of: Void.self) { calls in
+                    calls.addTask {
+                        let reply = await connection.call(
+                            TestMethods.slow, on: entity("box.item"),
+                            TargetRequest(entity: entity("box.item"), ))
+                        #expect(reply == .success(EchoResponse(value: 99)))
                     }
+                    _ = try await withDeadline { try await server.slowStarted.wait() }
+                    // Drain begins with the call still parked server-side: the
+                    // listener is closed before the handler is released.
+                    drain.fire(())
+                    try await expectConnectRefused(unixPath: path)
+                    server.slowGate.fire(())
+                    try await calls.waitForAll()
+                    // The server drained and closed; the client observes it
+                    // as a clean close, not an error.
+                    let terminal = try await withDeadline { () -> ClientState? in
+                        var states = connection.stateUpdates().makeAsyncIterator()
+                        while let state = await states.next() {
+                            if case .closed = state { return state }
+                        }
+                        return nil
+                    }
+                    #expect(terminal == .closed(reason: nil))
                 }
             }
+            try await served
         }
     }
 
@@ -432,17 +440,7 @@ struct ClientIntegrationTests {
                 tasks.addTask {
                     // The server's task tree, killed by cancellation on signal:
                     // SIGINT-equivalent — no drain, connections torn down.
-                    try? await withDeadline(seconds: 60) {
-                        await withThrowingTaskGroup(of: Void.self) { serverGroup in
-                            serverGroup.addTask { try await server.service.run() }
-                            serverGroup.addTask {
-                                try await stopServer.wait()
-                                throw DeadlineExceeded()  // any throw cancels run()
-                            }
-                            _ = try? await serverGroup.next()
-                            serverGroup.cancelAll()
-                        }
-                    }
+                    await runServerUntilCancelled(server, stop: stopServer)
                 }
                 _ = try await withDeadline { try await server.bound.wait() }
                 let (callResult, runResult) = try await withConnectedClient(unixPath: path) {
@@ -581,41 +579,6 @@ struct ClientIntegrationTests {
                         ]
                     )
                 }
-            }
-        }
-    }
-
-    @Test("the ServiceGroup adapter runs the loop and drains cleanly on graceful shutdown")
-    func serviceGroupLifecycle() async throws {
-        try await withTempSocketPath { path in
-            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
-            try await withRunningServer(server) { _ in
-                let connection = try await MMClientConnection.connect(
-                    to: .unix(path: path),
-                    configuration: .init(),
-                    logger: quietClientLogger()
-                ).get()
-                let clientGroup = ServiceGroup(
-                    configuration: .init(
-                        services: [
-                            .init(service: MMClientService(connection: connection))
-                        ],
-                        logger: Logger(label: "mm.test.client-group")
-                    )
-                )
-                try await withThrowingTaskGroup(of: Void.self) { tasks in
-                    tasks.addTask {
-                        try await withDeadline(seconds: 30) { try await clientGroup.run() }
-                    }
-                    // Calls park until the group starts the loop, then flow.
-                    let reply = await connection.call(
-                        TestMethods.echo, on: entity("box.item"),
-                        EchoRequest(entity: entity("box.item"), value: 5))
-                    #expect(reply == .success(EchoResponse(value: 5)))
-                    await clientGroup.triggerGracefulShutdown()
-                    try await tasks.waitForAll()
-                }
-                #expect(connection.state == .closed(reason: nil))
             }
         }
     }

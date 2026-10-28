@@ -5,7 +5,6 @@ import MMSchema
 import MMServer
 import MMTestSupport
 import NIOCore
-import ServiceLifecycle
 import Testing
 
 @testable import MMCLI
@@ -49,17 +48,12 @@ func withLedgerServer<T: Sendable>(
     ]
     var logger = Logger(label: "mm.servercontract.server")
     logger.logLevel = .warning
-    let (bound, boundContinuation) = AsyncStream<SocketAddress>.makeStream()
-    let service = MMService(
+    let service = ServerRuntime(
         configuration: MMServerConfiguration(endpoint: .unix(path: path)),
         namespaces: [Ledger.self],
         sharedTypes: sharedTypes,
         aclProvider: InMemoryACLProvider(acls),
-        logger: logger,
-        onBind: { address in
-            boundContinuation.yield(address)
-            boundContinuation.finish()
-        }
+        logger: logger
     ) {
         Handle(Ledger.append) { _, _ in
             .success(Ledger.AppendResponse(total: 1))
@@ -76,10 +70,7 @@ func withLedgerServer<T: Sendable>(
             .success(Ledger.RootResponse(entries: 0))
         }
     }
-    return try await withServiceGroup(
-        service,
-        ready: { _ = await bound.first(where: { _ in true }) }
-    ) { _ in
+    return try await withListeningServer(service) { _ in
         let options = try MMCLIOptions.parse(["--socket", path])
         return try await withDeadline(seconds: 30) { try await body(options) }
     }

@@ -41,11 +41,10 @@ private func grantingProvider() -> InMemoryACLProvider {
 struct ServerBuilderTests {
     @Test("parts assemble into a working service: config, ACL, log, groups")
     func assembly() async throws {
-        let service = MMService {
+        let service = ServerRuntime {
             Configuration(endpoint: .unix(path: "/tmp/builder-test.sock"), maxConnections: 3)
             ACLProvider(grantingProvider())
             Log(label: "test.builder", level: .error)
-            OnBind { _ in }
             For(BuilderMethods.self) {
                 On(BuilderMethods.echo) { auth, request in
                     .success(EchoResponse(value: request.value))
@@ -82,7 +81,7 @@ struct ServerBuilderTests {
 
     @Test("bare routes outside For skip the namespace cross-check")
     func bareRoutes() {
-        let service = MMService {
+        let service = ServerRuntime {
             Configuration(endpoint: .unix(path: "/tmp/builder-bare.sock"))
             ACLProvider(grantingProvider())
             On(Method<EchoRequest, EchoResponse>(name: "free.echo", access: .read)) {
@@ -95,8 +94,8 @@ struct ServerBuilderTests {
 
     @Test("conditional parts compose (buildOptional / buildEither)")
     func conditionalParts() {
-        func build(verbose: Bool) -> MMService {
-            MMService {
+        func build(verbose: Bool) -> ServerRuntime {
+            ServerRuntime {
                 Configuration(endpoint: .unix(path: "/tmp/builder-cond.sock"))
                 ACLProvider(grantingProvider())
                 if verbose {

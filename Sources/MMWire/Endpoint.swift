@@ -18,8 +18,8 @@ public enum MMEndpoint: Sendable, Hashable {
     /// A unix domain socket at `path`. The path must fit `sockaddr_un.sun_path`
     /// (103 bytes on Darwin, 107 on Linux).
     case unix(path: String)
-    /// A TCP endpoint. For servers, port 0 binds an ephemeral port reported
-    /// through `MMService`'s `onBind` callback. `TCP_NODELAY` is always
+    /// A TCP endpoint. For servers, port 0 binds an ephemeral port, reported
+    /// as the address the server's bracket yields. `TCP_NODELAY` is always
     /// set on accepted and connected TCP channels.
     case tcp(host: String, port: Int)
 }

@@ -13,6 +13,10 @@ public enum ServerError: Error, Sendable, Hashable {
     /// The connection backing this context is closed; the envelope was not
     /// delivered.
     case connectionClosed
+    /// The sending task was cancelled (a CANCEL, a stream violation,
+    /// connection teardown) before the envelope was written. Only this send
+    /// failed; the connection is still open for every other call.
+    case cancelled
     /// The transport failed in a way that is not branch-worthy. Coarse by
     /// design: infrastructure failures are for logs, not for `switch`.
     case transport(description: String)

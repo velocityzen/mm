@@ -35,19 +35,18 @@ struct ExampleClient {
         let notes = try EntityName.parse("journal.notes").get()
         let system = try EntityName.parse("journal.system").get()
 
-        // The whole lifecycle is one bracket: acquire connects AND starts the
-        // inbound loop, dispose closes AND joins it — one connection, every
-        // pattern below multiplexed over it. The schema expectation is
-        // contracts, never a typed-in fingerprint: this client ships with the
-        // daemon, so it declares the complete composition and the connection
-        // verifies itself automatically.
-        let outcome = await MMClientConnection.with(
-            .unix(path: socketPath),
-            configuration: MMClientConfiguration(
-                schema: .complete([Journal.contract])
-            ),
-            logger: logger
-        ) { connection in
+        // The client is a bracket: acquire connects AND starts the inbound
+        // loop, dispose closes AND joins it — one connection, every pattern
+        // below multiplexed over it. The schema expectation is contracts,
+        // never a typed-in fingerprint: this client ships with the daemon, so
+        // it declares the complete composition and the connection verifies
+        // itself automatically.
+        let journal = MMClient {
+            Configuration(endpoint: .unix(path: socketPath))
+            Schema(.complete([Journal.contract]))
+            Log(logger)
+        }
+        let outcome = await journal { connection in
             let hello = connection.server
             print("connected to \(socketPath)")
             print("  protocol version: \(hello.protocolVersion)")
@@ -63,6 +62,7 @@ struct ExampleClient {
             await appendDenied(connection, to: system)
             // No close, no join: the bracket's dispose does both on the way
             // out — that is the acquire/release contract.
+            return .success(())
         }
 
         if case .failure(let error) = outcome {

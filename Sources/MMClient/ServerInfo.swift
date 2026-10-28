@@ -1,5 +1,5 @@
 /// What the hello exchange established about the server, exposed as
-/// ``MMClientConnection/server`` after `connect` returns and fixed for the
+/// ``MMClientConnection/server`` once the bracket acquires, and fixed for the
 /// connection's lifetime.
 public struct ServerInfo: Sendable, Hashable {
     /// Min-wins negotiated protocol version in effect on this connection.

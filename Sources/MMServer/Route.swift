@@ -289,10 +289,13 @@ public struct Accepts: Sendable {
 /// `Accepts("journal.*")`, `Accepts(.root)`, exact entities — replacing both
 /// a separate root opt-in and any ad-hoc handler-side scoping; see
 /// ``Accepts``. The default accepts any non-root entity the ACL admits.
+///
+/// Every handler shape runs in its call's own task (`@concurrent`), off any
+/// actor.
 public func Handle<Request: Codable & Sendable, Response: Codable & Sendable>(
     _ method: Method<Request, Response>,
     _ accepts: Accepts = Accepts(.all),
-    _ body: @escaping @Sendable (Request, MMContext) async -> Result<Response, MMError>
+    _ body: @escaping @Sendable @concurrent (Request, MMContext) async -> Result<Response, MMError>
 ) -> Route {
     Route(
         name: method.name,
@@ -428,7 +431,7 @@ public func Handle<
     _ method: ServerStreamMethod<Request, Element, Response>,
     _ accepts: Accepts = Accepts(.all),
     _ body:
-        @escaping @Sendable (Request, MMResponseSink<Element>, MMContext) async ->
+        @escaping @Sendable @concurrent (Request, MMResponseSink<Element>, MMContext) async ->
         Result<Response, MMError>
 ) -> Route {
     streamRoute(
@@ -466,7 +469,7 @@ public func Handle<
     _ method: ClientStreamMethod<Request, Element, Response>,
     _ accepts: Accepts = Accepts(.all),
     _ body:
-        @escaping @Sendable (Request, MMRequestStream<Element>, MMContext) async ->
+        @escaping @Sendable @concurrent (Request, MMRequestStream<Element>, MMContext) async ->
         Result<Response, MMError>
 ) -> Route {
     streamRoute(
@@ -507,7 +510,7 @@ public func Handle<
     _ method: BidirectionalStreamMethod<Request, RequestElement, ResponseElement, Response>,
     _ accepts: Accepts = Accepts(.all),
     _ body:
-        @escaping @Sendable (
+        @escaping @Sendable @concurrent (
             Request, MMRequestStream<RequestElement>, MMResponseSink<ResponseElement>, MMContext
         ) async -> Result<Response, MMError>
 ) -> Route {

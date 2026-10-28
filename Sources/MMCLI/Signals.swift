@@ -1,4 +1,12 @@
-import UnixSignals
+import ProcessSignals
+
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
 
 /// Structured SIGINT handling for streaming commands: first Ctrl-C asks the
 /// call to wind down gracefully, an optional second one escalates.
@@ -10,21 +18,23 @@ public enum MMCLISignals {
 
     /// Runs `body` with a sibling SIGINT watcher.
     ///
-    /// Both run as children of one task group — fully structured, no
-    /// free-floating tasks. The first SIGINT invokes `onFirst` (a streaming
+    /// Both run as children of one task group (`@concurrent`) — fully
+    /// structured, no free-floating tasks. The first SIGINT invokes `onFirst` (a streaming
     /// command passes its graceful STOP there), the second invokes `onSecond`
     /// when given. Signals never end `body`: it always runs to its own
     /// completion (`onFirst`/`onSecond` are what nudge it to finish). When
     /// `body` returns, the watcher is cancelled and the value returned; a
     /// `body` error cancels the watcher and propagates.
     public static func withGracefulSigint<T: Sendable>(
-        onFirst: @Sendable @escaping () async -> Void,
-        onSecond: (@Sendable () async -> Void)? = nil,
-        _ body: @Sendable @escaping () async throws -> T
+        onFirst: @Sendable @escaping @concurrent () async -> Void,
+        onSecond: (@Sendable @concurrent () async -> Void)? = nil,
+        _ body: @Sendable @escaping @concurrent () async throws -> T
     ) async throws -> T {
         try await withThrowingTaskGroup(of: Event<T>.self) { tasks in
             tasks.addTask {
-                let signals = await UnixSignalsSequence(trapping: .sigint)
+                // While this stream lives, SIGINT is caught, so its default
+                // action cannot end the process mid-drain.
+                let signals = await processSignals([SIGINT])
                 var sigintCount = 0
                 for await _ in signals {
                     sigintCount += 1

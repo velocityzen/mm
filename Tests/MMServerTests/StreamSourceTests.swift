@@ -86,7 +86,7 @@ struct StreamSourceTests {
         // Run the grant pump and drain all 8 items; the pump should emit at
         // least one additive grant once the consumer drains below the low
         // watermark, restoring credit.
-        let pump = Task { await source.runGrantPump() }
+        async let pumped: Void = source.runGrantPump()
         var received = 0
         for await value in stream {
             #expect(value == 7)
@@ -94,11 +94,10 @@ struct StreamSourceTests {
             if received == 8 { break }
         }
         #expect(received == 8)
-        // Give the pump a beat to flush its batch, then finish the stream so the
-        // pump loop exits.
-        try? await Task.sleep(nanoseconds: 30_000_000)
+        // Finish the stream: the pump drains its queued nudges, flushes any grant
+        // still pending, and exits, so there is nothing to wait out first.
         source.finishFromEnd()
-        await pump.value
+        await pumped
 
         // Credit was granted back (the exact batching is watermark-based; the
         // invariant is that grants were additive and non-zero, and never pushed
@@ -113,12 +112,12 @@ struct StreamSourceTests {
         let recorder = FrameRecorder()
         let (source, stream) = makeSource(recorder)
         #expect(source.deliver(encodedInt(1)).isSuccess)
-        let pump = Task { await source.runGrantPump() }
+        async let pumped: Void = source.runGrantPump()
         source.finishFromEnd()
         var values: [Int] = []
         for await value in stream { values.append(value) }
         #expect(values == [1])  // buffered item drained, then the sequence ended
-        await pump.value
+        await pumped
     }
 
     @Test("stop() sends exactly one kind-5 frame, idempotently")

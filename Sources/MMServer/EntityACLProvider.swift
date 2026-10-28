@@ -12,10 +12,12 @@ import MMSchema
 /// - `.failure` means the provider itself broke (storage error). The router
 ///   logs it and answers the peer with `internalError`; provider detail never
 ///   reaches the wire.
+/// - Both requirements are `@concurrent`: the router calls them from
+///   connection tasks, off any actor.
 public protocol EntityACLProvider: Sendable {
     /// Resolves the ACL for one entity. `EntityName.root` is never a concrete
     /// entity and providers are not required to have a record for it.
-    func acl(for entity: EntityName) async -> Result<EntityACL?, ACLProviderError>
+    @concurrent func acl(for entity: EntityName) async -> Result<EntityACL?, ACLProviderError>
 
     /// Cache-invalidation hook for chmod-equivalent mutations.
     ///
@@ -24,7 +26,7 @@ public protocol EntityACLProvider: Sendable {
     /// observes the mutation. The router itself does not cache in v1, so
     /// dispatch correctness never depends on this hook — it exists so hosts
     /// can layer caching providers without changing the router.
-    func invalidate(_ entity: EntityName) async
+    @concurrent func invalidate(_ entity: EntityName) async
 }
 
 /// A dictionary-backed ``EntityACLProvider`` for tests and small daemons.

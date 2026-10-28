@@ -11,56 +11,45 @@ import NIOPosix
 /// One client connection: typed calls, msgid multiplexing, and the inbound
 /// response loop.
 ///
-/// ## Lifecycle is structured — the host owns `run()`
+/// ## Lifecycle is a bracket
 ///
-/// `connect(to:configuration:)` performs the transport bootstrap and the hello
-/// exchange, nothing more; no task is spawned (no free-floating `Task { }`,
-/// per house rules). The returned connection is inert until the **host** runs
-/// the inbound loop, ``run()``, as a structured child. Two sanctioned shapes:
+/// A connection exists only inside an ``MMClient`` bracket: acquire
+/// bootstraps the transport, exchanges hellos, and starts the inbound loop;
+/// dispose closes the connection and joins the loop. Nothing outlives the
+/// scope, so there is no connection to leak and no loop to forget:
 ///
 /// ```swift
-/// // 1. The bracket — one scope owns connect/run/close/join (tools, tests):
-/// let reply = await MMClientConnection.with(.unix(path: sock)) { connection in
-///     await connection.call(Journal.append, on: notes, request)
+/// let journal = MMClient {
+///     Configuration(endpoint: .unix(path: sock))
+///     Schema(.complete([Journal.contract]))
 /// }
-///
-/// // 2. swift-service-lifecycle (daemons): drop the MMClientService adapter
-/// //    (its own product) in a ServiceGroup.
-/// let connection = try await MMClientConnection.connect(to: .unix(path: sock)).get()
-/// let group = ServiceGroup(configuration: .init(
-///     services: [.init(service: MMClientService(connection: connection))],
-///     gracefulShutdownSignals: [.sigterm],
-///     logger: logger
-/// ))
-/// try await group.run()
+/// let outcome = await journal { connection in
+///     if case .failure(let error) = await connection.call(Journal.append, on: notes, request) {
+///         logger.warning("journal.append failed: \(error)")  // the connection is still up
+///     }
+///     return .success(())
+/// }
 /// ```
 ///
 /// Custom choreography — stream drainers, staged teardown — lives *inside*
 /// the bracket body as structured children (`async let`, a local group); the
 /// bracket still owns the lifecycle around it.
 ///
-/// Calls may be issued before `run()` has started — they park (bounded by the
-/// in-flight cap and their own callers) until the loop produces the outbound
-/// writer — but no response can arrive until `run()` is consuming the inbound
-/// stream, so start it promptly.
-///
 /// ## Death and reconnection
 ///
-/// When the loop terminates — EOF, transport error, protocol violation,
-/// ``close()``, or cancellation of the `run()` task — every pending call fails
-/// with `MMCallError.connectionClosed` (or `.transport`), the ``state``
-/// transitions to `.closed(reason:)`, and `run()` returns. Reconnection is
-/// deliberately out of scope for v1: a closed connection stays closed, and
-/// retry policy belongs to the application, driven by ``stateUpdates()``.
+/// When the loop terminates — EOF, transport error, protocol violation, or
+/// the bracket's dispose — every pending call fails with
+/// `MMCallError.connectionClosed` (or `.transport`) and the ``state``
+/// transitions to `.closed(reason:)`. Reconnection is deliberately out of
+/// scope for v1: a closed connection stays closed, and retry policy belongs
+/// to the application, driven by ``stateUpdates()``.
 public actor MMClientConnection {
     typealias Writer = NIOAsyncChannelOutboundWriter<ByteBuffer>
 
     /// The outcome of the hello exchange, fixed for the connection's lifetime.
     public nonisolated let server: ServerInfo
 
-    // `package` so the MMClientService module's synchronous shutdown handler
-    // can close it.
-    package nonisolated let channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>
+    nonisolated let channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>
     private nonisolated let configuration: MMClientConfiguration
     private nonisolated let logger: Logger
     private nonisolated let metrics: ClientMetrics
@@ -115,7 +104,10 @@ public actor MMClientConnection {
     // MARK: - Connect
 
     /// Bootstraps the transport, exchanges hellos, and returns a connected
-    /// (but not yet running — see the type docs) connection.
+    /// but not yet running connection — the first half of the bracket's
+    /// acquire. Package-internal: callers get a connection only through
+    /// an ``MMClient`` bracket, so it never escapes without its loop and its
+    /// close.
     ///
     /// The client sends its hello as the first outbound frame without waiting
     /// for the server's. The server's first frame must be a decodable hello
@@ -123,7 +115,11 @@ public actor MMClientConnection {
     /// is min-wins, and a fingerprint mismatch is surfaced on
     /// ``ServerInfo/fingerprintMatched`` — never a disconnect, per the fixed
     /// wire decision. TCP endpoints get `TCP_NODELAY`.
-    public static func connect(
+    ///
+    /// `@concurrent`: the NIO bootstrap is not `Sendable`, so the transport
+    /// work runs off the caller's actor.
+    @concurrent
+    package static func connect(
         to endpoint: MMEndpoint,
         configuration: MMClientConfiguration = MMClientConfiguration(),
         eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
@@ -186,18 +182,9 @@ public actor MMClientConnection {
         let loop: Task<Result<Void, MMClientError>, Never>
     }
 
-    /// The **live** connection as a scoped resource (FPBracket): acquire
-    /// connects AND starts the inbound loop; dispose closes AND joins it —
-    /// open a connection the way you open a file. The typical
-    /// acquire/release pattern, with the loop inside the resource:
-    ///
-    /// ```swift
-    /// let withConnection = MMClientConnection.open(.unix(path: socketPath))
-    /// let reply = await withConnection { connection in
-    ///     await connection.call(Journal.append, on: notes, request)
-    ///         .map { $0 }  // body returns Result<_, MMClientError>-compatible values
-    /// }
-    /// ```
+    /// The **live** connection as a scoped resource (FPBracket) — the
+    /// bracket every ``MMClient`` initializer builds: acquire connects AND
+    /// starts the inbound loop; dispose closes AND joins it.
     ///
     /// Cancellation of the surrounding task converges through the bracket
     /// rather than the task tree: the body's awaits resume `.cancelled`, the
@@ -205,10 +192,8 @@ public actor MMClientConnection {
     /// outlives the scope on any path. Dispose returns the loop's outcome as
     /// the release verdict, so the bracket fails when the connection did not
     /// survive the scope (transport error, protocol violation); a clean EOF
-    /// or this close releases successfully. Composes with other bracketed
-    /// resources via `flatMap`/`BracketAsyncDo` (acquire outer→inner,
-    /// release inner→outer).
-    public static func open(
+    /// or this close releases successfully.
+    package static func open(
         _ endpoint: MMEndpoint,
         configuration: MMClientConfiguration = MMClientConfiguration(),
         eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
@@ -241,42 +226,6 @@ public actor MMClientConnection {
             }
         )
         .map(\.connection)
-    }
-
-    /// Sugar over ``open(_:configuration:eventLoopGroup:logger:)`` for a
-    /// plain-value body — the whole connect → run → body → close → join
-    /// lifecycle in one call, nothing to leak, nothing to forget:
-    ///
-    /// ```swift
-    /// let reply = await MMClientConnection.with(.unix(path: socketPath)) { connection in
-    ///     await connection.call(Journal.append, on: notes, request)
-    /// }
-    /// ```
-    ///
-    /// The failure channel is the *connection*'s: `.failure` means connect
-    /// (bootstrap or hello) failed and `body` never ran, **or** the
-    /// connection did not survive the scope — the loop died of a transport
-    /// error or protocol violation while `body` ran (a clean EOF or the
-    /// bracket's own close is success). Per-call failures stay inside
-    /// `body`'s own value — typically a `Result` from `call`. For long-lived
-    /// daemons prefer `MMClientService` (its own product) in a `ServiceGroup`; the
-    /// bracket is the tool-and-test shape.
-    public static func with<Value: Sendable>(
-        _ endpoint: MMEndpoint,
-        configuration: MMClientConfiguration = MMClientConfiguration(),
-        eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
-        logger: Logger = Logger(label: "mm.client"),
-        _ body: @escaping @Sendable (MMClientConnection) async -> Value
-    ) async -> Result<Value, MMClientError> {
-        let withConnection = Self.open(
-            endpoint,
-            configuration: configuration,
-            eventLoopGroup: eventLoopGroup,
-            logger: logger
-        )
-        return await withConnection { connection in
-            .success(await body(connection))
-        }
     }
 
     private struct ConnectedPipeline: Sendable {
@@ -395,21 +344,25 @@ public actor MMClientConnection {
 
     // MARK: - Run (inbound loop)
 
-    /// The inbound loop; the host runs it as a structured child (see the type
-    /// docs). Consumes the channel's inbound stream, routes responses and
+    /// The inbound loop; the bracket's acquire starts it and its dispose
+    /// joins it. Consumes the channel's inbound stream, routes responses and
     /// stream frames to pending calls, and drops inbound requests (a server
     /// calling a client is a protocol violation in v1).
     ///
     /// Returns when the connection dies: `.success` for a clean end (EOF,
-    /// local ``close()``, or cancellation of this task — cancellation is the
+    /// local `close()`, or cancellation of this task — cancellation is the
     /// host dismantling its task tree, a deliberate stop, not a fault),
     /// `.failure` for transport errors and protocol violations. On every exit
     /// path, all pending calls have already been failed and ``state`` is
     /// `.closed` by the time this returns.
-    public func run() async -> Result<Void, MMClientError> {
+    ///
+    /// Runs once per connection: the bracket's acquire is its only caller,
+    /// so a second `run()` while the loop is live is programmer error and
+    /// traps.
+    package func run() async -> Result<Void, MMClientError> {
         switch self.lifecycle {
             case .running:
-                return .failure(.alreadyRunning)
+                preconditionFailure("run() called while the inbound loop is already running")
             case .finished:
                 // Closed before it ever ran: nothing to consume, clean end.
                 return .success(())
@@ -463,7 +416,7 @@ public actor MMClientConnection {
 
     /// The automatic schema verification verdict — replay-once: awaitable
     /// any number of times, from any task, resolving exactly once per
-    /// connection. Resolves shortly after ``run()`` starts (immediately when
+    /// connection. Resolves shortly after the bracket acquires (immediately when
     /// a complete expectation already matches the hello), and always
     /// resolves by the time the connection closes. Purely informational —
     /// see ``MMSchemaVerification``.
@@ -1222,9 +1175,10 @@ public actor MMClientConnection {
     /// channel is torn down here (finishing the writer) and the pending state
     /// failed directly, so no caller parks forever. There is no drain:
     /// in-flight calls fail with `.connectionClosed` — a caller wanting their
-    /// responses awaits them before closing. Every connected
-    /// `MMClientConnection` must eventually see `run()` or `close()`.
-    public func close() async {
+    /// responses awaits them before returning from the bracket body. The
+    /// bracket's dispose calls this, so every connected
+    /// `MMClientConnection` sees `run()` or `close()`.
+    package func close() async {
         switch self.lifecycle {
             case .running, .finished:
                 // run() owns (or owned) the scoped teardown; just signal.

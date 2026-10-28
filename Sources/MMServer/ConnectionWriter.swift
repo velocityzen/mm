@@ -40,7 +40,8 @@ actor ConnectionWriter: WriterFunnel {
 
     /// Encodes and writes one envelope. Encode failure never touches the
     /// channel; a write failure marks the writer closed so later sends
-    /// short-circuit with `.connectionClosed`.
+    /// short-circuit with `.connectionClosed` — unless the sender was
+    /// cancelled, which fails only that send.
     func send(_ envelope: MMEnvelope) async -> Result<Void, ServerError> {
         guard !self.closed else {
             return .failure(.connectionClosed)
@@ -51,13 +52,22 @@ actor ConnectionWriter: WriterFunnel {
             .flatMapAsync { @Sendable buffer in await self.write(buffer) }
     }
 
-    /// Seam adapter: the writer's untyped throw collapses to the coarse
-    /// transport case — the channel is gone either way, and the closed latch
-    /// makes every later send short-circuit.
+    /// Seam adapter: the writer's untyped throw splits in two. The NIO writer
+    /// throws `CancellationError` when the *sending task* is cancelled — a
+    /// handler torn down by a CANCEL or a stream violation, mid-write — and
+    /// then the frame was not written but the channel is fine, so only this
+    /// send fails. Any other throw means the channel is gone, and the closed
+    /// latch makes every later send short-circuit.
     private func write(_ buffer: ByteBuffer) async -> Result<Void, ServerError> {
         await Result.fromAsync { @Sendable in try await self.outbound.write(buffer) }
             .tap { self.framesOut.increment() }
-            .tapError { _ in self.closed = true }
-            .mapError { _ in ServerError.connectionClosed }
+            .mapError(Self.writeFailure)
+            .tapError { failure in
+                if failure == .connectionClosed { self.closed = true }
+            }
+    }
+
+    private static func writeFailure(_ error: any Error) -> ServerError {
+        error is CancellationError ? .cancelled : .connectionClosed
     }
 }

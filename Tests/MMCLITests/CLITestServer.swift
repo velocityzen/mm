@@ -5,7 +5,6 @@ import MMServer
 import MMTestSupport
 import MMWire
 import NIOCore
-import ServiceLifecycle
 
 @testable import MMCLI
 
@@ -129,17 +128,13 @@ private func cliTestACLs() -> [EntityName: EntityACL] {
 
 // MARK: - Server harness
 
-private func makeCLITestService(
-    socketPath: String,
-    onBind: @escaping @Sendable (SocketAddress) -> Void
-) -> MMService {
+private func makeCLITestService(socketPath: String) -> ServerRuntime {
     var logger = Logger(label: "mm.clitest.server")
     logger.logLevel = .warning
-    return MMService(
+    return ServerRuntime(
         configuration: MMServerConfiguration(endpoint: .unix(path: socketPath)),
         aclProvider: InMemoryACLProvider(cliTestACLs()),
-        logger: logger,
-        onBind: onBind
+        logger: logger
     ) {
         Handle(CLITestMethods.echo) { request, _ in
             .success(CLIEchoResponse(value: request.value, note: request.note))
@@ -187,24 +182,15 @@ private func makeCLITestService(
     }
 }
 
-/// Boots the test service on a fresh temp socket, waits (bounded) for the
-/// bind, hands `body` ready-made `MMCLIOptions` pointing at the socket, then
-/// triggers graceful shutdown and joins — the shared
-/// ``withServiceGroup(_:logger:ready:onBodyError:_:)`` choreography.
+/// Listens with the test service on a fresh temp socket, hands `body`
+/// ready-made `MMCLIOptions` pointing at the socket, then drains and joins —
+/// the shared ``withListeningServer(_:seconds:onBodyError:_:)`` choreography.
 @discardableResult
 func withCLIServer<T: Sendable>(
     _ body: @escaping @Sendable (MMCLIOptions) async throws -> T
 ) async throws -> T {
     try await withTempSocketPath(prefix: "mm-cli-") { path in
-        let (bound, boundContinuation) = AsyncStream<SocketAddress>.makeStream()
-        let service = makeCLITestService(socketPath: path) { address in
-            boundContinuation.yield(address)
-            boundContinuation.finish()
-        }
-        return try await withServiceGroup(
-            service,
-            ready: { _ = await bound.first(where: { _ in true }) }
-        ) { _ in
+        try await withListeningServer(makeCLITestService(socketPath: path)) { _ in
             // Parsed, not memberwise-constructed: ArgumentParser property
             // wrappers trap when read before a parse has populated them.
             let optionsForBody = try MMCLIOptions.parse(["--socket", path])
