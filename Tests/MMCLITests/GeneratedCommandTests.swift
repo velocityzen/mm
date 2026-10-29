@@ -55,6 +55,20 @@ enum Ledger: MethodNamespace {
     }
 }
 
+/// An optional positional: `retry [<id>]`, which mustn't lose its value to
+/// the omittable entity.
+enum Jobs: MethodNamespace {
+    #schema("jobs", description: "Background jobs.") {
+        CLI(.enabled)
+        Call("retry", description: "Retries one job, or every failed one") {
+            Access { .write }
+            Request {
+                Field("id", .optional(.string), description: "The job to retry", cli: .argument)
+            }
+        }
+    }
+}
+
 /// A description-less namespace: the group abstract falls back to the
 /// template and `namespaceDescription` stays the protocol default.
 enum Petty: MethodNamespace {
@@ -141,6 +155,23 @@ struct GeneratedCommandTests {
         ])
         #expect(command.line == "just a line")
         #expect(command.entity == nil)
+    }
+
+    @Test("an optional positional binds before the omittable entity")
+    func optionalPositionalBeforeEntity() throws {
+        // One bare value is the id, never the entity: the layout is
+        // `[<id>] [<entity>]`.
+        let one = try Jobs.RetryCommand.parse(["--socket", "/tmp/jobs.sock", "job-7"])
+        #expect(one.id == "job-7")
+        #expect(one.entity == nil)
+
+        let neither = try Jobs.RetryCommand.parse(["--socket", "/tmp/jobs.sock"])
+        #expect(neither.id == nil)
+        #expect(neither.entity == nil)
+
+        let both = try Jobs.RetryCommand.parse(["--socket", "/tmp/jobs.sock", "job-7", "jobs.main"])
+        #expect(both.id == "job-7")
+        #expect(both.entity == "jobs.main")
     }
 
     @Test("array fields are repeatable options defaulting to empty, never required")

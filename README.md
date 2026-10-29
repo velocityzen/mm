@@ -263,7 +263,7 @@ denied: journal.append on journal.system            # exit code 77
 
 **What `journal.notes` is, and why it is not in the schema.** Every call applies a verb to a noun. The schema declares verbs and payloads: `journal.append` needs `-w-` on its target and carries `{line}`. The nouns are **entities**: the runtime tree the daemon manages, declared server-side with ACLs (`Entity("journal") { Entity("notes"); Entity("system", owner: 0, mode: 0o700) }`, see [Authorization model](#authorization-model)). Compare syscalls and file paths: `/etc/passwd` is not in the syscall table, but `cat` needs a path. Adding or removing entities does not change the schema or the fingerprint. The same verb can be denied on another entity, as `journal.system` shows. In `mm journal add journal.notes`, the first `journal` is the command group (the method namespace). The entity path uses the same prefix only by convention (discovery filters methods by their prefix entity).
 
-Every command takes the entity as an optional positional, after any required positional fields (ArgumentParser fills positionals greedily). Request fields default to `--field-name` options. Positional style is opt-in: `Field("line", .string, cli: .argument)` gives `mm journal add "hello" journal.notes`, as in the runnable example in `Examples/`.
+Every command takes the entity as an optional positional, after any required or optional single-value positional fields (ArgumentParser fills positionals greedily, so `retry <id>` binds the id). Request fields default to `--field-name` options. Positional style is opt-in: `Field("line", .string, cli: .argument)` gives `mm journal add "hello" journal.notes`, as in the runnable example in `Examples/`.
 
 Output:
 

@@ -252,14 +252,14 @@ A top-level `CLI(.enabled)` entry in the schema block generates one swift-argume
 
 - Rename or omit commands with a `CLI(...)` part: `CLI(.command("add", aliases: ["append"]))`, `CLI(.omitted)`. The default name is the kebab-cased call name.
 - Shape arguments with `Field(..., cli:)`:
-  - `.argument`: positional. Required ones come before the omittable `<entity>`. Optional and array ones come after it.
+  - `.argument`: positional. Required and optional single-value ones come before the omittable `<entity>` (so `retry <id>` binds the id). Array ones come after it.
   - `.flag`: bools.
   - `.option("name", short: "n")`. `short: .auto` derives `-n` from the long name.
   - `.omitted`: optional fields only.
   - Unset: `--field-name` options. Wire enums become typed options (the `unknown` fallback is hidden and refused). Structure, map, and named-type fields take JSON literals.
   - `Field(..., default: <literal>)` on an optional field makes a hybrid option: bare `--format` uses the default, `--format yaml` parses, absent stays nil. Calendar/clock fields take `default: .now` (invocation time). Defaults are declaration metadata, never wire behavior.
 - The overlay is presentation-only. It is stored on `MethodDeclaration`, never forwarded to `MethodSignature`, so it cannot affect discovery, fingerprints, or compatibility.
-- Every command gets the shared connection options (`--socket`/`--tcp`, timeouts, `--output json|json-pretty|raw`), an optional `<entity>` positional (after any required positional fields), and sysexits-style exit codes (denied → 77, usage → 64, transport → 69, SIGINT → 130).
+- Every command gets the shared connection options (`--socket`/`--tcp`, timeouts, `--output json|json-pretty|raw`), an optional `<entity>` positional (after any single-value positional fields), and sysexits-style exit codes (denied → 77, usage → 64, transport → 69, SIGINT → 130).
 - The entity positional (`journal.notes`) never comes from the schema. The schema declares verbs and payload shapes. Entities are the daemon's runtime tree, declared server-side with ACLs (compare a syscall table with file paths). Never list entities in a contract. Never drop the entity argument from a command. It is optional at the call site: omitting it sends a root target. The server infers the target only if the route's `Accepts` names exactly one concrete entity. Other routes deny it.
 - Server-stream commands print elements as JSON lines (SIGINT = graceful STOP, second SIGINT = CANCEL). Client-stream commands read stdin lines (plain lines for single-string-field elements, otherwise JSON; EOF = END). Bidirectional does both.
 - `MMCLI` also ships `MMCLIDiscover` ("discover") and `MMCLIRawCall` ("call": any method by wire name, `--params` JSON, schema-driven) to mount beside generated groups.

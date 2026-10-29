@@ -1929,26 +1929,31 @@ private func commandDeclaration(
             "let requestValue = try MMCLIJSON.decodeRequired(\(requestType).self, from: requestJSON, option: \"request\")"
         )
     } else {
-        // Positional layout: required positional fields first, then the
-        // omittable entity, then optional/array positionals — ArgumentParser
-        // fills positionals greedily in declaration order, so a leading
-        // optional entity would starve required fields (`search "query"`
-        // must bind query, not entity). Options follow. Each group keeps
-        // field-declaration order.
+        // Positional layout: required positional fields, then optional
+        // single-value ones, then the omittable entity, then array
+        // positionals. ArgumentParser fills positionals greedily in
+        // declaration order, so an optional entity ahead of a field would take
+        // its value: `search "query"` must bind query and `retry <id>` must
+        // bind id, not entity. Arrays stay after the entity, since one takes
+        // every remaining value and would leave it unreachable. Options
+        // follow. Each group keeps field-declaration order.
         let requiredPositionals = fields.filter {
             isPositional($0) && positionalIsRequired($0)
         }
-        let trailingPositionals = fields.filter {
-            isPositional($0) && !positionalIsRequired($0)
+        let optionalPositionals = fields.filter {
+            isPositional($0) && !positionalIsRequired($0) && !positionalIsVariadic($0)
+        }
+        let variadicPositionals = fields.filter {
+            isPositional($0) && positionalIsVariadic($0)
         }
         let optionFields = fields.filter { !isPositional($0) }
-        for field in requiredPositionals {
+        for field in requiredPositionals + optionalPositionals {
             emitField(
                 field, call: call, enumNames: enumNames,
                 lines: &lines, preludes: &preludes)
         }
         lines.append(entityProperty)
-        for field in trailingPositionals + optionFields {
+        for field in variadicPositionals + optionFields {
             emitField(
                 field, call: call, enumNames: enumNames,
                 lines: &lines, preludes: &preludes)
@@ -2069,11 +2074,20 @@ private func isPositional(_ field: ParsedField) -> Bool {
 }
 
 /// Whether a positional field must be supplied: optional fields parse to nil
-/// and array fields default to empty, so both may trail the omittable entity.
+/// and array fields default to empty.
 private func positionalIsRequired(_ field: ParsedField) -> Bool {
     switch field.type {
         case .optional, .array: return false
         default: return true
+    }
+}
+
+/// Whether a positional field takes every remaining value: an array,
+/// optional or not.
+private func positionalIsVariadic(_ field: ParsedField) -> Bool {
+    switch field.type {
+        case .array, .optional(.array): return true
+        default: return false
     }
 }
 
