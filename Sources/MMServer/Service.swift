@@ -392,13 +392,22 @@ package struct ServerRuntime: Sendable {
         let serverHello = self.serverHello
         let violations = self.metrics.protocolViolations
         return channel.eventLoop.makeCompletedFuture {
-            try Self.configureChildPipeline(
+            let connection = try Self.configureChildPipeline(
                 channel: channel,
                 maxFrameLength: maxFrameLength,
                 idleTimeout: idleTimeout,
                 serverHello: serverHello,
                 protocolViolations: violations
             )
+            // NIO drops a connection whose initializer completes after the
+            // listener closed (apple/swift-nio#2637), and releasing a wrapper
+            // with an unfinished writer traps. Hold it until the channel has
+            // closed, which finishes the writer; the peer or the idle timeout
+            // closes a dropped one.
+            channel.closeFuture.whenComplete { _ in
+                withExtendedLifetime(connection) {}
+            }
+            return connection
         }
     }
 

@@ -603,6 +603,33 @@ struct ServerIntegrationTests {
         }
     }
 
+    @Test("a connection NIO drops while the listener closes does not trap")
+    func connectsRacingListenerClose() async throws {
+        // A connection accepted while the listener closes reaches NIO after
+        // the accept stream finished; NIO then drops it, and its outbound
+        // writer must not trap on deinit. Several rounds and connectors widen
+        // the window — CI on Linux hit it from one connector.
+        for _ in 0..<20 {
+            try await withTempSocketPath { path in
+                let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+                try await withThrowingTaskGroup(of: Void.self) { tasks in
+                    tasks.addTask {
+                        // Returning at once starts the drain while the
+                        // connectors below are still connecting.
+                        try await withRunningServer(server) { _ in }
+                    }
+                    for _ in 0..<4 {
+                        tasks.addTask {
+                            _ = try await server.bound.wait()
+                            try await expectConnectRefused(unixPath: path)
+                        }
+                    }
+                    try await tasks.waitForAll()
+                }
+            }
+        }
+    }
+
     @Test("a stale socket file from a dead server is replaced at startup")
     func staleSocketReplaced() async throws {
         try await withTempSocketPath { path in
