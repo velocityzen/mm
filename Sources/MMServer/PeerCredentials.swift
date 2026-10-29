@@ -1,6 +1,6 @@
+import FP
 import MMSchema
 import NIOCore
-import NIOPosix
 
 #if canImport(Darwin)
 import Darwin
@@ -50,66 +50,23 @@ enum PeerCredentials {
         )
     }
 
-    /// Extracts the supplementary group ids from the `Groups:` line of a
-    /// Linux `/proc/<pid>/status` file.
+    /// The peer's supplementary groups from a zero-filled `SO_PEERGROUPS`
+    /// buffer.
     ///
-    /// Parses defensively: the first line starting with `Groups:` wins,
-    /// tokens are split on spaces/tabs, non-numeric or out-of-range tokens are
-    /// skipped rather than failing, and a missing line yields the empty list
-    /// (fewer groups can only ever *deny* access, so parse failures fail
-    /// closed).
-    static func supplementaryGroups(fromProcStatus text: Substring) -> [gid_t] {
-        // Note "\r\n" is a single Character (grapheme cluster), so it must be
-        // its own separator case — splitting on "\n" alone would not split
-        // CRLF-terminated lines.
-        let lines = text.split(
-            omittingEmptySubsequences: true,
-            whereSeparator: { $0 == "\n" || $0 == "\r" || $0 == "\r\n" }
-        )
-        for line in lines {
-            guard line.hasPrefix("Groups:") else { continue }
-            var groups: [gid_t] = []
-            for token in line.dropFirst("Groups:".count)
-                .split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\r" })
-            {
-                if let value = UInt32(token) {
-                    groups.append(gid_t(value))
-                }
-            }
-            return groups
+    /// The kernel writes its `n` groups to the front of the buffer and
+    /// reports `n` only through the option length, which NIO's
+    /// `unsafeGetSocketOption` does not return; NIO zero-fills the buffer
+    /// first. So everything up to the last nonzero slot is the list, and the
+    /// zero tail is padding. A real gid 0 at the very end of the list cannot
+    /// be told from padding and is dropped, which only ever denies access.
+    /// The kernel keeps the list sorted, so outside user-namespace remapping
+    /// a gid 0 comes first and is lost only when it is the peer's sole
+    /// supplementary group.
+    static func supplementaryGroups(fromPeerGroups slots: [gid_t]) -> [gid_t] {
+        guard let last = slots.lastIndex(where: { $0 != 0 }) else {
+            return []
         }
-        return []
-    }
-
-    /// Reads a (seekless, procfs-style) file to EOF into memory, `hardCap`
-    /// bounded. Returns nil — never a partial buffer — when EOF was not
-    /// reached within the cap or a read failed.
-    ///
-    /// Truncation must be a hard failure here, not a shorter result: cutting
-    /// a `Groups:` token mid-digits would fabricate a *different, valid* gid
-    /// ("412345" truncated to "4123") and grant supplementary-group access
-    /// the peer does not hold. Failing closed to "no data" only ever denies.
-    ///
-    /// Blocking — call on the thread pool only. Platform-independent so the
-    /// boundary behavior is unit-testable everywhere.
-    static func readToEnd(descriptor: CInt, hardCap: Int) -> [UInt8]? {
-        var bytes: [UInt8] = []
-        var chunk = [UInt8](repeating: 0, count: 64 * 1024)
-        while bytes.count <= hardCap {
-            let readCount = chunk.withUnsafeMutableBytes { raw in
-                read(descriptor, raw.baseAddress, raw.count)
-            }
-            if readCount > 0 {
-                bytes.append(contentsOf: chunk[0..<readCount])
-            } else if readCount == 0 {
-                return bytes  // EOF within the cap: complete.
-            } else if errno == EINTR {
-                continue
-            } else {
-                return nil  // Read error: fail closed.
-            }
-        }
-        return nil  // Cap exceeded before EOF: fail closed.
+        return Array(slots[...last])
     }
 
     // MARK: - Capture at accept
@@ -119,28 +76,27 @@ enum PeerCredentials {
     /// `xucred` (effective uid + up to 16 groups, first is the egid) and
     /// `getsockopt(SOL_LOCAL, LOCAL_PEERPID)` for the peer pid, both read
     /// on the channel's event loop through NIO's `SocketOptionProvider`
-    /// unsafe accessors. No file IO on this platform, so `threadPool` is
-    /// unused here (the parameter exists for the shared cross-platform
-    /// call site).
+    /// unsafe accessors.
     static func captureUnixPeer(
-        channel: any Channel,
-        threadPool: NIOThreadPool
+        channel: any Channel
     ) async -> Result<PeerIdentity, PeerCredentialsError> {
-        guard let provider = channel as? any SocketOptionProvider else {
-            return .failure(.unsupportedChannel)
-        }
-        do {
-            let credentials: xucred = try await provider.unsafeGetSocketOption(
-                level: SocketOptionLevel(SOL_LOCAL),
-                name: SocketOptionName(LOCAL_PEERCRED)
-            ).get()
-            let pid: pid_t = try await provider.unsafeGetSocketOption(
-                level: SocketOptionLevel(SOL_LOCAL),
-                name: SocketOptionName(LOCAL_PEERPID)
-            ).get()
-            return .success(Self.identity(fromXucred: credentials, pid: pid))
-        } catch {
-            return .failure(.syscallFailed(description: String(describing: error)))
+        await Result.fromOptional(
+            channel as? any SocketOptionProvider,
+            error: PeerCredentialsError.unsupportedChannel
+        )
+        .flatMapAsync { provider in
+            await Result.fromAsync {
+                let credentials: xucred = try await provider.unsafeGetSocketOption(
+                    level: SocketOptionLevel(SOL_LOCAL),
+                    name: SocketOptionName(LOCAL_PEERCRED)
+                ).get()
+                let pid: pid_t = try await provider.unsafeGetSocketOption(
+                    level: SocketOptionLevel(SOL_LOCAL),
+                    name: SocketOptionName(LOCAL_PEERPID)
+                ).get()
+                return Self.identity(fromXucred: credentials, pid: pid)
+            }
+            .mapError { .syscallFailed(description: String(describing: $0)) }
         }
     }
 
@@ -169,68 +125,55 @@ enum PeerCredentials {
         var gid: gid_t
     }
 
+    /// Room for the peer's supplementary groups. A peer in more groups makes
+    /// `SO_PEERGROUPS` fail with `ERANGE`; it is then captured with no
+    /// supplementary groups, which only ever denies access.
+    typealias PeerGroups = InlineArray<256, gid_t>
+
     /// Linux capture path: `getsockopt(SOL_SOCKET, SO_PEERCRED)` for
-    /// `ucred{pid, uid, gid}` (read on the event loop through NIO's
-    /// `SocketOptionProvider` unsafe accessors), then one bounded read of
-    /// `/proc/<pid>/status` on `NIOThreadPool.runIfActive` (it is file IO)
-    /// for the supplementary `Groups:` line.
-    ///
-    /// TOCTOU caveat: the uid/gid in `ucred` are kernel-attested from the
-    /// socket itself and race-free, but the pid → `/proc` lookup is not —
-    /// the peer can exit between `SO_PEERCRED` and the `/proc` read, and
-    /// the pid can be reused by an unrelated process, in which case the
-    /// *supplementary* groups read here belong to the reusing process.
-    /// The primary uid/gid (the strongest identity inputs) are never
-    /// affected; a failed or empty `/proc` read yields no supplementary
-    /// groups, which only ever denies access.
+    /// `ucred{pid, uid, gid}` and `getsockopt(SOL_SOCKET, SO_PEERGROUPS)`
+    /// (Linux 4.13+) for the supplementary groups, both read on the event
+    /// loop through NIO's `SocketOptionProvider` unsafe accessors. Both come
+    /// from the credentials the kernel recorded when the peer connected, so
+    /// they describe the same process and cannot race its exit or a pid
+    /// reuse.
     static func captureUnixPeer(
-        channel: any Channel,
-        threadPool: NIOThreadPool
+        channel: any Channel
     ) async -> Result<PeerIdentity, PeerCredentialsError> {
-        guard let provider = channel as? any SocketOptionProvider else {
-            return .failure(.unsupportedChannel)
-        }
-        do {
-            let credentials: PeerUcred = try await provider.unsafeGetSocketOption(
-                level: SocketOptionLevel(SOL_SOCKET),
-                name: SocketOptionName(SO_PEERCRED)
-            ).get()
-            let primaryGid = credentials.gid
-            let supplementary = try await threadPool.runIfActive {
-                Self.readProcStatusSupplementaryGroups(pid: credentials.pid)
-                    .filter { $0 != primaryGid }
-            }
-            return .success(
-                PeerIdentity(
+        await Result.fromOptional(
+            channel as? any SocketOptionProvider,
+            error: PeerCredentialsError.unsupportedChannel
+        )
+        .flatMapAsync { provider in
+            await Result.fromAsync {
+                let credentials: PeerUcred = try await provider.unsafeGetSocketOption(
+                    level: SocketOptionLevel(SOL_SOCKET),
+                    name: SocketOptionName(SO_PEERCRED)
+                ).get()
+                let supplementary = try await Self.peerGroups(provider)
+                return PeerIdentity(
                     uid: credentials.uid,
                     gid: credentials.gid,
-                    supplementaryGroups: supplementary,
+                    supplementaryGroups: supplementary.filter { $0 != credentials.gid },
                     pid: credentials.pid
                 )
-            )
-        } catch {
-            return .failure(.syscallFailed(description: String(describing: error)))
+            }
+            .mapError { .syscallFailed(description: String(describing: $0)) }
         }
     }
 
-    /// Blocking, bounded read of `/proc/<pid>/status` — call on the thread
-    /// pool only. Reads the whole file (never a truncated prefix — see
-    /// ``readToEnd(descriptor:hardCap:)`` for why truncation must fail
-    /// closed rather than parse) and fails closed to the empty list on
-    /// any error. The 4 MiB cap is generous headroom: `NGROUPS_MAX` is
-    /// 65536 on Linux, so the `Groups:` line alone can approach ~720 KiB
-    /// in pathological group-membership setups.
-    static func readProcStatusSupplementaryGroups(pid: pid_t) -> [gid_t] {
-        let descriptor = open("/proc/\(pid)/status", O_RDONLY)
-        guard descriptor >= 0 else { return [] }
-        defer { close(descriptor) }
-        guard
-            let bytes = Self.readToEnd(descriptor: descriptor, hardCap: 4 * 1024 * 1024)
-        else {
+    /// The peer's supplementary groups via `SO_PEERGROUPS`; none when they
+    /// do not fit in ``PeerGroups`` (`ERANGE`).
+    static func peerGroups(_ provider: any SocketOptionProvider) async throws -> [gid_t] {
+        do {
+            let slots: PeerGroups = try await provider.unsafeGetSocketOption(
+                level: SocketOptionLevel(SOL_SOCKET),
+                name: SocketOptionName(SO_PEERGROUPS)
+            ).get()
+            return Self.supplementaryGroups(fromPeerGroups: slots.indices.map { slots[$0] })
+        } catch let error as IOError where error.errnoCode == ERANGE {
             return []
         }
-        let text = String(decoding: bytes, as: UTF8.self)
-        return Self.supplementaryGroups(fromProcStatus: text[...])
     }
     #endif
 }

@@ -109,9 +109,8 @@ extension BracketAsync where R == SocketAddress, E == MMServiceError {
     ///     ``Router/init(namespaces:sharedTypes:aclProvider:logger:registerBuiltins:routes:)``).
     ///   - aclProvider: The host's ACL source, consulted per dispatch.
     ///   - eventLoopGroup: NIO event loops; defaults to the process singleton.
-    ///   - threadPool: Used for startup socket syscalls and (on Linux) the
-    ///     one-time `/proc` supplementary-groups read; defaults to the process
-    ///     singleton.
+    ///   - threadPool: Used for startup socket syscalls; defaults to the
+    ///     process singleton.
     ///   - logger: Base logger; per-connection ids ride in metadata.
     ///   - routes: The application's routes, built with `Handle`.
     public init(
@@ -599,10 +598,7 @@ package struct ServerRuntime: Sendable {
                 case .tcp:
                     peer = .anonymous
                 case .unix:
-                    switch await PeerCredentials.captureUnixPeer(
-                        channel: connection.channel,
-                        threadPool: self.threadPool
-                    ) {
+                    switch await PeerCredentials.captureUnixPeer(channel: connection.channel) {
                         case .success(let identity):
                             peer = identity
                         case .failure(let error):

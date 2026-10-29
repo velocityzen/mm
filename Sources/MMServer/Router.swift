@@ -519,31 +519,32 @@ public struct Router: Sendable {
                 }
 
                 // (4) Traversal: x on every ancestor prefix, outermost first.
-                for ancestor in entity.ancestors {
-                    if case .failure(let error) = await self.requireAccess(
-                        .execute,
-                        on: ancestor,
-                        context: context,
-                        method: method
-                    ) {
-                        return .failure(error)
+                return await entity.ancestors
+                    .traverseAsync { ancestor in
+                        await self.requireAccess(
+                            .execute,
+                            on: ancestor,
+                            context: context,
+                            method: method
+                        )
                     }
-                }
+                    .flatMapAsync { _ -> Result<Void, MMError> in
+                        // (5) Target check. Root is "the whole tree" and
+                        // carries no ACL, so there is nothing to check here —
+                        // root only reaches this point on an opted-in route
+                        // (see the root gate above).
+                        if entity.isRoot {
+                            return .success(())
+                        }
 
-                // (5) Target check. Root is "the whole tree" and carries no
-                // ACL, so there is nothing to check here — root only reaches
-                // this point on an opted-in route (see the root gate above).
-                if !entity.isRoot {
-                    if case .failure(let error) = await self.requireAccess(
-                        route.access,
-                        on: entity,
-                        context: context,
-                        method: method
-                    ) {
-                        return .failure(error)
+                        return await self.requireAccess(
+                            route.access,
+                            on: entity,
+                            context: context,
+                            method: method
+                        )
                     }
-                }
-                return .success(entity)
+                    .as(entity)
             }
     }
 
@@ -698,49 +699,68 @@ public struct Router: Sendable {
         provider: any EntityACLProvider,
         logger: Logger
     ) async -> Result<SchemaResponse, MMError> {
-        // Per-request memo only; the router holds no cross-request ACL cache.
-        var aclByEntity: [EntityName: EntityACL?] = [:]
-        var visible: [MethodSignature] = []
-        for signature in signatures {
+        // The in-scope methods, each with the chain it needs `.execute` on:
+        // every ancestor of its prefix, then the prefix itself (a root
+        // prefix has no chain).
+        let candidates = signatures.compactMap {
+            signature -> (signature: MethodSignature, chain: [EntityName])? in
             guard let prefix = prefixByName[signature.name] else {
-                continue  // Unreachable: every registered name has a prefix.
+                return nil  // Unreachable: every registered name has a prefix.
             }
-            if !scope.isRoot {
-                guard prefix == scope || prefix.isDescendant(of: scope) else {
-                    continue
-                }
+            guard scope.isRoot || prefix == scope || prefix.isDescendant(of: scope) else {
+                return nil
             }
-            var reachable = true
-            for step in prefix.ancestors + (prefix.isRoot ? [] : [prefix]) {
-                let acl: EntityACL?
-                if let memoized = aclByEntity[step] {
-                    acl = memoized
-                } else {
-                    switch await provider.acl(for: step) {
-                        case .failure(let error):
-                            return .failure(
-                                Self.aclProviderFailed(
-                                    error,
-                                    method: "server.schema",
-                                    entity: step,
-                                    connection: nil,
-                                    logger: logger
-                                )
-                            )
-                        case .success(let resolved):
-                            aclByEntity[step] = resolved
-                            acl = resolved
-                    }
-                }
-                guard let acl, acl.permitted(for: peer, .execute) else {
-                    reachable = false
-                    break
-                }
-            }
-            if reachable {
-                visible.append(signature)
-            }
+            return (signature, prefix.ancestors + (prefix.isRoot ? [] : [prefix]))
         }
+        // One lookup per distinct entity, in first-use order, for this
+        // request only: the router holds no cross-request ACL cache.
+        var seen: Set<EntityName> = []
+        let steps = candidates.flatMap(\.chain).filter { seen.insert($0).inserted }
+        return await steps
+            .traverseAsync { step in
+                await provider.acl(for: step)
+                    .map { acl in acl.map { (step, $0) } }
+                    .mapError { error in
+                        Self.aclProviderFailed(
+                            error,
+                            method: "server.schema",
+                            entity: step,
+                            connection: nil,
+                            logger: logger
+                        )
+                    }
+            }
+            .map { resolved in
+                // A step with no ACL record denies, like a denying one.
+                let aclByEntity = Dictionary(uniqueKeysWithValues: resolved.compact())
+                let visible = candidates
+                    .filter { candidate in
+                        candidate.chain.allSatisfy { step in
+                            aclByEntity[step]?.permitted(for: peer, .execute) ?? false
+                        }
+                    }
+                    .map(\.signature)
+                return Self.schemaResponse(
+                    visible: visible,
+                    namespaceSignatures: namespaceSignatures,
+                    prefixByName: prefixByName,
+                    types: types,
+                    typesByName: typesByName,
+                    fingerprint: fingerprint
+                )
+            }
+    }
+
+    /// The `server.schema` response for the methods a peer can see, plus the
+    /// types and namespaces they bring with them.
+    private static func schemaResponse(
+        visible: [MethodSignature],
+        namespaceSignatures: [NamespaceSignature],
+        prefixByName: [String: EntityName],
+        types: [TypeDefinition],
+        typesByName: [String: TypeDefinition],
+        fingerprint: UInt64
+    ) -> SchemaResponse {
         // Types reachable from the visible methods, chased transitively
         // through the definitions themselves (a struct definition may
         // reference further named types). Startup validated resolvability,
@@ -766,13 +786,11 @@ public struct Router: Sendable {
         let visibleNamespaces = namespaceSignatures.filter {
             visiblePrefixes.contains($0.name)
         }
-        return .success(
-            SchemaResponse(
-                fingerprint: fingerprint,
-                methods: visible,
-                types: visibleTypes,
-                namespaces: visibleNamespaces
-            )
+        return SchemaResponse(
+            fingerprint: fingerprint,
+            methods: visible,
+            types: visibleTypes,
+            namespaces: visibleNamespaces
         )
     }
 

@@ -1,4 +1,3 @@
-import Foundation  // Tests only: mkstemp template under NSTemporaryDirectory().
 import MMSchema
 import MMTestSupport
 import Testing
@@ -75,101 +74,32 @@ struct PeerCredentialsTests {
     }
     #endif
 
-    // MARK: - /proc/<pid>/status Groups: line (pure, runs on every platform)
+    // MARK: - SO_PEERGROUPS slots (pure, runs on every platform)
 
-    @Test("parses a canned Groups line with tab and trailing space")
-    func procStatusGroupsLine() {
-        let status = """
-            Name:\tmm-daemon
-            Umask:\t0022
-            State:\tS (sleeping)
-            Pid:\t4242
-            Uid:\t1000\t1000\t1000\t1000
-            Gid:\t1000\t1000\t1000\t1000
-            Groups:\t4 24 27 30 46 1000 \r
-            VmPeak:\t  168124 kB
-            """
-        let groups = PeerCredentials.supplementaryGroups(fromProcStatus: status[...])
-        #expect(groups == [4, 24, 27, 30, 46, 1000])
-    }
-
-    @Test("empty Groups line yields no groups")
-    func emptyGroupsLine() {
-        let status = "Pid:\t1\nGroups:\t \nSeccomp:\t0\n"
-        #expect(PeerCredentials.supplementaryGroups(fromProcStatus: status[...]) == [])
-    }
-
-    @Test("missing Groups line fails closed to no groups")
-    func missingGroupsLine() {
-        let status = "Name:\tinit\nPid:\t1\n"
-        #expect(PeerCredentials.supplementaryGroups(fromProcStatus: status[...]) == [])
-    }
-
-    @Test("garbage tokens are skipped, valid ids kept")
-    func garbageTokensSkipped() {
-        let status = "Groups:\t12 abc -5 4294967295 99999999999999999999 61\n"
+    @Test("the zero tail of the peer-groups buffer is padding")
+    func peerGroupsPaddingTrimmed() {
         #expect(
-            PeerCredentials.supplementaryGroups(fromProcStatus: status[...])
-                == [12, gid_t.max, 61]
+            PeerCredentials.supplementaryGroups(fromPeerGroups: [4, 24, 27, 1000, 0, 0, 0])
+                == [4, 24, 27, 1000]
         )
     }
 
-    @Test("only the first Groups line is honored")
-    func firstGroupsLineWins() {
-        let status = "Groups:\t1 2\nGroups:\t3 4\n"
-        #expect(PeerCredentials.supplementaryGroups(fromProcStatus: status[...]) == [1, 2])
+    @Test("a leading gid 0 followed by other groups is kept")
+    func peerGroupsLeadingRootGroupKept() {
+        #expect(
+            PeerCredentials.supplementaryGroups(fromPeerGroups: [0, 4, 24, 0, 0]) == [0, 4, 24]
+        )
     }
 
-    // MARK: - readToEnd boundaries (pure POSIX, runs on every platform)
+    @Test("an all-zero buffer yields no groups, failing closed on a sole gid 0")
+    func peerGroupsAllZero() {
+        #expect(PeerCredentials.supplementaryGroups(fromPeerGroups: [0, 0, 0]) == [])
+        #expect(PeerCredentials.supplementaryGroups(fromPeerGroups: []) == [])
+    }
 
-    /// A `Groups:` line can legitimately exceed 64 KiB (`NGROUPS_MAX` is 65536
-    /// on Linux). The read must reach EOF — a truncated read that cuts a gid
-    /// token mid-digits would fabricate a *different, valid* gid and grant
-    /// group access the peer does not hold — and must fail closed (nil, never
-    /// a partial buffer) when EOF is not reached within the cap.
-    @Test("readToEnd reads past 64 KiB to EOF, and fails closed over the cap")
-    func readToEndBoundaries() throws {
-        var content = "Name:\tmm\nGroups:\t"
-        for gid in 100_000..<110_000 {
-            content += "\(gid) "
-        }
-        content += "\n"
-        let contentBytes = Array(content.utf8)
-        #expect(contentBytes.count > 64 * 1024)
-
-        var template = Array((NSTemporaryDirectory() + "mm-status-XXXXXX").utf8CString)
-        let descriptor = template.withUnsafeMutableBufferPointer { buffer in
-            mkstemp(buffer.baseAddress!)
-        }
-        #expect(descriptor >= 0)
-        defer {
-            close(descriptor)
-            template.withUnsafeBufferPointer { _ = unlink($0.baseAddress!) }
-        }
-        var written = 0
-        while written < contentBytes.count {
-            let count = contentBytes.withUnsafeBytes { raw in
-                write(descriptor, raw.baseAddress! + written, raw.count - written)
-            }
-            #expect(count > 0)
-            written += count
-        }
-
-        // Whole file within the cap: byte-exact, and every gid parses.
-        #expect(lseek(descriptor, 0, SEEK_SET) == 0)
-        let bytes = try #require(
-            PeerCredentials.readToEnd(descriptor: descriptor, hardCap: 4 * 1024 * 1024)
-        )
-        #expect(bytes == contentBytes)
-        let text = String(decoding: bytes, as: UTF8.self)
-        let groups = PeerCredentials.supplementaryGroups(fromProcStatus: text[...])
-        #expect(groups.count == 10_000)
-        #expect(groups.first == 100_000)
-        #expect(groups.last == 109_999)
-
-        // EOF not reached within the cap: nil, never a truncated prefix that
-        // would parse "412345" as gid 4123.
-        #expect(lseek(descriptor, 0, SEEK_SET) == 0)
-        #expect(PeerCredentials.readToEnd(descriptor: descriptor, hardCap: 64 * 1024) == nil)
+    @Test("a full buffer has no padding to trim")
+    func peerGroupsFullBuffer() {
+        let full = (1...256).map { gid_t($0) }
+        #expect(PeerCredentials.supplementaryGroups(fromPeerGroups: full) == full)
     }
 }

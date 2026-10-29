@@ -1,3 +1,4 @@
+import FP
 import MMSchema
 
 extension MMClientConnection {
@@ -19,33 +20,27 @@ extension MMClientConnection {
         _ contracts: [SchemaDeclaration],
         sharing sharedTypes: [TypeNamespaceDeclaration] = []
     ) async -> Result<[SchemaDifference], MMCallError> {
-        var differences: [SchemaDifference] = []
-        for contract in contracts {
-            let scope: EntityName
-            switch EntityName.parse(contract.namespace) {
-                case .success(let parsed):
-                    scope = parsed
-                case .failure(let error):
-                    // Unreachable: Schema(...) preconditions its namespace to
-                    // be a valid non-root entity path at declaration time.
-                    preconditionFailure(
-                        "verifyContracts: contract namespace '\(contract.namespace)' is not an entity path: \(error)"
-                    )
-            }
-            switch await self.discoverSchema(scope: scope) {
-                case .failure(let error):
-                    return .failure(error)
-                case .success(let response):
+        await contracts.compactMapAsync { contract in
+            await self.discoverSchema(scope: Self.scope(of: contract))
+                .map { response in
                     let difference = SchemaDifference(
                         local: contract.signatures,
                         localTypes: contract.types(sharing: sharedTypes),
                         remote: response
                     )
-                    if !difference.isEmpty {
-                        differences.append(difference)
-                    }
-            }
+                    return difference.isEmpty ? nil : difference
+                }
         }
-        return .success(differences)
+    }
+
+    /// The contract's namespace as the discovery scope.
+    private static func scope(of contract: SchemaDeclaration) -> EntityName {
+        EntityName.parse(contract.namespace).getOrElse { error in
+            // Unreachable: Schema(...) preconditions its namespace to be a
+            // valid non-root entity path at declaration time.
+            preconditionFailure(
+                "verifyContracts: contract namespace '\(contract.namespace)' is not an entity path: \(error)"
+            )
+        }
     }
 }

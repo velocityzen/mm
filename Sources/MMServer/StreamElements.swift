@@ -201,23 +201,17 @@ final class MMRequestStreamSource<Element: Codable & Sendable>: Sendable {
     /// stream violation surfaced to the caller (which sends the code-6
     /// terminal); the element is dropped.
     func deliver(_ item: ByteBuffer) -> Result<Void, MMWireError> {
-        let decoded: Element
-        switch MMPackDecoder().decode(Element.self, from: item) {
-            case .failure(let error):
-                return .failure(error)
-            case .success(let value):
-                decoded = value
+        MMPackDecoder().decode(Element.self, from: item).map { decoded in
+            let source = self.state.withLockedValue { state -> Source? in
+                guard !state.terminated, let source = state.source else { return nil }
+                state.clientCredit &-= 1
+                return source
+            }
+            guard let source else { return }
+            self.metrics.itemsIn.increment()
+            // Yield outside the lock; the source is internally synchronized.
+            _ = source.yield(decoded)
         }
-        let source = self.state.withLockedValue { state -> Source? in
-            guard !state.terminated, let source = state.source else { return nil }
-            state.clientCredit &-= 1
-            return source
-        }
-        guard let source else { return .success(()) }
-        self.metrics.itemsIn.increment()
-        // Yield outside the lock; the source is internally synchronized.
-        _ = source.yield(decoded)
-        return .success(())
     }
 
     /// Client END for the request direction: finish the sequence cleanly

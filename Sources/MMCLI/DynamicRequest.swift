@@ -67,27 +67,15 @@ public struct MMCLIDynamicRequest: Codable, Sendable {
         schema: TypeSchema, definitions: [TypeDefinition], json: MMCLIDynamicTree
     ) throws {
         let resolver = TypeResolver(definitions)
-        let resolved: TypeSchema
-        switch resolver.resolve(schema) {
-            case .success(let followed):
-                resolved = followed
-            case .failure(.unresolved(let name)):
-                throw ValidationError("params: unresolved type reference '\(name)'")
-            case .failure(.cycle(let name)):
-                throw ValidationError("params: cyclic type reference '\(name)'")
-        }
+        let resolved = try resolver.resolve(schema).mapError(Self.validationError(for:)).get()
         guard case .structure = resolved else {
             throw ValidationError(
                 "params: the request schema is not a structure (got \(Self.describe(resolved)))"
             )
         }
-        let canonical: SchemaValue
-        switch json.validated(against: resolved, resolver: resolver, path: "params") {
-            case .success(let value):
-                canonical = value
-            case .failure(let error):
-                throw ValidationError(error.description)
-        }
+        let canonical = try json.validated(against: resolved, resolver: resolver, path: "params")
+            .mapError { ValidationError($0.description) }
+            .get()
         // `validated` passes `.unknown` slots through untouched, but a wire
         // encoder cannot invent a shape for them — refuse up front, as a
         // usage error, exactly where the old walker did.
@@ -95,6 +83,16 @@ public struct MMCLIDynamicRequest: Codable, Sendable {
         self.schema = resolved
         self.canonical = canonical
         self.resolver = resolver
+    }
+
+    /// The usage error for a request schema that does not resolve.
+    private static func validationError(for failure: TypeResolutionFailure) -> ValidationError {
+        switch failure {
+            case .unresolved(let name):
+                return ValidationError("params: unresolved type reference '\(name)'")
+            case .cycle(let name):
+                return ValidationError("params: cyclic type reference '\(name)'")
+        }
     }
 
     public func encode(to encoder: any Encoder) throws {
