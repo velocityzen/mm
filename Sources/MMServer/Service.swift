@@ -663,6 +663,37 @@ package struct ServerRuntime: Sendable {
                 context: context,
                 logger: logger
             )
+            // executeThenClose closes the channel fully once this body
+            // returns, and a full close discards what the kernel has not
+            // taken yet: a slow reader would lose the tail of the last
+            // responses, the drain's included.
+            await Self.flushPendingWrites(connection.channel)
+        }
+    }
+
+    /// Returns once every write queued so far has reached the kernel, or the
+    /// channel has closed. An empty buffer written from the idle handler's
+    /// context (the head of the pipeline, so it skips the frame encoder)
+    /// queues behind them, and NIO completes writes in order. A reader that
+    /// never drains is bounded by the idle timeout, which closes the channel;
+    /// cancellation closes it at once.
+    static func flushPendingWrites(_ channel: any Channel) async {
+        let flushed = channel.eventLoop.flatSubmit {
+            let promise = channel.eventLoop.makePromise(of: Void.self)
+            do {
+                try channel.pipeline.syncOperations
+                    .context(handlerType: IdleStateHandler.self)
+                    .writeAndFlush(NIOAny(ByteBuffer()), promise: promise)
+            } catch {
+                // The pipeline is already torn down: nothing is left to flush.
+                promise.succeed(())
+            }
+            return promise.futureResult
+        }
+        await withTaskCancellationHandler {
+            _ = try? await flushed.get()
+        } onCancel: {
+            channel.close(promise: nil)
         }
     }
 
