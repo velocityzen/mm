@@ -65,6 +65,36 @@ public struct MMCLIOutput: Sendable {
         }
     }
 
+    /// Renders one element of a stream. Above the first one, under
+    /// ``OutputFormat/text``, goes its formatter's header, if it has one (see
+    /// ``Format(_:header:_:)``).
+    public static func renderStreamElement<T: Encodable>(
+        _ value: T,
+        format: OutputFormat,
+        first: Bool
+    ) throws -> String {
+        let rendered = try Self.render(value, format: format)
+        guard first,
+            format == .text,
+            let header = MMCLIDefaults.current.formatters.header(for: T.self)
+        else {
+            return rendered
+        }
+
+        return header + "\n" + rendered
+    }
+
+    /// ``emit(_:format:)`` for one element of a stream, with its header above
+    /// the first (see ``renderStreamElement(_:format:first:)``).
+    public static func emitStreamElement<T: Encodable>(_ value: T, format: OutputFormat, first: Bool) {
+        do {
+            let rendered = try Self.renderStreamElement(value, format: format, first: first)
+            Self.write(rendered + "\n", to: .standardOutput)
+        } catch {
+            Self.note("output encoding failed: \(error)")
+        }
+    }
+
     /// Writes already-rendered output to stdout as one line. The raw-call
     /// escape hatch renders its own JSON text (schema-ordered keys, exact
     /// integer kinds — see `MMCLIDynamicJSONText`); every typed result still

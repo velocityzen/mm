@@ -12,20 +12,20 @@ import Testing
 /// discovery through `MMCLIRunner`, and the schema-driven raw-call path.
 @Suite("Stream driver cores against a real server")
 struct StreamDriverTests {
-    @Test("followCore drains the element sequence and returns the terminal")
+    @Test("inboundStdio drains the element sequence and returns the terminal")
     func followHappyPath() async throws {
         try await withCLIServer { options in
             let summary = try await MMCLIRunner.invoke(options) { client in
                 let handle = await client.call(
                     CLITestMethods.follow, on: cliTestEntity("box"), CLIFollowRequest(count: 5))
-                return try await MMCLIStreamDriver.followCore(
+                return try await MMCLIStreamDriver.inboundStdio(
                     handle, format: .json, method: "box.follow", entity: "box")
             }
             #expect(summary.count == 5)
         }
     }
 
-    @Test("followCore surfaces an application-error terminal as ExitCode(1)")
+    @Test("inboundStdio surfaces an application-error terminal as ExitCode(1)")
     func followErrorTerminal() async throws {
         try await withCLIServer { options in
             await #expect(throws: ExitCode(1)) {
@@ -35,7 +35,7 @@ struct StreamDriverTests {
                         on: cliTestEntity("box"),
                         CLIFollowRequest(count: 2)
                     )
-                    return try await MMCLIStreamDriver.followCore(
+                    return try await MMCLIStreamDriver.inboundStdio(
                         handle, format: .json, method: "box.followFail", entity: "box")
                 }
             }
@@ -43,7 +43,7 @@ struct StreamDriverTests {
         }
     }
 
-    @Test("feedCore sends every non-empty line, ENDs at EOF, returns the terminal")
+    @Test("outboundStdio sends every non-empty line, ENDs at EOF, returns the terminal")
     func feedHappyPath() async throws {
         try await withCLIServer { options in
             let (lines, continuation) = AsyncStream<String>.makeStream()
@@ -55,7 +55,7 @@ struct StreamDriverTests {
             let summary = try await MMCLIRunner.invoke(options) { client in
                 let handle = await client.call(
                     CLITestMethods.importItems, on: cliTestEntity("box"), CLIImportRequest())
-                return try await MMCLIStreamDriver.feedCore(
+                return try await MMCLIStreamDriver.outboundStdio(
                     handle,
                     lines: lines,
                     makeElement: { line in
@@ -72,7 +72,7 @@ struct StreamDriverTests {
         }
     }
 
-    @Test("feedCore propagates a makeElement ValidationError, not the cancelled terminal")
+    @Test("outboundStdio propagates a makeElement ValidationError, not the cancelled terminal")
     func feedBadLine() async throws {
         try await withCLIServer { options in
             let (lines, continuation) = AsyncStream<String>.makeStream()
@@ -81,7 +81,7 @@ struct StreamDriverTests {
                 _ = try await MMCLIRunner.invoke(options) { client in
                     let handle = await client.call(
                         CLITestMethods.importItems, on: cliTestEntity("box"), CLIImportRequest())
-                    return try await MMCLIStreamDriver.feedCore(
+                    return try await MMCLIStreamDriver.outboundStdio(
                         handle,
                         lines: lines,
                         makeElement: { line in
@@ -99,7 +99,7 @@ struct StreamDriverTests {
         }
     }
 
-    @Test("feedCore's early terminal (denied) unparks a reader still waiting on lines")
+    @Test("outboundStdio's early terminal (denied) unparks a reader still waiting on lines")
     func feedEarlyTerminalUnparksReader() async throws {
         try await withCLIServer { options in
             // Never finished while the call runs: the reader stays parked on
@@ -113,7 +113,7 @@ struct StreamDriverTests {
                         on: cliTestEntity("locked"),
                         CLIImportRequest()
                     )
-                    return try await MMCLIStreamDriver.feedCore(
+                    return try await MMCLIStreamDriver.outboundStdio(
                         handle,
                         lines: lines,
                         makeElement: { _ in CLIStreamItem(value: 0) },
@@ -126,31 +126,29 @@ struct StreamDriverTests {
         }
     }
 
-    @Test("feedCore honors the stop-reading latch (the first-SIGINT seam) and still ENDs")
-    func feedStopReadingLatch() async throws {
+    @Test("outboundStdio stops reading after an early finish() (the first-SIGINT seam) and the terminal arrives")
+    func feedAfterEarlyFinish() async throws {
         try await withCLIServer { options in
-            let stop = StreamStopFlag()
-            stop.stop()  // as the first SIGINT would, before any line is read
             let (lines, continuation) = AsyncStream<String>.makeStream()
             continuation.yield("1")
             continuation.finish()
             let summary = try await MMCLIRunner.invoke(options) { client in
                 let handle = await client.call(
                     CLITestMethods.importItems, on: cliTestEntity("box"), CLIImportRequest())
-                return try await MMCLIStreamDriver.feedCore(
+                await handle.finish()  // as the first SIGINT would, before any line is read
+                return try await MMCLIStreamDriver.outboundStdio(
                     handle,
                     lines: lines,
                     makeElement: { _ in CLIStreamItem(value: 0) },
-                    stopReading: stop,
                     method: "box.import",
                     entity: "box"
                 )
             }
-            #expect(summary.count == 0)  // nothing sent, but END went out and the terminal arrived
+            #expect(summary.count == 0)  // the send saw .callEnded; END went out and the terminal arrived
         }
     }
 
-    @Test("duplexCore pumps lines outbound, drains the echo inbound, returns the shared terminal")
+    @Test("bidirectionalStdio pipes lines outbound, drains the echo inbound, returns the shared terminal")
     func duplexHappyPath() async throws {
         try await withCLIServer { options in
             let (lines, continuation) = AsyncStream<String>.makeStream()
@@ -162,7 +160,7 @@ struct StreamDriverTests {
             let summary = try await MMCLIRunner.invoke(options) { client in
                 let handle = await client.call(
                     CLITestMethods.pipe, on: cliTestEntity("box"), CLIImportRequest())
-                return try await MMCLIStreamDriver.duplexCore(
+                return try await MMCLIStreamDriver.bidirectionalStdio(
                     handle,
                     lines: lines,
                     makeElement: { line in
@@ -180,7 +178,7 @@ struct StreamDriverTests {
         }
     }
 
-    @Test("duplexCore propagates a makeElement ValidationError")
+    @Test("bidirectionalStdio propagates a makeElement ValidationError")
     func duplexBadLine() async throws {
         try await withCLIServer { options in
             let (lines, continuation) = AsyncStream<String>.makeStream()
@@ -189,7 +187,7 @@ struct StreamDriverTests {
                 _ = try await MMCLIRunner.invoke(options) { client in
                     let handle = await client.call(
                         CLITestMethods.pipe, on: cliTestEntity("box"), CLIImportRequest())
-                    return try await MMCLIStreamDriver.duplexCore(
+                    return try await MMCLIStreamDriver.bidirectionalStdio(
                         handle,
                         lines: lines,
                         makeElement: { line in

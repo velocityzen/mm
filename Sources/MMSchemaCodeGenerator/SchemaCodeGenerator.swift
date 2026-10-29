@@ -2025,7 +2025,7 @@ private func commandDeclaration(
             )
             lines.append("                on: target, request)")
             lines.append(
-                "            return try await MMCLIStreamDriver.follow(handle, format: format, method: \"\(wireName)\", entity: entityArgument)"
+                "            return try await MMCLIStreamDriver.inbound(handle, format: format, method: \"\(wireName)\", entity: entityArgument)"
             )
         case (true, false):
             let mapper = requestElementMapper
@@ -2035,7 +2035,7 @@ private func commandDeclaration(
             )
             lines.append("                on: target, request)")
             lines.append(
-                "            return try await MMCLIStreamDriver.feed(handle, makeElement: \(mapper), method: \"\(wireName)\", entity: entityArgument)"
+                "            return try await MMCLIStreamDriver.outbound(handle, makeElement: \(mapper), method: \"\(wireName)\", entity: entityArgument)"
             )
         case (true, true):
             let mapper = requestElementMapper
@@ -2045,7 +2045,7 @@ private func commandDeclaration(
             )
             lines.append("                on: target, request)")
             lines.append(
-                "            return try await MMCLIStreamDriver.duplex(handle, makeElement: \(mapper), format: format, method: \"\(wireName)\", entity: entityArgument)"
+                "            return try await MMCLIStreamDriver.bidirectional(handle, makeElement: \(mapper), format: format, method: \"\(wireName)\", entity: entityArgument)"
             )
     }
     lines.append("        }")

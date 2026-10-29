@@ -64,9 +64,11 @@ public struct MMCLIDefaults: Sendable {
 /// addresses exactly one command's output (or one stream's elements).
 public struct MMCLIFormatters: Sendable, ExpressibleByArrayLiteral {
     var renderers: [ObjectIdentifier: @Sendable (Any) -> String?]
+    var headers: [ObjectIdentifier: String]
 
     public init() {
         self.renderers = [:]
+        self.headers = [:]
     }
 
     public init(arrayLiteral elements: MMCLIFormatEntry...) {
@@ -78,6 +80,10 @@ public struct MMCLIFormatters: Sendable, ExpressibleByArrayLiteral {
             entries.map { ($0.key, $0.render) },
             uniquingKeysWith: { _, second in second }
         )
+        self.headers = Dictionary(
+            entries.compactMap { entry in entry.header.map { (entry.key, $0) } },
+            uniquingKeysWith: { _, second in second }
+        )
     }
 
     /// The registered rendering of `value`, or nil when its type has no
@@ -85,11 +91,17 @@ public struct MMCLIFormatters: Sendable, ExpressibleByArrayLiteral {
     func render<T: Encodable>(_ value: T) -> String? {
         self.renderers[ObjectIdentifier(T.self)]?(value)
     }
+
+    /// The header printed above a stream of `type`, if its entry has one.
+    func header<T>(for type: T.Type) -> String? {
+        self.headers[ObjectIdentifier(type)]
+    }
 }
 
 /// One per-type text renderer; see ``MMCLIFormatters``.
 public struct MMCLIFormatEntry: Sendable {
     let key: ObjectIdentifier
+    let header: String?
     let render: @Sendable (Any) -> String?
 }
 
@@ -100,8 +112,26 @@ public func Format<T: Encodable & Sendable>(
     _ type: T.Type,
     _ render: @Sendable @escaping (T) -> String
 ) -> MMCLIFormatEntry {
+    Format(type, header: nil, render)
+}
+
+/// ``Format(_:_:)-(_,(T)->String)`` with a header: for a type a stream
+/// delivers, such as one row of a table, `header` (its column titles) is
+/// printed once above the stream's first element under `--output text`. A
+/// stream that delivers nothing prints no header; the json formats never
+/// print one.
+///
+/// ```swift
+/// Format(ChangeEvent.self, header: "COUNT\tLINE") { "\($0.count)\t\($0.line)" }
+/// ```
+public func Format<T: Encodable & Sendable>(
+    _ type: T.Type,
+    header: String?,
+    _ render: @Sendable @escaping (T) -> String
+) -> MMCLIFormatEntry {
     MMCLIFormatEntry(
         key: ObjectIdentifier(T.self),
+        header: header,
         render: { value in (value as? T).map(render) }
     )
 }

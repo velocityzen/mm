@@ -151,6 +151,26 @@ struct OutputTests {
         #expect(machine == #"{"count":3}"#)
     }
 
+    @Test("a stream's header goes above its first element, in text only")
+    func streamHeader() throws {
+        try MMCLIDefaults.$current.withValue(
+            MMCLIDefaults(formatters: [
+                Format(Fixture.self, header: "COUNT|LINE") { "\($0.count)|\($0.line)" }
+            ])
+        ) {
+            let fixture = Fixture(count: 1, line: "a")
+            let first = try MMCLIOutput.renderStreamElement(fixture, format: .text, first: true)
+            #expect(first == "COUNT|LINE\n1|a")
+            let later = try MMCLIOutput.renderStreamElement(fixture, format: .text, first: false)
+            #expect(later == "1|a")
+            let machine = try MMCLIOutput.renderStreamElement(fixture, format: .json, first: true)
+            #expect(machine == #"{"count":1,"line":"a"}"#)
+            // A type whose entry has no header gets none.
+            let bare = try MMCLIOutput.renderStreamElement(OtherFixture(ok: true), format: .text, first: true)
+            #expect(bare == #"{"ok":true}"#)
+        }
+    }
+
     @Test("text renders registered types through their Format entry; unregistered fall back to JSON")
     func textFormat() throws {
         try MMCLIDefaults.$current.withValue(
