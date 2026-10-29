@@ -36,6 +36,23 @@ extension WireSession {
     }
 }
 
+/// A response far larger than any socket buffer — the drain-flush fixture.
+private struct BulkResponse: Codable, Hashable, Sendable {
+    /// Under the wire session's 1 MiB frame cap, well over kernel buffering.
+    static let size = 900_000
+
+    var text: String
+
+    enum CodingKeys: Int, CodingKey {
+        case text = 0
+    }
+}
+
+private enum BulkMethods {
+    /// Parks until released, then answers with a ``BulkResponse``.
+    static let wait = Method<TargetRequest, BulkResponse>(name: "bulk.wait", access: .read)
+}
+
 @Suite("MMServer integration over a real temp-dir unix socket")
 struct ServerIntegrationTests {
     @Test("request/response round trip with entity-scoped payload")
@@ -492,6 +509,64 @@ struct ServerIntegrationTests {
             // removed last.
             try await served
             #expect(statMode(path: path) == nil)
+        }
+    }
+
+    @Test("graceful shutdown delivers every byte of a large in-flight response")
+    func gracefulShutdownFlushesLargeResponse() async throws {
+        try await withTempSocketPath { path in
+            let bulkStarted = Signal<Void>()
+            let bulkGate = Signal<Void>()
+            var fixture = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            var logger = Logger(label: "mm.test.server")
+            logger.logLevel = .warning
+            fixture.service = ServerRuntime(
+                configuration: .init(endpoint: .unix(path: path)),
+                aclProvider: InMemoryACLProvider(fixtureACLs()),
+                logger: logger
+            ) {
+                Handle(TestMethods.echo) { request, _ in
+                    .success(EchoResponse(value: request.value))
+                }
+                Handle(BulkMethods.wait) { _, _ in
+                    bulkStarted.fire(())
+                    try? await bulkGate.wait()
+                    return .success(BulkResponse(text: String(repeating: "x", count: BulkResponse.size)))
+                }
+            }
+            let server = fixture
+            let drain = Signal<Void>()
+            async let served: Void = runServerUntilDrained(server, drain: drain)
+            _ = try await withDeadline { try await server.bound.wait() }
+            try await withWireSession(unixPath: path) { session in
+                _ = try await session.handshake()
+                try await session.send(
+                    request(
+                        msgid: 1, method: "bulk.wait", entity: entity("box.item"),
+                        TargetRequest(entity: entity("box.item"))
+                    )
+                )
+                _ = try await withDeadline { try await bulkStarted.wait() }
+                // Unread replies past the client's inbound high watermark (10)
+                // stop it reading the socket, so the large response backs up
+                // in the server's pending writes rather than draining.
+                for msgid in UInt32(2)...13 {
+                    try await session.send(
+                        request(
+                            msgid: msgid, method: "echo.run", entity: entity("box.item"),
+                            EchoRequest(entity: entity("box.item"), value: Int(msgid))
+                        )
+                    )
+                }
+                drain.fire(())
+                try await expectConnectRefused(unixPath: path)
+                bulkGate.fire(())
+                let reply = try await session.response(msgid: 1)
+                #expect(reply.error == nil)
+                let bulk = try decodeResult(BulkResponse.self, from: reply.result)
+                #expect(bulk.text.utf8.count == BulkResponse.size)
+            }
+            try await served
         }
     }
 
