@@ -161,12 +161,21 @@ package struct ServerRuntime: Sendable {
         case tcp
     }
 
+    /// An accepted connection, with the peer identity captured for it at
+    /// accept and frozen for its lifetime.
+    private struct AcceptedConnection: Sendable {
+        let connection: NIOAsyncChannel<ByteBuffer, ByteBuffer>
+        let peer: PeerIdentity
+    }
+
+    /// A listening channel: its inbound stream yields accepted connections.
+    private typealias Listener = NIOAsyncChannel<AcceptedConnection, Never>
+
     /// A bound, listening server channel, and how to undo what binding
     /// created on disk.
     private struct BoundServer: Sendable {
-        let channel: NIOAsyncChannel<NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>
+        let channel: Listener
         let localAddress: SocketAddress
-        let transport: TransportKind
         /// Removes the unix socket file (identity-guarded); nothing for TCP.
         let removeFiles: @Sendable () -> Void
     }
@@ -248,11 +257,7 @@ package struct ServerRuntime: Sendable {
     private func startAccepting(_ bound: BoundServer) -> RunningServer {
         let shutdown = Shutdown()
         let loop = Task {
-            let stopped = await self.acceptLoop(
-                server: bound.channel,
-                transport: bound.transport,
-                shutdown: shutdown
-            )
+            let stopped = await self.acceptLoop(server: bound.channel, shutdown: shutdown)
             bound.removeFiles()
             return stopped
         }
@@ -292,7 +297,7 @@ package struct ServerRuntime: Sendable {
             return (descriptor, Self.socketFileIdentity(path: path))
         }
 
-        let server: NIOAsyncChannel<NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>
+        let server: Listener
         do {
             // NIO adopts the descriptor and calls listen(2) itself — see
             // makeBoundUnixSocket for why chmod already happened.
@@ -309,7 +314,7 @@ package struct ServerRuntime: Sendable {
                 // not, which is how the drain worked on Darwin only.
                 .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
                 .bind(descriptor) { channel in
-                    self.initializeChildChannel(channel)
+                    self.initializeChildChannel(channel, transport: .unix)
                 }
         } catch {
             // Adoption failed. NIO closes the descriptor on every post-creation
@@ -324,7 +329,7 @@ package struct ServerRuntime: Sendable {
         let removeFiles: @Sendable () -> Void = {
             Self.removeSocketFile(path: path, owned: fileIdentity, logger: logger)
         }
-        let bound = try await Self.boundServer(server, transport: .unix, removeFiles: removeFiles)
+        let bound = try await Self.boundServer(server, removeFiles: removeFiles)
         self.logger.info("listening", metadata: ["path": "\(path)"])
         return bound
     }
@@ -340,9 +345,9 @@ package struct ServerRuntime: Sendable {
             // input close must not escalate to a full close on Linux.
             .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
             .bind(host: host, port: port) { channel in
-                self.initializeChildChannel(channel)
+                self.initializeChildChannel(channel, transport: .tcp)
             }
-        let bound = try await Self.boundServer(server, transport: .tcp, removeFiles: {})
+        let bound = try await Self.boundServer(server, removeFiles: {})
         self.logger.info("listening", metadata: ["address": "\(bound.localAddress)"])
         return bound
     }
@@ -351,8 +356,7 @@ package struct ServerRuntime: Sendable {
     /// has one; should it not, the channel closes and what binding created is
     /// removed, so a listener never exists without an address.
     private static func boundServer(
-        _ channel: NIOAsyncChannel<NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>,
-        transport: TransportKind,
+        _ channel: Listener,
         removeFiles: @escaping @Sendable () -> Void
     ) async throws -> BoundServer {
         guard let localAddress = channel.channel.localAddress else {
@@ -363,7 +367,6 @@ package struct ServerRuntime: Sendable {
         return BoundServer(
             channel: channel,
             localAddress: localAddress,
-            transport: transport,
             removeFiles: removeFiles
         )
     }
@@ -383,30 +386,66 @@ package struct ServerRuntime: Sendable {
         }
     }
 
+    /// Captures the peer's identity, then builds the connection's pipeline.
+    /// Runs on the child's event loop before NIO registers the channel, so a
+    /// peer whose identity cannot be captured is closed before it is sent
+    /// the server hello or counted against the connection cap.
     private func initializeChildChannel(
-        _ channel: any Channel
-    ) -> EventLoopFuture<NIOAsyncChannel<ByteBuffer, ByteBuffer>> {
+        _ channel: any Channel,
+        transport: TransportKind
+    ) -> EventLoopFuture<AcceptedConnection> {
         let maxFrameLength = self.configuration.maxFrameLength
         let idleTimeout = self.configuration.idleTimeout
         let serverHello = self.serverHello
         let violations = self.metrics.protocolViolations
-        return channel.eventLoop.makeCompletedFuture {
-            let connection = try Self.configureChildPipeline(
-                channel: channel,
-                maxFrameLength: maxFrameLength,
-                idleTimeout: idleTimeout,
-                serverHello: serverHello,
-                protocolViolations: violations
-            )
-            // NIO drops a connection whose initializer completes after the
-            // listener closed (apple/swift-nio#2637), and releasing a wrapper
-            // with an unfinished writer traps. Hold it until the channel has
-            // closed, which finishes the writer; the peer or the idle timeout
-            // closes a dropped one.
-            channel.closeFuture.whenComplete { _ in
-                withExtendedLifetime(connection) {}
+        return self.capturePeer(of: channel, transport: transport)
+            .flatMapThrowing { peer in
+                let connection = try Self.configureChildPipeline(
+                    channel: channel,
+                    maxFrameLength: maxFrameLength,
+                    idleTimeout: idleTimeout,
+                    serverHello: serverHello,
+                    protocolViolations: violations
+                )
+                // NIO drops a connection whose initializer completes after the
+                // listener closed (apple/swift-nio#2637), and releasing a
+                // wrapper with an unfinished writer traps. Hold it until the
+                // channel has closed, which finishes the writer; the peer or
+                // the idle timeout closes a dropped one.
+                channel.closeFuture.whenComplete { _ in
+                    withExtendedLifetime(connection) {}
+                }
+                return AcceptedConnection(connection: connection, peer: peer)
             }
-            return connection
+            .flatMapErrorThrowing { error in
+                // NIO neither registers nor closes a child whose initializer
+                // failed; left open, its socket would leak.
+                channel.close(promise: nil)
+                throw error
+            }
+    }
+
+    /// The identity a connection is authorized with. TCP has no kernel
+    /// credentials in v1: anonymous, no syscalls. A unix peer whose
+    /// credentials cannot be captured fails closed — identity is the only
+    /// authorization input, so no identity means no connection.
+    private func capturePeer(
+        of channel: any Channel,
+        transport: TransportKind
+    ) -> EventLoopFuture<PeerIdentity> {
+        switch transport {
+            case .tcp:
+                return channel.eventLoop.makeSucceededFuture(.anonymous)
+            case .unix:
+                let logger = self.logger
+                return PeerCredentials.captureUnixPeer(channel: channel)
+                    .flatMapErrorThrowing { error in
+                        logger.warning(
+                            "peer credential capture failed",
+                            metadata: ["error": "\(error)"]
+                        )
+                        throw error
+                    }
         }
     }
 
@@ -447,12 +486,11 @@ package struct ServerRuntime: Sendable {
     /// - Returns: `.success` for a stop the owner asked for (a drain, or
     ///   cancellation); `.io` when accepting itself failed.
     private func acceptLoop(
-        server: NIOAsyncChannel<NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>,
-        transport: TransportKind,
+        server: Listener,
         shutdown: Shutdown
     ) async -> Result<Void, MMServiceError> {
         await Result.fromAsync {
-            try await self.accept(server: server, transport: transport, shutdown: shutdown)
+            try await self.accept(server: server, shutdown: shutdown)
         }
         .flatMapError(Self.stopResult)
     }
@@ -464,8 +502,7 @@ package struct ServerRuntime: Sendable {
     }
 
     private func accept(
-        server: NIOAsyncChannel<NIOAsyncChannel<ByteBuffer, ByteBuffer>, Never>,
-        transport: TransportKind,
+        server: Listener,
         shutdown: Shutdown
     ) async throws {
         // Shared with connection child tasks for the decrement, hence a locked
@@ -479,7 +516,8 @@ package struct ServerRuntime: Sendable {
                 try await withShutdownHandler(on: shutdown, { server.channel.close(promise: nil) }) {
                     await Result.fromAsync {
                         var nextConnectionID: UInt64 = 0
-                        for try await connection in acceptStream {
+                        for try await accepted in acceptStream {
+                            let connection = accepted.connection
                             nextConnectionID &+= 1
                             // Cap enforced AT accept, before any child task exists.
                             let admitted = activeConnections.withLockedValue { count in
@@ -494,7 +532,8 @@ package struct ServerRuntime: Sendable {
                                 // code is a capability for a future version. The
                                 // pipeline may already have flushed the server hello
                                 // at activation; a rejected peer can observe it
-                                // before the close.
+                                // before the close. Its identity was captured at
+                                // accept, but nothing is dispatched for it.
                                 self.metrics.connectionsRejected.increment()
                                 self.logger.debug(
                                     "connection rejected",
@@ -522,8 +561,8 @@ package struct ServerRuntime: Sendable {
                                 await MMLogContext.$connectionID.withValue(connectionID) {
                                     await self.handleConnection(
                                         connection,
+                                        peer: accepted.peer,
                                         connectionID: connectionID,
-                                        transport: transport,
                                         shutdown: shutdown
                                     )
                                 }
@@ -545,8 +584,8 @@ package struct ServerRuntime: Sendable {
 
     private func handleConnection(
         _ connection: NIOAsyncChannel<ByteBuffer, ByteBuffer>,
+        peer: PeerIdentity,
         connectionID: UInt64,
-        transport: TransportKind,
         shutdown: Shutdown
     ) async {
         var logger = self.logger
@@ -566,8 +605,8 @@ package struct ServerRuntime: Sendable {
                 await Result.fromAsync {
                     try await self.serveConnection(
                         connection,
+                        peer: peer,
                         connectionID: connectionID,
-                        transport: transport,
                         logger: logger
                     )
                 }
@@ -586,32 +625,11 @@ package struct ServerRuntime: Sendable {
 
     private func serveConnection(
         _ connection: NIOAsyncChannel<ByteBuffer, ByteBuffer>,
+        peer: PeerIdentity,
         connectionID: UInt64,
-        transport: TransportKind,
         logger: Logger
     ) async throws {
         try await connection.executeThenClose { inbound, outbound in
-            // Peer identity, frozen for the connection's lifetime. TCP has
-            // no kernel credentials in v1: anonymous, no syscalls.
-            let peer: PeerIdentity
-            switch transport {
-                case .tcp:
-                    peer = .anonymous
-                case .unix:
-                    switch await PeerCredentials.captureUnixPeer(channel: connection.channel) {
-                        case .success(let identity):
-                            peer = identity
-                        case .failure(let error):
-                            // Fail closed: identity is the only authorization
-                            // input, so no identity means no dispatch.
-                            logger.warning(
-                                "peer credential capture failed",
-                                metadata: ["error": "\(error)"]
-                            )
-                            return
-                    }
-            }
-
             // Hello exchange: the server hello went out at channel
             // activation (ServerHelloHandler); the peer's first frame
             // must be its hello. The handler already closed on garbage,

@@ -543,6 +543,11 @@ private func validateCLI(calls: [ParsedCall], enumNames: Set<String>) throws {
             }
         }
         var optionNames = reservedOptions
+        // With an array positional the entity becomes `--entity` (see the
+        // positional layout), so no field may claim that name.
+        if call.request.contains(where: { isPositional($0) && positionalIsVariadic($0) }) {
+            optionNames.insert("entity")
+        }
         var shortNames: Set<String> = []
         for field in call.request {
             if let fieldDefault = field.defaultValue {
@@ -1911,10 +1916,12 @@ private func commandDeclaration(
     lines.append("    public static let configuration = CommandConfiguration(")
     lines.append("        \(configuration.joined(separator: ",\n        ")))")
     lines.append("    @OptionGroup public var connection: MMCLIOptions")
-    let entityProperty = """
-            @Argument(help: "Target entity (dotted path); omit when the daemon's route \
-        accepts exactly one entity") public var entity: String?
+    let entityHelp = """
+        help: "Target entity (dotted path); omit when the daemon's route \
+        accepts exactly one entity"
         """
+    let entityProperty = "    @Argument(\(entityHelp)) public var entity: String?"
+    let entityOption = "    @Option(name: .customLong(\"entity\"), \(entityHelp)) public var entity: String?"
 
     var preludes: [String] = []
     var requestArguments: [String] = []
@@ -1934,9 +1941,11 @@ private func commandDeclaration(
         // positionals. ArgumentParser fills positionals greedily in
         // declaration order, so an optional entity ahead of a field would take
         // its value: `search "query"` must bind query and `retry <id>` must
-        // bind id, not entity. Arrays stay after the entity, since one takes
-        // every remaining value and would leave it unreachable. Options
-        // follow. Each group keeps field-declaration order.
+        // bind id, not entity. An array takes every remaining value, so it
+        // can't go before the entity, and after it the entity would take the
+        // array's first value (`add <id>...`): with an array positional the
+        // entity is the `--entity` option instead. Options follow. Each group
+        // keeps field-declaration order.
         let requiredPositionals = fields.filter {
             isPositional($0) && positionalIsRequired($0)
         }
@@ -1952,7 +1961,7 @@ private func commandDeclaration(
                 field, call: call, enumNames: enumNames,
                 lines: &lines, preludes: &preludes)
         }
-        lines.append(entityProperty)
+        lines.append(variadicPositionals.isEmpty ? entityProperty : entityOption)
         for field in variadicPositionals + optionFields {
             emitField(
                 field, call: call, enumNames: enumNames,

@@ -56,7 +56,8 @@ enum Ledger: MethodNamespace {
 }
 
 /// An optional positional: `retry [<id>]`, which mustn't lose its value to
-/// the omittable entity.
+/// the omittable entity. And an array positional: `cancel [<ids> ...]`,
+/// which mustn't lose its first value to it either.
 enum Jobs: MethodNamespace {
     #schema("jobs", description: "Background jobs.") {
         CLI(.enabled)
@@ -64,6 +65,12 @@ enum Jobs: MethodNamespace {
             Access { .write }
             Request {
                 Field("id", .optional(.string), description: "The job to retry", cli: .argument)
+            }
+        }
+        Call("cancel", description: "Cancels jobs") {
+            Access { .write }
+            Request {
+                Field("ids", .array(.string), description: "The jobs to cancel", cli: .argument)
             }
         }
     }
@@ -172,6 +179,22 @@ struct GeneratedCommandTests {
         let both = try Jobs.RetryCommand.parse(["--socket", "/tmp/jobs.sock", "job-7", "jobs.main"])
         #expect(both.id == "job-7")
         #expect(both.entity == "jobs.main")
+    }
+
+    @Test("with an array positional, every bare value is the array's and the entity is --entity")
+    func arrayPositionalEntityOption() throws {
+        let many = try Jobs.CancelCommand.parse(["--socket", "/tmp/jobs.sock", "job-7", "job-8"])
+        #expect(many.ids == ["job-7", "job-8"])
+        #expect(many.entity == nil)
+
+        let none = try Jobs.CancelCommand.parse(["--socket", "/tmp/jobs.sock"])
+        #expect(none.ids == [])
+
+        let targeted = try Jobs.CancelCommand.parse([
+            "--socket", "/tmp/jobs.sock", "job-7", "--entity", "jobs.main",
+        ])
+        #expect(targeted.ids == ["job-7"])
+        #expect(targeted.entity == "jobs.main")
     }
 
     @Test("array fields are repeatable options defaulting to empty, never required")

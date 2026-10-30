@@ -1,4 +1,3 @@
-import FP
 import MMSchema
 import NIOCore
 
@@ -75,29 +74,26 @@ enum PeerCredentials {
     /// Darwin capture path: `getsockopt(SOL_LOCAL, LOCAL_PEERCRED)` for the
     /// `xucred` (effective uid + up to 16 groups, first is the egid) and
     /// `getsockopt(SOL_LOCAL, LOCAL_PEERPID)` for the peer pid, both read
-    /// on the channel's event loop through NIO's `SocketOptionProvider`
-    /// unsafe accessors.
-    static func captureUnixPeer(
-        channel: any Channel
-    ) async -> Result<PeerIdentity, PeerCredentialsError> {
-        await Result.fromOptional(
-            channel as? any SocketOptionProvider,
-            error: PeerCredentialsError.unsupportedChannel
-        )
-        .flatMapAsync { provider in
-            await Result.fromAsync {
-                let credentials: xucred = try await provider.unsafeGetSocketOption(
-                    level: SocketOptionLevel(SOL_LOCAL),
-                    name: SocketOptionName(LOCAL_PEERCRED)
-                ).get()
-                let pid: pid_t = try await provider.unsafeGetSocketOption(
-                    level: SocketOptionLevel(SOL_LOCAL),
-                    name: SocketOptionName(LOCAL_PEERPID)
-                ).get()
-                return Self.identity(fromXucred: credentials, pid: pid)
-            }
-            .mapError { .syscallFailed(description: String(describing: $0)) }
+    /// through NIO's `SocketOptionProvider` unsafe accessors. Called from the
+    /// child channel initializer, on the channel's event loop, where both
+    /// reads complete at once. Fails with ``PeerCredentialsError``.
+    static func captureUnixPeer(channel: any Channel) -> EventLoopFuture<PeerIdentity> {
+        guard let provider = channel as? any SocketOptionProvider else {
+            return channel.eventLoop.makeFailedFuture(PeerCredentialsError.unsupportedChannel)
         }
+        let credentials: EventLoopFuture<xucred> = provider.unsafeGetSocketOption(
+            level: SocketOptionLevel(SOL_LOCAL),
+            name: SocketOptionName(LOCAL_PEERCRED)
+        )
+        let pid: EventLoopFuture<pid_t> = provider.unsafeGetSocketOption(
+            level: SocketOptionLevel(SOL_LOCAL),
+            name: SocketOptionName(LOCAL_PEERPID)
+        )
+        return credentials.and(pid)
+            .map { credentials, pid in Self.identity(fromXucred: credentials, pid: pid) }
+            .flatMapErrorThrowing {
+                throw PeerCredentialsError.syscallFailed(description: String(describing: $0))
+            }
     }
 
     /// Pulls the group list out of the fixed 16-slot `cr_groups` tuple and
@@ -132,48 +128,52 @@ enum PeerCredentials {
 
     /// Linux capture path: `getsockopt(SOL_SOCKET, SO_PEERCRED)` for
     /// `ucred{pid, uid, gid}` and `getsockopt(SOL_SOCKET, SO_PEERGROUPS)`
-    /// (Linux 4.13+) for the supplementary groups, both read on the event
-    /// loop through NIO's `SocketOptionProvider` unsafe accessors. Both come
-    /// from the credentials the kernel recorded when the peer connected, so
-    /// they describe the same process and cannot race its exit or a pid
-    /// reuse.
-    static func captureUnixPeer(
-        channel: any Channel
-    ) async -> Result<PeerIdentity, PeerCredentialsError> {
-        await Result.fromOptional(
-            channel as? any SocketOptionProvider,
-            error: PeerCredentialsError.unsupportedChannel
+    /// (Linux 4.13+) for the supplementary groups, both read through NIO's
+    /// `SocketOptionProvider` unsafe accessors. Both come from the
+    /// credentials the kernel recorded when the peer connected, so they
+    /// describe the same process and cannot race its exit or a pid reuse.
+    /// Called from the child channel initializer, on the channel's event
+    /// loop, where both reads complete at once. Fails with
+    /// ``PeerCredentialsError``.
+    static func captureUnixPeer(channel: any Channel) -> EventLoopFuture<PeerIdentity> {
+        guard let provider = channel as? any SocketOptionProvider else {
+            return channel.eventLoop.makeFailedFuture(PeerCredentialsError.unsupportedChannel)
+        }
+        let credentials: EventLoopFuture<PeerUcred> = provider.unsafeGetSocketOption(
+            level: SocketOptionLevel(SOL_SOCKET),
+            name: SocketOptionName(SO_PEERCRED)
         )
-        .flatMapAsync { provider in
-            await Result.fromAsync {
-                let credentials: PeerUcred = try await provider.unsafeGetSocketOption(
-                    level: SocketOptionLevel(SOL_SOCKET),
-                    name: SocketOptionName(SO_PEERCRED)
-                ).get()
-                let supplementary = try await Self.peerGroups(provider)
-                return PeerIdentity(
+        return credentials.and(Self.peerGroups(provider))
+            .map { credentials, supplementary in
+                PeerIdentity(
                     uid: credentials.uid,
                     gid: credentials.gid,
                     supplementaryGroups: supplementary.filter { $0 != credentials.gid },
                     pid: credentials.pid
                 )
             }
-            .mapError { .syscallFailed(description: String(describing: $0)) }
-        }
+            .flatMapErrorThrowing {
+                throw PeerCredentialsError.syscallFailed(description: String(describing: $0))
+            }
     }
 
     /// The peer's supplementary groups via `SO_PEERGROUPS`; none when they
     /// do not fit in ``PeerGroups`` (`ERANGE`).
-    static func peerGroups(_ provider: any SocketOptionProvider) async throws -> [gid_t] {
-        do {
-            let slots: PeerGroups = try await provider.unsafeGetSocketOption(
-                level: SocketOptionLevel(SOL_SOCKET),
-                name: SocketOptionName(SO_PEERGROUPS)
-            ).get()
-            return Self.supplementaryGroups(fromPeerGroups: slots.indices.map { slots[$0] })
-        } catch let error as IOError where error.errnoCode == ERANGE {
-            return []
-        }
+    static func peerGroups(_ provider: any SocketOptionProvider) -> EventLoopFuture<[gid_t]> {
+        let buffer: EventLoopFuture<PeerGroups> = provider.unsafeGetSocketOption(
+            level: SocketOptionLevel(SOL_SOCKET),
+            name: SocketOptionName(SO_PEERGROUPS)
+        )
+        return buffer
+            .map { slots in
+                Self.supplementaryGroups(fromPeerGroups: slots.indices.map { slots[$0] })
+            }
+            .flatMapErrorThrowing { error in
+                guard let error = error as? IOError, error.errnoCode == ERANGE else {
+                    throw error
+                }
+                return []
+            }
     }
     #endif
 }
