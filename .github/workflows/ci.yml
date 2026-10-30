@@ -40,6 +40,27 @@ jobs:
       - name: Run tests
         run: swift test
 
+  test-android:
+    name: Test (Android)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test on an Android emulator
+        uses: skiptools/swift-android-action@v2
+        with:
+          # The Swift SDK for Android ships per patch release, so the
+          # version is exact (6.4 alone names no release).
+          swift-version: "6.4.2"
+          # Peer capture reads SO_PEERGROUPS (Linux 4.13+); the API 34
+          # emulator runs kernel 5.15 or newer.
+          android-api-level: 34
+          # Android has no /tmp; temp socket paths go under the emulator's
+          # writable scratch directory.
+          test-env: TMPDIR=/data/local/tmp
+          # The emulator fails to boot on a nearly full runner disk.
+          free-disk-space: true
+
   test-apple-device-platforms:
     name: Client tests (${{ matrix.name }})
     # Same image as test-macos: the simulators come with Xcode 27.
@@ -74,6 +95,14 @@ jobs:
         run: |
           udid=$(.github/scripts/simulator-destination.sh "$PLATFORM" "$DEVICE")
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
+      - name: Boot the simulator
+        # A simulator that xcodebuild boots itself can still be starting up
+        # when the test runner launches, and the runner then hangs before it
+        # connects. Booting first and waiting for it leaves no such race.
+        timeout-minutes: 10
+        env:
+          UDID: ${{ steps.simulator.outputs.udid }}
+        run: xcrun simctl bootstatus "$UDID" -b
       - name: Run client tests
         # The MMClientStackTests scheme builds and runs the tests of what the
         # client links (MMWire, MMSchema, MMClient), never the server, CLI or

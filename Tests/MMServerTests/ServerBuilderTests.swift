@@ -130,6 +130,9 @@ struct ServerBuilderTests {
         #expect(lines.withLockedValue { $0 } == ["info:hello", "debug:world"])
     }
 
+    // Exit tests run their body in a child process; Swift Testing has them
+    // on macOS, Linux and Windows only.
+    #if os(macOS) || os(Linux) || os(Windows)
     @Test("missing Configuration is programmer error")
     func missingConfiguration() async throws {
         await #expect(processExitsWith: .failure) {
@@ -187,4 +190,5 @@ struct ServerBuilderTests {
             }
         }
     }
+    #endif
 }

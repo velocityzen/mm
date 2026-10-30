@@ -87,6 +87,9 @@ struct RouterBuilderTests {
         #expect(errorCode(of: reply) == nil)
     }
 
+    // Exit tests run their body in a child process; Swift Testing has them
+    // on macOS, Linux and Windows only.
+    #if os(macOS) || os(Linux) || os(Windows)
     @Test("duplicate method name is a startup precondition failure")
     func duplicateNameExits() async {
         await #expect(processExitsWith: .failure) {
@@ -130,5 +133,6 @@ struct RouterBuilderTests {
             }
         }
     }
+    #endif
 
 }

@@ -245,9 +245,9 @@ struct StreamDeclarationTests {
         #expect(ticks.signatures[0].requestStream == nil)
     }
 
-    // Exit tests run their body in a child process, which iOS, tvOS,
-    // watchOS and visionOS do not allow.
-    #if !os(iOS) && !os(tvOS) && !os(watchOS) && !os(visionOS)
+    // Exit tests run their body in a child process; Swift Testing has them
+    // on macOS, Linux and Windows only.
+    #if os(macOS) || os(Linux) || os(Windows)
     @Test("duplicate RequestStream is programmer error")
     func duplicateRequestStream() async throws {
         await #expect(processExitsWith: .failure) {

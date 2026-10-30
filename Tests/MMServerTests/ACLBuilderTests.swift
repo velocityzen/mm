@@ -87,6 +87,9 @@ struct ACLBuilderTests {
         #expect(try await provider.acl(for: entity("box.missing")).get() == nil)
     }
 
+    // Exit tests run their body in a child process; Swift Testing has them
+    // on macOS, Linux and Windows only.
+    #if os(macOS) || os(Linux) || os(Windows)
     @Test("duplicate declarations are programmer error")
     func duplicates() async throws {
         await #expect(processExitsWith: .failure) {
@@ -121,6 +124,7 @@ struct ACLBuilderTests {
             _ = assembleACLTable(build { Entity("Not A Path!", owner: 1, group: 1) })
         }
     }
+    #endif
 }
 
 /// Materializes an @ACLBuilder block outside the DSL entry points, for

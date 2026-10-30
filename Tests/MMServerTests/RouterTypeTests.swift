@@ -186,6 +186,9 @@ struct RouterTypeTests {
         #expect(ownerView.types.map(\.name) == ["admin.Tool", "common.Flavor", "journal.Meta"])
     }
 
+    // Exit tests run their body in a child process; Swift Testing has them
+    // on macOS, Linux and Windows only.
+    #if os(macOS) || os(Linux) || os(Windows)
     @Test("a reference no registered table defines fails the boot")
     func unresolvedReferenceExits() async {
         await #expect(processExitsWith: .failure) {
@@ -198,6 +201,7 @@ struct RouterTypeTests {
             }
         }
     }
+    #endif
 
     @Test("a request that IS an entity-scoped type resolves and dispatches")
     func entityScopedRequestDispatches() async throws {
@@ -225,6 +229,9 @@ struct RouterTypeTests {
         )
     }
 
+    // Exit tests run their body in a child process; Swift Testing has them
+    // on macOS, Linux and Windows only.
+    #if os(macOS) || os(Linux) || os(Windows)
     @Test("duplicate type definitions fail the boot")
     func duplicateDefinitionExits() async {
         await #expect(processExitsWith: .failure) {
@@ -239,4 +246,5 @@ struct RouterTypeTests {
             }
         }
     }
+    #endif
 }

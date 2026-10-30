@@ -1,9 +1,9 @@
 import MMClient
 import Testing
 
-// Exit tests run their body in a child process, which iOS, tvOS, watchOS and
-// visionOS do not allow; every test here is one.
-#if !os(iOS) && !os(tvOS) && !os(watchOS) && !os(visionOS)
+// Exit tests run their body in a child process; Swift Testing has them on
+// macOS, Linux and Windows only. Every test here is one.
+#if os(macOS) || os(Linux) || os(Windows)
 @Suite("Declarative client builder")
 struct ClientBuilderTests {
     @Test("missing Configuration is programmer error — the endpoint is not defaultable")

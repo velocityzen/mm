@@ -11,6 +11,8 @@ import Darwin
 import Glibc
 #elseif canImport(Musl)
 import Musl
+#elseif canImport(Android)
+import Android
 #endif
 
 @Suite("One server listening on several endpoints")

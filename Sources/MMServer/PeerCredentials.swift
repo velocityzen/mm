@@ -7,6 +7,8 @@ import Darwin
 import Glibc
 #elseif canImport(Musl)
 import Musl
+#elseif canImport(Android)
+import Android
 #endif
 
 /// Why peer credentials could not be captured. Internal: a capture failure is
@@ -109,11 +111,12 @@ enum PeerCredentials {
         }
         return Self.identity(uid: credentials.cr_uid, groups: groups, pid: pid)
     }
-    #elseif os(Linux)
+    #elseif os(Linux) || os(Android)
     /// Layout-compatible mirror of Linux `struct ucred` from `<sys/socket.h>`
     /// (`{pid, uid, gid}` in declaration order). Declared locally because the
     /// type is guarded by `__USE_GNU` in the C headers and not exported by
-    /// the Glibc/Musl Swift overlays; `unsafeGetSocketOption` only needs a
+    /// the Glibc/Musl Swift overlays; one mirror also serves Bionic, whose
+    /// kernel writes the same layout. `unsafeGetSocketOption` only needs a
     /// value type whose size and layout match what the kernel writes.
     struct PeerUcred {
         var pid: pid_t
@@ -126,9 +129,9 @@ enum PeerCredentials {
     /// supplementary groups, which only ever denies access.
     typealias PeerGroups = InlineArray<256, gid_t>
 
-    /// Linux capture path: `getsockopt(SOL_SOCKET, SO_PEERCRED)` for
-    /// `ucred{pid, uid, gid}` and `getsockopt(SOL_SOCKET, SO_PEERGROUPS)`
-    /// (Linux 4.13+) for the supplementary groups, both read through NIO's
+    /// Linux and Android capture path: `getsockopt(SOL_SOCKET,
+    /// SO_PEERCRED)` for `ucred{pid, uid, gid}` and `getsockopt(SOL_SOCKET,
+    /// SO_PEERGROUPS)` (Linux 4.13+) for the supplementary groups, both read through NIO's
     /// `SocketOptionProvider` unsafe accessors. Both come from the
     /// credentials the kernel recorded when the peer connected, so they
     /// describe the same process and cannot race its exit or a pid reuse.

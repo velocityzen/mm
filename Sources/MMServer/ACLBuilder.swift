@@ -6,6 +6,8 @@ import MMSchema
     import Glibc
 #elseif canImport(Musl)
     import Musl
+#elseif canImport(Android)
+    import Android
 #endif
 
 /// The declarative form of a static ACL table — sugar over

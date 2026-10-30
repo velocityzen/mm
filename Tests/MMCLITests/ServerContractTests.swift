@@ -15,6 +15,8 @@ import Darwin
 import Glibc
 #elseif canImport(Musl)
 import Musl
+#elseif canImport(Android)
+import Android
 #endif
 
 /// Boots a server serving exactly the `Ledger` namespace (the CLI fixture in

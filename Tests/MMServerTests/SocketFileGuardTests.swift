@@ -11,6 +11,8 @@ import Darwin
 import Glibc
 #elseif canImport(Musl)
 import Musl
+#elseif canImport(Android)
+import Android
 #endif
 
 /// Runs `body` with a fresh temp path (no file created), cleaning up the

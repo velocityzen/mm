@@ -10,6 +10,8 @@ import MMServer
     import Glibc
 #elseif canImport(Musl)
     import Musl
+#elseif canImport(Android)
+    import Android
 #endif
 
 /// A minimal but complete matter-in-motion daemon: entities with ACLs, a

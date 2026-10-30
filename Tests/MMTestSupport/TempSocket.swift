@@ -6,6 +6,8 @@ import Darwin
 import Glibc
 #elseif canImport(Musl)
 import Musl
+#elseif canImport(Android)
+import Android
 #endif
 
 /// A harness-level failure (setup plumbing, not the code under test).

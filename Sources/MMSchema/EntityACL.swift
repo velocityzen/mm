@@ -4,6 +4,8 @@
     import Glibc
 #elseif canImport(Musl)
     import Musl
+#elseif canImport(Android)
+    import Android
 #endif
 
 /// Filesystem-style access control for one entity: an owning uid, an owning

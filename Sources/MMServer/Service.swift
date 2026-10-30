@@ -15,6 +15,8 @@ import Darwin
 import Glibc
 #elseif canImport(Musl)
 import Musl
+#elseif canImport(Android)
+import Android
 #endif
 
 /// Failures of the ``MMService`` bracket. Acquire fails with one when an
@@ -989,8 +991,8 @@ package struct ServerRuntime: Sendable {
     /// classify the path as live, and fail with `socketPathInUse` until the
     /// unrelated child is killed. NIO's descriptor adoption
     /// (`ServerBootstrap.bind(_:)`) sets non-blocking only, never
-    /// close-on-exec, so it must happen at creation. Linux sets `SOCK_CLOEXEC`
-    /// atomically in `socket(2)` (no window against a concurrent fork);
+    /// close-on-exec, so it must happen at creation. Linux and Android set
+    /// `SOCK_CLOEXEC` atomically in `socket(2)` (no window against a concurrent fork);
     /// Darwin has no such flag, so `fcntl(2)` applies `FD_CLOEXEC` right
     /// after — run unconditionally on every platform for uniformity.
     static func makeUnixStreamSocket() throws -> CInt {
@@ -1000,6 +1002,8 @@ package struct ServerRuntime: Sendable {
         let socketType = CInt(bitPattern: SOCK_STREAM.rawValue | Glibc.SOCK_CLOEXEC.rawValue)
         #elseif canImport(Musl)
         let socketType = SOCK_STREAM | Musl.SOCK_CLOEXEC
+        #elseif canImport(Android)
+        let socketType = SOCK_STREAM | Android.SOCK_CLOEXEC
         #else
         let socketType = SOCK_STREAM
         #endif

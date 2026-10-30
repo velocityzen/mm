@@ -4,7 +4,8 @@
 # release to release, and a runtime may carry only some device families, so
 # the jobs pick one instead of hard-coding a name: an existing device on the
 # newest runtime that has one, else a device created on the newest runtime
-# that supports one. When the image has no runtime for the platform it is
+# that supports one. Among several matches it takes the longest-supported
+# device type. When the image has no runtime for the platform it is
 # downloaded. When nothing fits, it lists what the image has and fails.
 #
 # Usage: simulator-destination.sh <platform> <device name prefix>
@@ -29,20 +30,32 @@ runtimes_newest_first() {
             | reverse | .[].identifier'
 }
 
+# Each device type's minimum runtime version, keyed by identifier. A device
+# type new in the newest runtime can be one Xcode does not fully drive yet
+# (on iOS 27.1 the pick was iPhone Duo, new in that runtime, and the test
+# runner hung before it connected), so the picks below sort matches by it,
+# oldest first.
+device_type_minimum_runtimes=$(xcrun simctl list devicetypes --json \
+    | jq -c '.devicetypes | map({key: .identifier, value: .minRuntimeVersion}) | from_entries')
+
 available_device() {
     xcrun simctl list devices available --json \
-        | jq -r --arg runtime "$1" --arg prefix "$device_prefix" '
+        | jq -r --arg runtime "$1" --arg prefix "$device_prefix" \
+            --argjson minimum_runtime "$device_type_minimum_runtimes" '
             .devices[$runtime] // []
             | map(select(.name | startswith($prefix)))
+            | sort_by($minimum_runtime[.deviceTypeIdentifier] // infinite)
             | first | .udid // empty'
 }
 
 device_type() {
     xcrun simctl list runtimes --json \
-        | jq -r --arg runtime "$1" --arg prefix "$device_prefix" '
+        | jq -r --arg runtime "$1" --arg prefix "$device_prefix" \
+            --argjson minimum_runtime "$device_type_minimum_runtimes" '
             .runtimes[] | select(.identifier == $runtime)
             | .supportedDeviceTypes
             | map(select(.name | startswith($prefix)))
+            | sort_by($minimum_runtime[.identifier] // infinite)
             | first | .identifier // empty'
 }
 

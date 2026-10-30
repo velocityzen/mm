@@ -314,7 +314,7 @@ Server and client emit [swift-metrics](https://github.com/apple/swift-metrics) i
 
 ## Requirements
 
-- Swift 6.4+ (strict concurrency), macOS 26+ or Linux.
+- Swift 6.4+ (strict concurrency). Everything runs on macOS 26+, Linux and Android. The client (`MMClient`, `MMSchema`, `MMWire`) also runs on iOS, iPadOS, tvOS, watchOS and visionOS 26+.
 - Runtime dependencies (complete list): [swift-nio](https://github.com/apple/swift-nio), [swift-log](https://github.com/apple/swift-log), [swift-metrics](https://github.com/apple/swift-metrics), [fp-swift](https://github.com/velocityzen/fp-swift), [fp-swift-bracket](https://github.com/velocityzen/fp-swift-bracket), and [fp-swift-service](https://github.com/velocityzen/fp-swift-service) (`FPService` for the server's shutdown fan-out, `ProcessSignals` for `MMCLI`). MessagePack is implemented in this repository. [swift-syntax](https://github.com/swiftlang/swift-syntax) is a compile-time-only dependency of the `#schema` macro and the `MMCLIGeneratorPlugin`. It is never linked into products.
 
 ## Installation
