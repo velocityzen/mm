@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Prints the UDID of an available simulator for a platform, on its newest
-# installed runtime, whose device name starts with a prefix. CI images name
-# their simulators differently from release to release, so the jobs pick one
-# instead of hard-coding a name. When the image has no runtime for the
-# platform it is downloaded; when the runtime has no matching device, one is
-# created.
+# Prints the UDID of an available simulator for a platform whose device name
+# starts with a prefix. CI images name their simulators differently from
+# release to release, and a runtime may carry only some device families, so
+# the jobs pick one instead of hard-coding a name: an existing device on the
+# newest runtime that has one, else a device created on the newest runtime
+# that supports one. When the image has no runtime for the platform it is
+# downloaded. When nothing fits, it lists what the image has and fails.
 #
 # Usage: simulator-destination.sh <platform> <device name prefix>
 #   platform: iOS, tvOS, watchOS or visionOS (the xcodebuild -downloadPlatform names)
@@ -19,12 +20,13 @@ case "$platform" in
     *) runtime_prefix="com.apple.CoreSimulator.SimRuntime.$platform-" ;;
 esac
 
-newest_runtime() {
+# The platform's available runtimes, newest first, one identifier per line.
+runtimes_newest_first() {
     xcrun simctl list runtimes available --json \
         | jq -r --arg prefix "$runtime_prefix" '
             [.runtimes[] | select(.identifier | startswith($prefix))]
             | sort_by(.version | split(".") | map(tonumber))
-            | last | .identifier // empty'
+            | reverse | .[].identifier'
 }
 
 available_device() {
@@ -44,27 +46,53 @@ device_type() {
             | first | .identifier // empty'
 }
 
-runtime=$(newest_runtime)
-if [[ -z "$runtime" ]]; then
+describe_runtimes() {
+    for runtime in "${runtimes[@]}"; do
+        echo "$runtime" >&2
+        echo "  devices: $(xcrun simctl list devices available --json \
+            | jq -r --arg runtime "$runtime" '.devices[$runtime] // [] | map(.name) | join(", ")')" >&2
+        echo "  device types: $(xcrun simctl list runtimes --json \
+            | jq -r --arg runtime "$runtime" '.runtimes[] | select(.identifier == $runtime)
+                | .supportedDeviceTypes | map(.name) | join(", ")')" >&2
+    done
+}
+
+runtimes=()
+while IFS= read -r runtime; do
+    runtimes+=("$runtime")
+done < <(runtimes_newest_first)
+if [[ ${#runtimes[@]} -eq 0 ]]; then
     echo "No $platform simulator runtime installed; downloading it." >&2
     xcodebuild -downloadPlatform "$platform" >&2
-    runtime=$(newest_runtime)
+    while IFS= read -r runtime; do
+        runtimes+=("$runtime")
+    done < <(runtimes_newest_first)
 fi
-if [[ -z "$runtime" ]]; then
+if [[ ${#runtimes[@]} -eq 0 ]]; then
     echo "No $platform simulator runtime, even after downloading it." >&2
     exit 1
 fi
 
-udid=$(available_device "$runtime")
-if [[ -z "$udid" ]]; then
-    type=$(device_type "$runtime")
-    if [[ -z "$type" ]]; then
-        echo "$runtime supports no device named $device_prefix*." >&2
-        exit 1
+for runtime in "${runtimes[@]}"; do
+    udid=$(available_device "$runtime")
+    if [[ -n "$udid" ]]; then
+        echo "Using $(xcrun simctl list devices | grep "$udid" | sed -E 's/^ +//') on $runtime." >&2
+        echo "$udid"
+        exit 0
     fi
-    echo "No $device_prefix simulator on $runtime; creating one." >&2
-    udid=$(xcrun simctl create "CI $device_prefix" "$type" "$runtime")
-fi
+done
 
-echo "Using $(xcrun simctl list devices | grep "$udid" | sed -E 's/^ +//') on $runtime." >&2
-echo "$udid"
+for runtime in "${runtimes[@]}"; do
+    type=$(device_type "$runtime")
+    if [[ -n "$type" ]]; then
+        echo "No $device_prefix simulator installed; creating one on $runtime." >&2
+        udid=$(xcrun simctl create "CI $device_prefix" "$type" "$runtime")
+        echo "Using $(xcrun simctl list devices | grep "$udid" | sed -E 's/^ +//') on $runtime." >&2
+        echo "$udid"
+        exit 0
+    fi
+done
+
+echo "No $platform runtime has or supports a device named $device_prefix*. The image has:" >&2
+describe_runtimes
+exit 1
