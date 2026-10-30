@@ -122,7 +122,7 @@ let server = MMService {
     }
 }
 
-// server is a BracketAsync<SocketAddress, MMServiceError>: acquire binds and
+// server is a BracketAsync<[SocketAddress], MMServiceError>: acquire binds and
 // starts accepting, dispose drains in-flight calls and removes the socket.
 // fp-swift-service runs it: the first SIGTERM or SIGINT drains, a second
 // cancels the drain.
@@ -135,7 +135,7 @@ let daemon = Service(
 let result = await daemon()
 ```
 
-Because the server is a bracket, it composes with the rest of your daemon. With `BracketAsyncDo`, resources start in order and stop in reverse. A resource bound after the server starts only once the socket accepts connections, and stops before the server drains. The bracket's resource is the bound address, such as the port of a `.tcp(host:port: 0)` endpoint.
+Because the server is a bracket, it composes with the rest of your daemon. With `BracketAsyncDo`, resources start in order and stop in reverse. A resource bound after the server starts only once the socket accepts connections, and stops before the server drains. The bracket's resource is the bound addresses, one per endpoint, such as the port of a `.tcp(host:port: 0)` endpoint. One server can listen on several endpoints at once: `Configuration(endpoints: [.unix(path: socketPath), .tcp(host: "127.0.0.1", port: 7000)])` serves both with one router, one connection cap and one drain.
 
 You can also put handlers in reusable `RouteGroup` types (with their own files and dependencies) and add them to the `For` block. Every server registers two builtins: `server.schema` (discovery, filtered by the caller's traversal rights) and `server.entity` (an entity's ACL record).
 

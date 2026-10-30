@@ -408,7 +408,7 @@ When `Accepts` names **exactly one** concrete entity (one pattern, no wildcards,
 
 ## 3. Declaring the server as a resource
 
-`MMService { ... }` declares the server, and the value it builds *is* the server as a `BracketAsync<SocketAddress, MMServiceError>`: the resource is the bound address. So a daemon composes the server into the bracket it already runs, instead of adopting a new lifecycle mechanism. One builder holds configuration, authorization, logging, and handlers. Building it (before anything listens) builds the `Router` (with `registerBuiltins: true`, so `server.schema` and `server.entity` exist without user code), computes the hello fingerprint from every registered signature, and prepares metrics. The example daemon's:
+`MMService { ... }` declares the server, and the value it builds *is* the server as a `BracketAsync<[SocketAddress], MMServiceError>`: the resource is the bound addresses, one per endpoint. So a daemon composes the server into the bracket it already runs, instead of adopting a new lifecycle mechanism. One builder holds configuration, authorization, logging, and handlers. Building it (before anything listens) builds the `Router` (with `registerBuiltins: true`, so `server.schema` and `server.entity` exist without user code), computes the hello fingerprint from every registered signature, and prepares metrics. The example daemon's:
 
 ```swift
 import Logging
@@ -435,7 +435,7 @@ let service = MMService {
 }
 ```
 
-Required: exactly one `Configuration` and exactly one `ACLProvider` (authorization has no default, on purpose). Optional: `Log` (a `Logger`, a `label:level:` pair, or a closure sink `Log { level, message in ... }`) and `Types(Container.self)` for each shared types-only container (`#schemaTypes` block) your schemas reference. Namespaces declared with `For` add their own type tables automatically. Violations fail at daemon startup, like every router precondition. This includes a duplicate type definition and a `.reference` that no registered table resolves.
+Required: exactly one `Configuration` (`endpoint:` for one listener, `endpoints:` for several served as one server) and exactly one `ACLProvider` (authorization has no default, on purpose). Optional: `Log` (a `Logger`, a `label:level:` pair, or a closure sink `Log { level, message in ... }`) and `Types(Container.self)` for each shared types-only container (`#schemaTypes` block) your schemas reference. Namespaces declared with `For` add their own type tables automatically. Violations fail at daemon startup, like every router precondition. This includes a duplicate type definition and a `.reference` that no registered table resolves.
 
 Routes can go inline in the `For` block, or in a `RouteGroup`: a separately declared bundle of handlers with its own dependencies, like a custom SwiftUI view. The example keeps its handlers in `Examples/Daemon/JournalHandlers.swift`, so the daemon file stays pure wiring:
 
@@ -467,7 +467,7 @@ The `@RouterBuilder` closure accepts `On`/`Handle` expressions, `RouteGroup` val
 
 ### Running it: Service, and composition
 
-The server's acquire binds the endpoint, starts the accept loop, and returns once the socket accepts connections. Disposing it drains: stop accepting, let in-flight handlers finish and their responses flush, close the connections, remove the socket file. The example daemon has no other resources, so it hands the server straight to fp-swift-service:
+The server's acquire binds every endpoint, starts accepting on each, and returns once they all accept connections. Disposing it drains: stop accepting, let in-flight handlers finish and their responses flush, close the connections, remove the socket files. The example daemon has no other resources, so it hands the server straight to fp-swift-service:
 
 ```swift
 import FPService
@@ -489,7 +489,7 @@ switch await daemon() {
 }
 ```
 
-If the bind fails (for example, another instance holds the socket), the result is `.failure(.startFailed(.socketPathInUse(path:)))`. The bound address the server yields includes the port of a `.tcp(host:port: 0)` endpoint. If the accept loop fails while the daemon runs, dispose reports it at shutdown, as `.stopFailed(...)`.
+If the bind fails (for example, another instance holds the socket), the result is `.failure(.startFailed(.socketPathInUse(path:)))`. When one of several endpoints fails to bind, the ones already bound are closed and their socket files removed before the failure returns. The bound addresses the server yields, one per endpoint in declaration order, include the port of a `.tcp(host:port: 0)` endpoint. If an accept loop fails while the daemon runs, the whole server stops, and dispose reports it at shutdown, as `.stopFailed(...)`.
 
 A daemon with more resources composes them into one bracket with `BracketAsyncDo` and hands that to `Service`. Map each resource's error into one daemon error type with `mapError`. Acquires run in order and disposes in reverse, so a resource bound after the server (a discovery announcer, a health gate, an in-process client) starts only once the socket listens, and stops before the server drains. If an acquire fails, everything acquired before it is disposed in reverse, and `Service` reports `.startFailed` with the mapped error. Any other lifecycle works the same way: call the bracket with a body, and the server is up for exactly as long as the body runs.
 

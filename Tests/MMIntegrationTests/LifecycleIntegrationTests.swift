@@ -21,7 +21,7 @@ private enum HostFailure: Error {
 private func withServerAndClient(
     _ server: TestServer,
     path: String
-) -> BracketAsync<(SocketAddress, MMClientConnection), HostFailure> {
+) -> BracketAsync<([SocketAddress], MMClientConnection), HostFailure> {
     BracketAsyncDo<HostFailure>()
         .bind { server.service.start().mapError(HostFailure.server) }
         .bind { _ in
@@ -37,12 +37,12 @@ private func withServerAndClient(
 /// endpoint comes from the address the server's bracket yields.
 private func withTCPServerAndClient(
     _ server: TestServer
-) -> BracketAsync<(SocketAddress, MMClientConnection), HostFailure> {
+) -> BracketAsync<([SocketAddress], MMClientConnection), HostFailure> {
     BracketAsyncDo<HostFailure>()
         .bind { server.service.start().mapError(HostFailure.server) }
-        .bind { address in
+        .bind { addresses in
             MMClient(
-                endpoint: .tcp(host: "127.0.0.1", port: address.port ?? 0),
+                endpoint: .tcp(host: "127.0.0.1", port: addresses.first?.port ?? 0),
                 logger: quietClientLogger()
             )
             .mapError(HostFailure.client)
@@ -103,7 +103,7 @@ struct LifecycleIntegrationTests {
         #expect(bodyRan.withLockedValue { $0 } == false)
     }
 
-    @Test("the bracket yields the bound address: a client reaches an ephemeral TCP port")
+    @Test("the bracket yields the bound addresses: a client reaches an ephemeral TCP port")
     func ephemeralPortFromTheBracket() async throws {
         let server = makeTestServer(
             configuration: .init(endpoint: .tcp(host: "127.0.0.1", port: 0))

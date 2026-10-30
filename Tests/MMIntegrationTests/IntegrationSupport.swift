@@ -390,7 +390,7 @@ struct TestServer {
     static let burstConcurrency = 8
 
     var service: ServerRuntime
-    var bound: Signal<SocketAddress>
+    var bound: Signal<[SocketAddress]>
     /// Fired by `slow.wait` when its handler starts running.
     var slowStarted: Signal<Void>
     /// Opened by tests to let `slow.wait` complete.
@@ -432,7 +432,7 @@ func makeTestServer(
     configuration: MMServerConfiguration,
     gatedFollowQuorum: Int = 1
 ) -> TestServer {
-    let bound = Signal<SocketAddress>()
+    let bound = Signal<[SocketAddress]>()
     let slowStarted = Signal<Void>()
     let slowGate = Signal<Void>()
     let burstStarted = Signal<Void>()
@@ -686,12 +686,12 @@ func makeTestServer(
 }
 
 /// Listens with the service, fires the fixture's `bound` signal, runs `body`
-/// with the bound address, then drains and joins — the shared
+/// with the bound addresses, then drains and joins — the shared
 /// ``withListeningServer(_:seconds:onBodyError:_:)`` choreography, plus the
 /// gate-opening failure hook this fixture needs.
 func withRunningServer<T: Sendable>(
     _ server: TestServer,
-    _ body: @escaping @Sendable (SocketAddress) async throws -> T
+    _ body: @escaping @Sendable ([SocketAddress]) async throws -> T
 ) async throws -> T {
     try await withListeningServer(
         server.service,
@@ -705,9 +705,9 @@ func withRunningServer<T: Sendable>(
             server.burstGate.fire(())
             server.followGate.fire(())
         }
-    ) { address in
-        server.bound.fire(address)
-        return try await body(address)
+    ) { addresses in
+        server.bound.fire(addresses)
+        return try await body(addresses)
     }
 }
 
@@ -722,8 +722,8 @@ func withRunningServer<T: Sendable>(
 func runServerUntilDrained(_ server: TestServer, drain: Signal<Void>) async throws {
     let result = try await withDeadline(seconds: 60) {
         let withServer = server.service.start()
-        return await withServer { address in
-            server.bound.fire(address)
+        return await withServer { addresses in
+            server.bound.fire(addresses)
             // Signal.wait observes cancellation: a failing test that never
             // fires `drain` cancels this, and dispose then tears down.
             _ = try? await drain.wait()
@@ -742,8 +742,8 @@ func runServerUntilCancelled(_ server: TestServer, stop: Signal<Void>) async {
         await withThrowingTaskGroup(of: Void.self) { serverGroup in
             serverGroup.addTask {
                 let withServer = server.service.start()
-                _ = await withServer { address in
-                    server.bound.fire(address)
+                _ = await withServer { addresses in
+                    server.bound.fire(addresses)
                     // Parks until the group cancels it (Signal.wait observes
                     // cancellation), so dispose runs cancelled.
                     _ = try? await Signal<Void>().wait()

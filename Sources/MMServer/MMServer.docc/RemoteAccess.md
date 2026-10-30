@@ -188,6 +188,8 @@ In both cases, write the ACLs knowing that only the other-class bits apply:
 
 For everything else, use SSH forwarding. If tunnels seem inconvenient, the supported answer is still `ssh -N -f -L` (above), not TCP on a real network. `TCP_NODELAY` is set on all TCP channels. `unixSocketMode` is ignored for TCP.
 
+One server can serve both: `Configuration(endpoints: [.unix(path: socketPath), .tcp(host: "127.0.0.1", port: 7000)])`. Each connection keeps its own transport's identity: socket peers are authorized by their uid and gid, TCP peers are anonymous. Both share one router, one `maxConnections` cap and one graceful drain.
+
 ## 5. Troubleshooting
 
 Each item matches what the code does, so you can tell failures apart from the logs and returned errors alone.

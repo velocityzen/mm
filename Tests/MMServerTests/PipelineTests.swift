@@ -128,7 +128,7 @@ struct ServerConfigurationTests {
             unixSocketMode: 0o600,
             capabilities: 3
         )
-        #expect(configuration.endpoint == .tcp(host: "127.0.0.1", port: 0))
+        #expect(configuration.endpoints == [.tcp(host: "127.0.0.1", port: 0)])
         #expect(configuration.maxFrameLength == 4096)
         #expect(configuration.maxConnections == 2)
         #expect(configuration.maxInFlightRequestsPerConnection == 1)

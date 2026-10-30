@@ -5,16 +5,18 @@ import NIOCore
 /// frame size, connection count, in-flight requests, and idle time are all
 /// capped so no peer can grow server memory without limit.
 public struct MMServerConfiguration: Sendable {
-    /// Where to listen.
-    public var endpoint: MMEndpoint
+    /// Where to listen: one listener per endpoint, all of them one server
+    /// with one router, one connection cap, and one graceful drain. Never
+    /// empty.
+    public var endpoints: [MMEndpoint]
 
     /// Maximum accepted frame payload length in bytes, enforced by
     /// `MMFrameDecoder` *before* accumulation. A peer claiming a larger frame
     /// has its connection failed immediately. Default 16 MiB.
     public var maxFrameLength: UInt32
 
-    /// Maximum concurrently open connections. Enforced at accept: over the
-    /// cap, the new connection is closed immediately (no busy frame — see
+    /// Maximum concurrently open connections, across every endpoint. Enforced
+    /// at accept: over the cap, the new connection is closed immediately (no busy frame — see
     /// `MMService` for the rationale) and a rejection is counted.
     public var maxConnections: Int
 
@@ -41,7 +43,7 @@ public struct MMServerConfiguration: Sendable {
     /// while the server pushes items to it, and must not be reaped mid-stream.
     public var idleTimeout: TimeAmount
 
-    /// File mode `chmod(2)`ed onto the unix socket **between `bind(2)` and
+    /// File mode `chmod(2)`ed onto each unix socket **between `bind(2)` and
     /// `listen(2)`**, so no connection can ever be accepted under a more
     /// permissive default mode.
     ///
@@ -68,6 +70,38 @@ public struct MMServerConfiguration: Sendable {
     public static let defaultIdleTimeout = TimeAmount.seconds(120)
     public static let defaultUnixSocketMode: UInt16 = 0o660
 
+    /// Listens on every endpoint in `endpoints`, which must not be empty.
+    public init(
+        endpoints: [MMEndpoint],
+        maxFrameLength: UInt32 = MMWireInfo.defaultMaxFrameLength,
+        maxConnections: Int = Self.defaultMaxConnections,
+        maxInFlightRequestsPerConnection: Int = Self.defaultMaxInFlightRequestsPerConnection,
+        maxConcurrentStreamsPerConnection: Int = Self.defaultMaxConcurrentStreamsPerConnection,
+        idleTimeout: TimeAmount = Self.defaultIdleTimeout,
+        unixSocketMode: UInt16 = Self.defaultUnixSocketMode,
+        capabilities: UInt32 = 0
+    ) {
+        precondition(!endpoints.isEmpty, "MMServerConfiguration declares no endpoint")
+        precondition(maxConnections > 0, "maxConnections must be positive")
+        precondition(
+            maxInFlightRequestsPerConnection > 0,
+            "maxInFlightRequestsPerConnection must be positive"
+        )
+        precondition(
+            maxConcurrentStreamsPerConnection > 0,
+            "maxConcurrentStreamsPerConnection must be positive"
+        )
+        self.endpoints = endpoints
+        self.maxFrameLength = maxFrameLength
+        self.maxConnections = maxConnections
+        self.maxInFlightRequestsPerConnection = maxInFlightRequestsPerConnection
+        self.maxConcurrentStreamsPerConnection = maxConcurrentStreamsPerConnection
+        self.idleTimeout = idleTimeout
+        self.unixSocketMode = unixSocketMode
+        self.capabilities = capabilities
+    }
+
+    /// Listens on one endpoint.
     public init(
         endpoint: MMEndpoint,
         maxFrameLength: UInt32 = MMWireInfo.defaultMaxFrameLength,
@@ -78,22 +112,15 @@ public struct MMServerConfiguration: Sendable {
         unixSocketMode: UInt16 = Self.defaultUnixSocketMode,
         capabilities: UInt32 = 0
     ) {
-        precondition(maxConnections > 0, "maxConnections must be positive")
-        precondition(
-            maxInFlightRequestsPerConnection > 0,
-            "maxInFlightRequestsPerConnection must be positive"
+        self.init(
+            endpoints: [endpoint],
+            maxFrameLength: maxFrameLength,
+            maxConnections: maxConnections,
+            maxInFlightRequestsPerConnection: maxInFlightRequestsPerConnection,
+            maxConcurrentStreamsPerConnection: maxConcurrentStreamsPerConnection,
+            idleTimeout: idleTimeout,
+            unixSocketMode: unixSocketMode,
+            capabilities: capabilities
         )
-        precondition(
-            maxConcurrentStreamsPerConnection > 0,
-            "maxConcurrentStreamsPerConnection must be positive"
-        )
-        self.endpoint = endpoint
-        self.maxFrameLength = maxFrameLength
-        self.maxConnections = maxConnections
-        self.maxInFlightRequestsPerConnection = maxInFlightRequestsPerConnection
-        self.maxConcurrentStreamsPerConnection = maxConcurrentStreamsPerConnection
-        self.idleTimeout = idleTimeout
-        self.unixSocketMode = unixSocketMode
-        self.capabilities = capabilities
     }
 }

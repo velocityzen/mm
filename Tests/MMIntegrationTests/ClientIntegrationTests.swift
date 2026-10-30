@@ -311,8 +311,8 @@ struct ClientIntegrationTests {
         let server = makeTestServer(
             configuration: .init(endpoint: .tcp(host: "127.0.0.1", port: 0))
         )
-        try await withRunningServer(server) { address in
-            let port = try #require(address.port)
+        try await withRunningServer(server) { addresses in
+            let port = try #require(addresses.first?.port)
             let (replies, runResult) = try await withConnectedClient(
                 to: .tcp(host: "127.0.0.1", port: port)
             ) {

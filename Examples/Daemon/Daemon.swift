@@ -110,7 +110,7 @@ struct ExampleDaemon {
         // accepting, dispose drains and removes the socket. A daemon with
         // more resources composes them into one bracket (`BracketAsyncDo`):
         // they start in order once the socket listens, and stop in reverse.
-        // The bracket's resource is the bound address; the default body
+        // The bracket's resource is the bound addresses; the default body
         // below just waits for a shutdown signal.
         let daemon = Service(
             service,

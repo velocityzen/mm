@@ -419,8 +419,8 @@ struct ServerIntegrationTests {
             configuration: .init(endpoint: .tcp(host: "127.0.0.1", port: 0))
         )
         try await withRunningServer(server) { _ in
-            let address = try await server.bound.wait()
-            let port = try #require(address.port)
+            let addresses = try await server.bound.wait()
+            let port = try #require(addresses.first?.port)
             try await withWireSession(host: "127.0.0.1", port: port) { session in
                 _ = try await session.handshake()
                 try await session.send(

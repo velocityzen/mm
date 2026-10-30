@@ -21,14 +21,14 @@ let server = MMService {
     }
 }
 
-// BracketAsync<SocketAddress, MMServiceError>: acquire binds and starts
+// BracketAsync<[SocketAddress], MMServiceError>: acquire binds and starts
 // accepting, dispose drains and joins. Compose it with your own resources,
 // run it with your lifecycle (here fp-swift-service, SIGTERM/SIGINT to drain).
 let withService = Service(server, shutdownSignals: [SIGTERM, SIGINT])
 let result = await withService()
 ```
 
-``MMService`` binds the endpoint (Unix domain socket or TCP), exchanges hellos, and dispatches through the ``Router`` in a fixed order:
+``MMService`` binds its endpoints (Unix domain sockets, TCP, or both at once), exchanges hellos, and dispatches through the ``Router`` in a fixed order:
 
 1. Route lookup.
 2. Parse the open envelope's entity slot.
@@ -42,7 +42,7 @@ Register handlers with `On` in the service builder, or `Handle` on a bare ``Rout
 
 Authorization decisions come from an ``EntityACLProvider``, the host's dynamic source of rules. Its requirements, like every handler, are `@concurrent`: they run in connection tasks, off any actor. For static rules, use ``InMemoryACLProvider`` or the declarative `ACLProvider { Entity(...) { ... } }` tree. On Unix sockets, peer identity comes from kernel credentials. If the server cannot read them, it closes the connection without dispatch. A missing ACL is a denial that does not reveal whether the entity exists.
 
-``MMService`` is the server as a bracket. Its acquire returns once the endpoint is bound and listening, so startup ordering is bracket composition: a resource composed after it (`flatMap`, `BracketAsyncDo`) starts only once the server accepts connections, and stops before the server drains. The resource it yields is the bound address. Every server automatically registers the builtins `server.schema` and `server.entity`. The client is declared the same way, as an `MMClient` bracket.
+``MMService`` is the server as a bracket. Its acquire returns once every endpoint is bound and listening, so startup ordering is bracket composition: a resource composed after it (`flatMap`, `BracketAsyncDo`) starts only once the server accepts connections, and stops before the server drains. The resource it yields is the bound addresses, one per endpoint. Every server automatically registers the builtins `server.schema` and `server.entity`. The client is declared the same way, as an `MMClient` bracket.
 
 The <doc:IntegrationGuide> shows how to embed all of this in a production daemon, including a SQLite-backed ACL provider and hardening settings. <doc:RemoteAccess> covers SSH socket forwarding, systemd and launchd recipes, and TCP caveats.
 

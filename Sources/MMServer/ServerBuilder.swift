@@ -55,9 +55,9 @@ public func Configuration(_ configuration: MMServerConfiguration) -> ServerPart 
     ServerPart(kind: .configuration(configuration))
 }
 
-/// Mirrors ``MMServerConfiguration/init(endpoint:maxFrameLength:maxConnections:maxInFlightRequestsPerConnection:maxConcurrentStreamsPerConnection:idleTimeout:unixSocketMode:capabilities:)``.
+/// Mirrors ``MMServerConfiguration/init(endpoints:maxFrameLength:maxConnections:maxInFlightRequestsPerConnection:maxConcurrentStreamsPerConnection:idleTimeout:unixSocketMode:capabilities:)``.
 public func Configuration(
-    endpoint: MMEndpoint,
+    endpoints: [MMEndpoint],
     maxFrameLength: UInt32 = MMWireInfo.defaultMaxFrameLength,
     maxConnections: Int = MMServerConfiguration.defaultMaxConnections,
     maxInFlightRequestsPerConnection: Int =
@@ -71,7 +71,7 @@ public func Configuration(
     ServerPart(
         kind: .configuration(
             MMServerConfiguration(
-                endpoint: endpoint,
+                endpoints: endpoints,
                 maxFrameLength: maxFrameLength,
                 maxConnections: maxConnections,
                 maxInFlightRequestsPerConnection: maxInFlightRequestsPerConnection,
@@ -80,6 +80,31 @@ public func Configuration(
                 unixSocketMode: unixSocketMode,
                 capabilities: capabilities
             )))
+}
+
+/// Mirrors ``MMServerConfiguration/init(endpoint:maxFrameLength:maxConnections:maxInFlightRequestsPerConnection:maxConcurrentStreamsPerConnection:idleTimeout:unixSocketMode:capabilities:)``.
+public func Configuration(
+    endpoint: MMEndpoint,
+    maxFrameLength: UInt32 = MMWireInfo.defaultMaxFrameLength,
+    maxConnections: Int = MMServerConfiguration.defaultMaxConnections,
+    maxInFlightRequestsPerConnection: Int =
+        MMServerConfiguration.defaultMaxInFlightRequestsPerConnection,
+    maxConcurrentStreamsPerConnection: Int =
+        MMServerConfiguration.defaultMaxConcurrentStreamsPerConnection,
+    idleTimeout: TimeAmount = MMServerConfiguration.defaultIdleTimeout,
+    unixSocketMode: UInt16 = MMServerConfiguration.defaultUnixSocketMode,
+    capabilities: UInt32 = 0
+) -> ServerPart {
+    Configuration(
+        endpoints: [endpoint],
+        maxFrameLength: maxFrameLength,
+        maxConnections: maxConnections,
+        maxInFlightRequestsPerConnection: maxInFlightRequestsPerConnection,
+        maxConcurrentStreamsPerConnection: maxConcurrentStreamsPerConnection,
+        idleTimeout: idleTimeout,
+        unixSocketMode: unixSocketMode,
+        capabilities: capabilities
+    )
 }
 
 /// The authorization backend — required, exactly once. There is deliberately
@@ -245,7 +270,7 @@ public enum ServerBuilder: MMListBuilding {
     }
 }
 
-extension BracketAsync where R == SocketAddress, E == MMServiceError {
+extension BracketAsync where R == [SocketAddress], E == MMServiceError {
     /// Declares a server from declarative parts. See ``ServerPart`` for the
     /// element inventory and the exactly-once rules.
     public init(
@@ -303,7 +328,7 @@ extension ServerRuntime {
         }
         guard let configuration else {
             preconditionFailure(
-                "MMService declares no Configuration — the endpoint is not defaultable")
+                "MMService declares no Configuration — endpoints are not defaultable")
         }
         guard let aclProvider else {
             preconditionFailure(

@@ -17,9 +17,10 @@ import Glibc
 import Musl
 #endif
 
-/// Failures of the ``MMService`` bracket. Acquire fails with one when the
-/// endpoint cannot be bound, before anything is accepted; dispose fails with
-/// one only when the accept loop itself failed. Per-connection failures never
+/// Failures of the ``MMService`` bracket. Acquire fails with one when an
+/// endpoint cannot be bound, before anything is accepted, and closes the
+/// endpoints it already bound; dispose fails with one only when an accept
+/// loop itself failed. Per-connection failures never
 /// use this type — they are logged and the connection closed.
 public enum MMServiceError: Error, Sendable, Hashable {
     /// A live server is already listening on the unix socket path (the
@@ -44,10 +45,16 @@ public enum MMServiceError: Error, Sendable, Hashable {
 }
 
 /// The server, as a scoped resource (fp-swift-bracket's `BracketAsync`):
-/// acquire binds the endpoint and starts accepting, so the server is
+/// acquire binds every endpoint and starts accepting, so the server is
 /// listening once acquire returns; dispose drains it gracefully and joins it.
-/// The resource is the bound address — how hosts and tests learn the
-/// ephemeral port of a `tcp(host:port: 0)` endpoint.
+/// The resource is the bound addresses, one per endpoint in declaration
+/// order — how hosts and tests learn the ephemeral port of a
+/// `tcp(host:port: 0)` endpoint.
+///
+/// Every endpoint is the same server: one router, one connection cap
+/// (`maxConnections` counts connections on all of them), one drain. Serving
+/// a local unix socket and a loopback TCP port together is one
+/// `Configuration(endpoints: [.unix(path: sock), .tcp(host: "127.0.0.1", port: 7000)])`.
 ///
 /// Declare it with the builder, then compose it with the host's other
 /// resources — they start in order and stop in reverse — and run the result
@@ -70,37 +77,38 @@ public enum MMServiceError: Error, Sendable, Hashable {
 /// declaration mistakes stop the daemon before anything binds. The value is
 /// a reusable recipe: each run binds afresh.
 ///
-/// - Acquire returns once the endpoint is bound and listening, so a resource
-///   composed after this one (`flatMap`, `BracketAsyncDo`) starts only once
-///   the server can take connections, and stops before it. It fails with an
-///   ``MMServiceError`` when the endpoint cannot be bound; the body and
-///   dispose are skipped then.
+/// - Acquire returns once every endpoint is bound and listening, so a
+///   resource composed after this one (`flatMap`, `BracketAsyncDo`) starts
+///   only once the server can take connections, and stops before it. It
+///   fails with an ``MMServiceError`` when an endpoint cannot be bound, after
+///   closing the ones already bound; the body and dispose are skipped then.
 /// - Dispose drains: it returns once every connection drained and closed and
-///   the socket file is gone. Run in a cancelled task, it tears connections
-///   down at once instead. It fails only when the accept loop failed.
+///   the socket files are gone. Run in a cancelled task, it tears connections
+///   down at once instead. It fails only when an accept loop failed, which
+///   also tears down every other endpoint's connections.
 ///
 /// ## Graceful shutdown semantics
 ///
 /// On graceful shutdown (the bracket's dispose) the server (1) stops
-/// accepting — the listening channel closes; (2) every open connection —
+/// accepting — every listening channel closes; (2) every open connection —
 /// including one still waiting for its peer's hello — stops *reading*
 /// (input-half close) while in-flight handlers complete and their responses
 /// flush through the connection's writer; (3) connection channels close;
-/// (4) for unix endpoints, the socket file is removed, unless another server
+/// (4) for unix endpoints, each socket file is removed, unless another server
 /// instance has already replaced it at the same path during the drain (the
 /// file's device/inode is compared against the one this instance bound — see
 /// `removeSocketFile`); then the dispose returns. Cancelling the task that
 /// runs dispose instead tears connections down immediately via
 /// `executeThenClose` and task-group cancellation — no descriptors leak on
 /// either path.
-public typealias MMService = BracketAsync<SocketAddress, MMServiceError>
+public typealias MMService = BracketAsync<[SocketAddress], MMServiceError>
 
-extension BracketAsync where R == SocketAddress, E == MMServiceError {
+extension BracketAsync where R == [SocketAddress], E == MMServiceError {
     /// Declares a server from explicit parameters; the builder form
     /// (``ServerPart``) declares the same server.
     ///
     /// - Parameters:
-    ///   - configuration: Endpoint and hardening caps.
+    ///   - configuration: Endpoints and hardening caps.
     ///   - namespaces: Sealed descriptor namespaces cross-checked against the
     ///     registered routes at startup (see
     ///     ``Router/init(namespaces:sharedTypes:aclProvider:logger:registerBuiltins:routes:)``).
@@ -138,7 +146,7 @@ extension BracketAsync where R == SocketAddress, E == MMServiceError {
 }
 
 /// The assembled server behind an ``MMService`` bracket: the router, the
-/// hello preamble, and the transport that binds an ``MMEndpoint``, accepts
+/// hello preamble, and the transport that binds each ``MMEndpoint``, accepts
 /// connections, runs the hello exchange and per-connection request loop, and
 /// dispatches through the ``Router``. Package-internal: hosts only ever hold
 /// the bracket; tests reach the router through it.
@@ -178,6 +186,19 @@ package struct ServerRuntime: Sendable {
         let localAddress: SocketAddress
         /// Removes the unix socket file (identity-guarded); nothing for TCP.
         let removeFiles: @Sendable () -> Void
+
+        /// Closes a listener that never accepted, and removes its file.
+        func close() async {
+            try? await self.channel.executeThenClose { _ in }
+            self.removeFiles()
+        }
+    }
+
+    /// Connections open across every listener, and the last connection id
+    /// handed out: one cap and one id sequence for the whole server.
+    private struct ConnectionCounts: Sendable {
+        var open = 0
+        var lastID: UInt64 = 0
     }
 
     /// The bracket-owned running server behind `start()`. The accept loop
@@ -185,11 +206,11 @@ package struct ServerRuntime: Sendable {
     /// guaranteed owner — it requests the drain and joins the loop before the
     /// scope returns, so the task can neither leak nor outlive the resource.
     private struct RunningServer: Sendable {
-        let localAddress: SocketAddress
-        /// Requesting it starts the drain: the listener and every open
+        let localAddresses: [SocketAddress]
+        /// Requesting it starts the drain: every listener and every open
         /// connection stop reading. Idempotent.
         let shutdown: Shutdown
-        /// The accept loop; returns once every connection has closed.
+        /// The accept loops; returns once every connection has closed.
         let loop: Task<Result<Void, MMServiceError>, Never>
     }
 
@@ -235,7 +256,7 @@ package struct ServerRuntime: Sendable {
     package func start() -> MMService {
         BracketAsync<RunningServer, MMServiceError>(
             acquire: {
-                await self.bindEndpoint().map(self.startAccepting)
+                await self.bindEndpoints().map(self.startAccepting)
             },
             dispose: { running in
                 running.shutdown.request()
@@ -248,21 +269,23 @@ package struct ServerRuntime: Sendable {
                 }
             }
         )
-        .map(\.localAddress)
+        .map(\.localAddresses)
     }
 
-    /// Starts the accept loop in the task ``RunningServer`` owns: the loop
-    /// drains and closes every connection before it returns, so the socket
-    /// file goes last.
-    private func startAccepting(_ bound: BoundServer) -> RunningServer {
+    /// Starts the accept loops in the task ``RunningServer`` owns: they
+    /// drain and close every connection before it returns, so the socket
+    /// files go last.
+    private func startAccepting(_ bound: [BoundServer]) -> RunningServer {
         let shutdown = Shutdown()
         let loop = Task {
-            let stopped = await self.acceptLoop(server: bound.channel, shutdown: shutdown)
-            bound.removeFiles()
+            let stopped = await self.acceptLoop(servers: bound.map(\.channel), shutdown: shutdown)
+            for server in bound {
+                server.removeFiles()
+            }
             return stopped
         }
         return RunningServer(
-            localAddress: bound.localAddress,
+            localAddresses: bound.map(\.localAddress),
             shutdown: shutdown,
             loop: loop
         )
@@ -270,9 +293,28 @@ package struct ServerRuntime: Sendable {
 
     // MARK: - Bind
 
-    private func bindEndpoint() async -> Result<BoundServer, MMServiceError> {
+    /// Binds the endpoints in declaration order. When one fails, the ones
+    /// already bound are closed before the failure returns, so a failed
+    /// start leaves no listener and no socket file behind.
+    private func bindEndpoints() async -> Result<[BoundServer], MMServiceError> {
+        var bound: [BoundServer] = []
+        for endpoint in self.configuration.endpoints {
+            switch await self.bindEndpoint(endpoint) {
+                case .success(let server):
+                    bound.append(server)
+                case .failure(let error):
+                    for server in bound {
+                        await server.close()
+                    }
+                    return .failure(error)
+            }
+        }
+        return .success(bound)
+    }
+
+    private func bindEndpoint(_ endpoint: MMEndpoint) async -> Result<BoundServer, MMServiceError> {
         await Result.fromAsync {
-            switch self.configuration.endpoint {
+            switch endpoint {
                 case .unix(let path):
                     try await self.bindUnixDomainSocket(path: path)
                 case .tcp(let host, let port):
@@ -480,17 +522,28 @@ package struct ServerRuntime: Sendable {
 
     // MARK: - Accept loop
 
-    /// Accepts until the graceful drain or cancellation ends the accept
-    /// stream, and returns once every connection has closed.
+    /// Accepts on every listener until the graceful drain or cancellation
+    /// ends their accept streams, and returns once every connection has
+    /// closed. A listener whose accepting fails cancels the others: the
+    /// server stops as a whole.
     ///
     /// - Returns: `.success` for a stop the owner asked for (a drain, or
     ///   cancellation); `.io` when accepting itself failed.
     private func acceptLoop(
-        server: Listener,
+        servers: [Listener],
         shutdown: Shutdown
     ) async -> Result<Void, MMServiceError> {
-        await Result.fromAsync {
-            try await self.accept(server: server, shutdown: shutdown)
+        // Shared with every listener and connection child task, hence a
+        // locked box rather than loop-local state. Counters, not domain state.
+        let counts = NIOLockedValueBox(ConnectionCounts())
+        return await Result.fromAsync {
+            try await withThrowingDiscardingTaskGroup { listeners in
+                for server in servers {
+                    listeners.addTask {
+                        try await self.accept(server: server, counts: counts, shutdown: shutdown)
+                    }
+                }
+            }
         }
         .flatMapError(Self.stopResult)
     }
@@ -503,11 +556,9 @@ package struct ServerRuntime: Sendable {
 
     private func accept(
         server: Listener,
+        counts: NIOLockedValueBox<ConnectionCounts>,
         shutdown: Shutdown
     ) async throws {
-        // Shared with connection child tasks for the decrement, hence a locked
-        // box rather than accept-loop-local state. A counter, not domain state.
-        let activeConnections = NIOLockedValueBox(0)
         try await withThrowingDiscardingTaskGroup { connections in
             try await server.executeThenClose { acceptStream in
                 // Stop accepting on graceful shutdown; the accept stream
@@ -515,17 +566,18 @@ package struct ServerRuntime: Sendable {
                 // drain.
                 try await withShutdownHandler(on: shutdown, { server.channel.close(promise: nil) }) {
                     await Result.fromAsync {
-                        var nextConnectionID: UInt64 = 0
                         for try await accepted in acceptStream {
                             let connection = accepted.connection
-                            nextConnectionID &+= 1
                             // Cap enforced AT accept, before any child task exists.
-                            let admitted = activeConnections.withLockedValue { count in
-                                guard count < self.configuration.maxConnections else { return false }
-                                count += 1
-                                return true
+                            let admittedID = counts.withLockedValue { state -> UInt64? in
+                                guard state.open < self.configuration.maxConnections else {
+                                    return nil
+                                }
+                                state.open += 1
+                                state.lastID &+= 1
+                                return state.lastID
                             }
-                            guard admitted else {
+                            guard let connectionID = admittedID else {
                                 // Busy-rejection choice: close immediately, no busy
                                 // frame. Pre-hello there is no msgid to correlate an
                                 // error response to, and inventing a hello-level busy
@@ -550,9 +602,8 @@ package struct ServerRuntime: Sendable {
                             }
                             self.metrics.connectionsAccepted.increment()
                             self.metrics.activeConnections.record(
-                                activeConnections.withLockedValue { $0 }
+                                counts.withLockedValue { $0.open }
                             )
-                            let connectionID = nextConnectionID
                             connections.addTask {
                                 // Task-local binding: hosts that bootstrap
                                 // swift-log with MMLogContext.metadataProvider get
@@ -566,9 +617,9 @@ package struct ServerRuntime: Sendable {
                                         shutdown: shutdown
                                     )
                                 }
-                                let remaining = activeConnections.withLockedValue { count in
-                                    count -= 1
-                                    return count
+                                let remaining = counts.withLockedValue { state in
+                                    state.open -= 1
+                                    return state.open
                                 }
                                 self.metrics.activeConnections.record(remaining)
                             }

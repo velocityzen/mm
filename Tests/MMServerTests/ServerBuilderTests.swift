@@ -159,6 +159,16 @@ struct ServerBuilderTests {
         }
     }
 
+    @Test("an empty endpoint list is programmer error")
+    func emptyEndpoints() async throws {
+        await #expect(processExitsWith: .failure) {
+            _ = MMService {
+                Configuration(endpoints: [])
+                ACLProvider(grantingProvider())
+            }
+        }
+    }
+
     @Test("declaring the same namespace twice is programmer error")
     func duplicateNamespace() async throws {
         await #expect(processExitsWith: .failure) {
