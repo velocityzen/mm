@@ -61,7 +61,8 @@ public struct MMClientConfiguration: Sendable {
     /// with no traffic in *either* direction for this long is closed — pending
     /// calls fail with `MMCallError.connectionClosed`. Inbound stream items
     /// count as liveness, so a consumer of a server→client stream is not
-    /// reaped mid-stream.
+    /// reaped mid-stream. Measured from the end of the hello exchange, which
+    /// ``helloTimeout`` bounds instead.
     public var idleTimeout: TimeAmount?
 
     public init(

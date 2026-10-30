@@ -120,4 +120,4 @@ final class ClientHelloHandler: ChannelInboundHandler {
 }
 
 // Idle reaping is MMWire's shared `MMIdleCloseHandler`, installed only when
-// ``MMClientConfiguration/idleTimeout`` is set.
+// ``MMClientConfiguration/idleTimeout`` is set, once the hello is done.

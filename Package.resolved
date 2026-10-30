@@ -1,5 +1,5 @@
 {
-  "originHash" : "e713b1d5a135cc79fac9509e77dcf0137c8abd358ede87135ee7571226258c53",
+  "originHash" : "196d204f14daa4d40703ef2bcf278051e0c8cc8d36d8263c32b91209e08edf6e",
   "pins" : [
     {
       "identity" : "fp-swift",
@@ -34,7 +34,7 @@
       "location" : "https://github.com/velocityzen/fp-swift-service.git",
       "state" : {
         "branch" : "main",
-        "revision" : "d84c612d8798ad3a212e8614e8338c15cfbe2240"
+        "revision" : "0f790604ffa7e676ca47c61c45be34c10ed61169"
       }
     },
     {

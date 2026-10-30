@@ -367,6 +367,56 @@ struct ClientIntegrationTests {
         }
     }
 
+    @Test("client idleTimeout never preempts a slow server hello: helloTimeout bounds that phase")
+    func clientIdleWaitsForHello() async throws {
+        try await withTempSocketPath { path in
+            // A raw server that answers the hello only after the client's
+            // idle timeout has passed several times over: what a loaded CI
+            // runner did to the reap test above, made deterministic.
+            let listener = try await ServerBootstrap(
+                group: MultiThreadedEventLoopGroup.singleton
+            )
+            .bind(unixDomainSocketPath: path) { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    try NIOAsyncChannel<ByteBuffer, ByteBuffer>(
+                        wrappingChannelSynchronously: channel)
+                }
+            }
+            try await withThrowingTaskGroup(of: Void.self) { tasks in
+                tasks.addTask {
+                    try await listener.executeThenClose { inbound in
+                        for try await accepted in inbound {
+                            try await accepted.executeThenClose { input, output in
+                                try await Task.sleep(for: .milliseconds(400))
+                                var frame = ByteBuffer()
+                                var hello = try MMHello(
+                                    protocolVersion: 1, schemaFingerprint: 0, capabilities: 0
+                                ).encode().get()
+                                frame.writeInteger(
+                                    UInt32(hello.readableBytes), endianness: .little)
+                                frame.writeBuffer(&hello)
+                                try await output.write(frame)
+                                for try await _ in input {}
+                            }
+                            return
+                        }
+                    }
+                }
+                let outcome = try await withDeadline {
+                    let client = MMClient {
+                        Configuration(endpoint: .unix(path: path), idleTimeout: .milliseconds(100))
+                    }
+                    return await client { connection in
+                        .success(connection.server.protocolVersion)
+                    }
+                }
+                tasks.cancelAll()
+                try? await tasks.waitForAll()
+                #expect(outcome == .success(1))
+            }
+        }
+    }
+
     @Test("a call failing .connectionClosed never observes a still-connected state")
     func closeFailureObservesClosedState() async throws {
         try await withTempSocketPath { path in

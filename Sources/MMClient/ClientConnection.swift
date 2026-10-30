@@ -233,20 +233,17 @@ public actor MMClientConnection {
         var serverHello: EventLoopFuture<MMHello>
     }
 
-    /// Per-connection pipeline, head to tail: optional idle reaper, framing
-    /// codec with the configured cap, hello handler. Must run on the channel's
-    /// event loop. Internal so tests assemble the identical pipeline on a
-    /// `NIOAsyncTestingChannel`.
+    /// Per-connection pipeline, head to tail: framing codec with the
+    /// configured cap, hello handler. The optional idle reaper joins at the
+    /// head once the hello is done (see `startIdleReaping`). Must run on the
+    /// channel's event loop. Internal so tests assemble the identical
+    /// pipeline on a `NIOAsyncTestingChannel`.
     static func configurePipeline(
         channel: any Channel,
         configuration: MMClientConfiguration,
         helloPromise: EventLoopPromise<MMHello>
     ) throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
         let sync = channel.pipeline.syncOperations
-        if let idleTimeout = configuration.idleTimeout {
-            try sync.addHandler(IdleStateHandler(allTimeout: idleTimeout))
-            try sync.addHandler(MMIdleCloseHandler())
-        }
         try sync.addHandler(
             ByteToMessageHandler(MMFrameDecoder(maxFrameLength: configuration.maxFrameLength))
         )
@@ -296,6 +293,7 @@ public actor MMClientConnection {
                 ?? .transport(description: String(describing: error))
         }
         .flatMap { hello in Self.negotiate(serverHello: hello, configuration: configuration) }
+        .tapAsync { _ in await Self.startIdleReaping(on: raw, configuration: configuration) }
         .tapErrorAsync { _ in await Self.discard(channel) }
         .map { server in
             MMClientConnection(
@@ -305,6 +303,24 @@ public actor MMClientConnection {
                 logger: logger
             )
         }
+    }
+
+    /// Installs the idle reaper at the head of the pipeline, once the hello
+    /// is done: the hello exchange is bound by `helloTimeout`, so a short
+    /// `idleTimeout` never fails a connect whose server is slow to answer.
+    /// A channel that closed in between can't take the handlers; the
+    /// connection then reports that close itself.
+    private static func startIdleReaping(
+        on channel: any Channel,
+        configuration: MMClientConfiguration
+    ) async {
+        guard let idleTimeout = configuration.idleTimeout else { return }
+        _ = try? await channel.eventLoop.submit {
+            let sync = channel.pipeline.syncOperations
+            // Added head-first, so the reaper ends up ahead of its closer.
+            try sync.addHandler(MMIdleCloseHandler(), position: .first)
+            try sync.addHandler(IdleStateHandler(allTimeout: idleTimeout), position: .first)
+        }.get()
     }
 
     /// Pure negotiation math: min-wins version (a server advertising version 0
