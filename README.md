@@ -265,6 +265,49 @@ denied: journal.append on journal.system            # exit code 77
 
 Every command takes the entity as an optional positional, after any required or optional single-value positional fields (ArgumentParser fills positionals greedily, so `retry <id>` binds the id). Request fields default to `--field-name` options. Positional style is opt-in: `Field("line", .string, cli: .argument)` gives `mm journal add "hello" journal.notes`, as in the runnable example in `Examples/`.
 
+`cli: .input` lets that value come from an input too. `Field("query", .string, cli: .input)` gives both `tool search "one"` and `tool search --input queries.txt --limit 5` (`--input -` reads stdin). With `--input`, a lone positional is the entity. The input arrives as a byte stream, `MMCLIInput`, with `.lines` for text. By default the command makes one call per non-blank line, with every other argument shared. Under `--output text`, each call's output follows a `==> line <==` heading. To decide the work yourself, add an `Input(...)` entry to the `MMCLI { }` block. It gets the stream, the parsed arguments, and the call, and returns the results as an `AsyncSequence` of `Result`s, such as an [FPPipe](https://github.com/velocityzen/fp-swift-pipe) `Pipe`. The arguments are the request the command line describes, with the input field empty, so the body can read the input with them. The call takes a whole request (`search(request)`), or just the input field's value (`search(query)`), which keeps the other arguments as they are:
+
+```swift
+Input(Search.RootCommand.self) { input, arguments, search in
+    Pipe<Search.RootResponse, MMCLIError> {
+        FromResult(input.lines)
+        Filter { (query: String) in !query.isEmpty && !query.hasPrefix("#") }
+        Map { (query: String) in Search.RootRequest(query: query, limit: arguments.limit) }
+        AsyncFlatMapKeepOrder(concurrency: 4) { (request: Search.RootRequest) in await search(request) }
+    }
+}
+```
+
+The command prints each success in its output format. A failure that belongs to one value (an application error, malformed params, or the body's own error) is reported and the run goes on, then the command exits with that failure's code. Any other failure, such as a denial, ends the run. The first Ctrl-C ends the input: the calls in flight finish, and the command exits 130. The field must be a required `.string`, no other positional may be optional or an array, and the call must not stream requests, since stdin belongs to the request stream.
+
+Settings for reading the input that the server never sees, such as a delimiter or a column, go in a block on the call's `CLI(...)` part, or a bare `CLI { }` to keep the command's name. They are declared like request fields and parse like them, but a required one may take a `default:`, which is its value when the option is absent. A body that takes four parameters gets them as a typed `options` value:
+
+```swift
+Call("@", description: "Searches the index") {
+    CLI {
+        Field("column", .int, description: "Which tab-separated column holds the query", default: 0)
+    }
+    Access { .read }
+    Request {
+        Field("query", .string, cli: .input)
+        Field("limit", .optional(.int))
+    }
+    Response { Field("hits", .array(.string)) }
+}
+```
+
+```swift
+Input(Search.RootCommand.self) { input, arguments, options, search in
+    Pipe<Search.RootResponse, MMCLIError> {
+        FromResult(input.lines)
+        CompactMap { (line: String) in column(options.column, of: line) }
+        AsyncFlatMap { (query: String) in await search(query) }
+    }
+}
+```
+
+Like the rest of the CLI overlay, these options are never served, fingerprinted, or compared. It needs a `cli: .input` field, and its fields are options or flags with a flat shape (scalars, wire enums, calendar/clock kinds, or arrays of those).
+
 Output:
 
 - Unary calls print the response as JSON (`--output json-pretty` for indented output).
@@ -315,7 +358,7 @@ Server and client emit [swift-metrics](https://github.com/apple/swift-metrics) i
 ## Requirements
 
 - Swift 6.4+ (strict concurrency). Everything runs on macOS 26+, Linux and Android. The client (`MMClient`, `MMSchema`, `MMWire`) also runs on iOS, iPadOS, tvOS, watchOS and visionOS 26+.
-- Runtime dependencies (complete list): [swift-nio](https://github.com/apple/swift-nio), [swift-log](https://github.com/apple/swift-log), [swift-metrics](https://github.com/apple/swift-metrics), [fp-swift](https://github.com/velocityzen/fp-swift), [fp-swift-bracket](https://github.com/velocityzen/fp-swift-bracket), and [fp-swift-service](https://github.com/velocityzen/fp-swift-service) (`FPService` for the server's shutdown fan-out, `ProcessSignals` for `MMCLI`). MessagePack is implemented in this repository. [swift-syntax](https://github.com/swiftlang/swift-syntax) is a compile-time-only dependency of the `#schema` macro and the `MMCLIGeneratorPlugin`. It is never linked into products.
+- Runtime dependencies (complete list): [swift-nio](https://github.com/apple/swift-nio), [swift-log](https://github.com/apple/swift-log), [swift-metrics](https://github.com/apple/swift-metrics), [fp-swift](https://github.com/velocityzen/fp-swift), [fp-swift-bracket](https://github.com/velocityzen/fp-swift-bracket), and [fp-swift-service](https://github.com/velocityzen/fp-swift-service) (`FPService` for the server's shutdown fan-out, `ProcessSignals` for `MMCLI`). The CLI example and tests also use [fp-swift-pipe](https://github.com/velocityzen/fp-swift-pipe). MessagePack is implemented in this repository. [swift-syntax](https://github.com/swiftlang/swift-syntax) is a compile-time-only dependency of the `#schema` macro and the `MMCLIGeneratorPlugin`. It is never linked into products.
 
 ## Installation
 

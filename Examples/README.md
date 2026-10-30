@@ -15,7 +15,7 @@ Runnable examples of matter-in-motion: schema definition, serving, discovery, ty
   - `sync`: duplex stream, both directions on one call.
   - `appendDenied`: a deliberate authorization denial.
 
-- [CLI/CLI.swift](CLI/CLI.swift): the generated command-line tool. For the schema's `CLI(.enabled)` entry, the `MMCLIGeneratorPlugin` (applied to this target only) generates every subcommand, with names, help, and argument shapes. The tool is one declaration, `MMCLI { Name(...); Abstract(...); Commands([...]); Contract(...); Endpoint(...); Format(...) }`, like the daemon's `MMService { ... }`. `Name`/`Abstract`/`Commands` define the root command. For fields they do not cover, add a full `Configuration(...)`; the parts merge onto it. The contract claim verifies every invocation from the hello fingerprint. `Endpoint` makes `--socket` optional. `Format` entries control `--output text`. The `CLI(.command("add", aliases: ["append"]))` overlay renames `journal.append` to `journal add` without changing the wire method.
+- [CLI/CLI.swift](CLI/CLI.swift): the generated command-line tool. For the schema's `CLI(.enabled)` entry, the `MMCLIGeneratorPlugin` (applied to this target only) generates every subcommand, with names, help, and argument shapes. The tool is one declaration, `MMCLI { Name(...); Abstract(...); Commands([...]); Contract(...); Endpoint(...); Format(...) }`, like the daemon's `MMService { ... }`. `Name`/`Abstract`/`Commands` define the root command. For fields they do not cover, add a full `Configuration(...)`; the parts merge onto it. The contract claim verifies every invocation from the hello fingerprint. `Endpoint` makes `--socket` optional. `Format` entries control `--output text`. The `CLI(.command("add", aliases: ["append"]))` overlay renames `journal.append` to `journal add` without changing the wire method. Its `line` field is `cli: .input`, so `journal add --input notes.txt` appends a file's lines. The `Input(Journal.AppendCommand.self)` entry reads them as a stream with an FPPipe `Pipe`, skipping blank lines and `#` comments. It reads them with the parsed arguments too: a line starting with the `--urgent-prefix` (an option from the call's `CLI(...) { Field(...) }` block that the daemon never sees, `!` by default) is appended as urgent, credited to `--meta`'s author.
 
 ## Run it
 
@@ -30,6 +30,8 @@ Or call the daemon with the generated CLI:
 
 ```sh
 swift run mm-example-cli journal add "hello" journal.notes   # Endpoint(...) supplies the socket
+swift run mm-example-cli journal add --input notes.txt journal.notes   # one append per line
+printf 'buy milk\n!call mom\n' | swift run mm-example-cli journal add --input - journal.notes   # from stdin; ! marks urgent
 swift run mm-example-cli journal read journal.notes --output text
 swift run mm-example-cli journal --help
 ```

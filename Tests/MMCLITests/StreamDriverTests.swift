@@ -46,11 +46,11 @@ struct StreamDriverTests {
     @Test("outboundStdio sends every non-empty line, ENDs at EOF, returns the terminal")
     func feedHappyPath() async throws {
         try await withCLIServer { options in
-            let (lines, continuation) = AsyncStream<String>.makeStream()
-            continuation.yield("1")
-            continuation.yield("")  // skipped
-            continuation.yield("2")
-            continuation.yield("3")
+            let (lines, continuation) = AsyncStream<Result<String, MMCLIError>>.makeStream()
+            continuation.yield(.success("1"))
+            continuation.yield(.success(""))  // skipped
+            continuation.yield(.success("2"))
+            continuation.yield(.success("3"))
             continuation.finish()
             let summary = try await MMCLIRunner.invoke(options) { client in
                 let handle = await client.call(
@@ -72,11 +72,54 @@ struct StreamDriverTests {
         }
     }
 
+    @Test("outboundStdio splits real input: CRLF endings, blank lines skipped")
+    func feedSplitsInput() async throws {
+        try await withCLIServer { options in
+            let summary = try await MMCLIRunner.invoke(options) { client in
+                let handle = await client.call(
+                    CLITestMethods.importItems, on: cliTestEntity("box"), CLIImportRequest())
+                return try await MMCLIStreamDriver.outboundStdio(
+                    handle,
+                    lines: MMCLIInput(text: "1\r\n\r\n2\n3").lines,
+                    makeElement: { line in
+                        guard let value = Int(line) else {
+                            throw ValidationError("not a number: '\(line)'")
+                        }
+                        return CLIStreamItem(value: value)
+                    },
+                    method: "box.import",
+                    entity: "box"
+                )
+            }
+            #expect(summary.count == 3)
+        }
+    }
+
+    @Test("outboundStdio abandons the call on a failed line and exits with its code")
+    func feedFailedLine() async throws {
+        try await withCLIServer { options in
+            await #expect(throws: ExitCode(65)) {
+                _ = try await MMCLIRunner.invoke(options) { client in
+                    let handle = await client.call(
+                        CLITestMethods.importItems, on: cliTestEntity("box"), CLIImportRequest())
+                    return try await MMCLIStreamDriver.outboundStdio(
+                        handle,
+                        lines: MMCLIInput(text: "1\n123456").lines(maximumLength: 4),
+                        makeElement: { _ in CLIStreamItem(value: 0) },
+                        method: "box.import",
+                        entity: "box"
+                    )
+                }
+            }
+            return ()
+        }
+    }
+
     @Test("outboundStdio propagates a makeElement ValidationError, not the cancelled terminal")
     func feedBadLine() async throws {
         try await withCLIServer { options in
-            let (lines, continuation) = AsyncStream<String>.makeStream()
-            continuation.yield("nope")
+            let (lines, continuation) = AsyncStream<Result<String, MMCLIError>>.makeStream()
+            continuation.yield(.success("nope"))
             await #expect(throws: ValidationError.self) {
                 _ = try await MMCLIRunner.invoke(options) { client in
                     let handle = await client.call(
@@ -105,7 +148,7 @@ struct StreamDriverTests {
             // Never finished while the call runs: the reader stays parked on
             // its source, and only the driver's post-terminal cancellation
             // ends it. A hang here would trip the harness deadline.
-            let (lines, holdOpen) = AsyncStream<String>.makeStream()
+            let (lines, holdOpen) = AsyncStream<Result<String, MMCLIError>>.makeStream()
             await #expect(throws: ExitCode(77)) {
                 _ = try await MMCLIRunner.invoke(options) { client in
                     let handle = await client.call(
@@ -129,8 +172,8 @@ struct StreamDriverTests {
     @Test("outboundStdio stops reading after an early finish() (the first-SIGINT seam) and the terminal arrives")
     func feedAfterEarlyFinish() async throws {
         try await withCLIServer { options in
-            let (lines, continuation) = AsyncStream<String>.makeStream()
-            continuation.yield("1")
+            let (lines, continuation) = AsyncStream<Result<String, MMCLIError>>.makeStream()
+            continuation.yield(.success("1"))
             continuation.finish()
             let summary = try await MMCLIRunner.invoke(options) { client in
                 let handle = await client.call(
@@ -151,11 +194,11 @@ struct StreamDriverTests {
     @Test("bidirectionalStdio pipes lines outbound, drains the echo inbound, returns the shared terminal")
     func duplexHappyPath() async throws {
         try await withCLIServer { options in
-            let (lines, continuation) = AsyncStream<String>.makeStream()
-            continuation.yield("1")
-            continuation.yield("")  // skipped
-            continuation.yield("2")
-            continuation.yield("3")
+            let (lines, continuation) = AsyncStream<Result<String, MMCLIError>>.makeStream()
+            continuation.yield(.success("1"))
+            continuation.yield(.success(""))  // skipped
+            continuation.yield(.success("2"))
+            continuation.yield(.success("3"))
             continuation.finish()
             let summary = try await MMCLIRunner.invoke(options) { client in
                 let handle = await client.call(
@@ -181,8 +224,8 @@ struct StreamDriverTests {
     @Test("bidirectionalStdio propagates a makeElement ValidationError")
     func duplexBadLine() async throws {
         try await withCLIServer { options in
-            let (lines, continuation) = AsyncStream<String>.makeStream()
-            continuation.yield("wat")
+            let (lines, continuation) = AsyncStream<Result<String, MMCLIError>>.makeStream()
+            continuation.yield(.success("wat"))
             await #expect(throws: ValidationError.self) {
                 _ = try await MMCLIRunner.invoke(options) { client in
                     let handle = await client.call(

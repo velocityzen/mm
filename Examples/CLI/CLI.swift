@@ -1,4 +1,5 @@
 import ArgumentParser
+import FPPipe
 import MMCLI
 import MMExampleAPI
 
@@ -12,6 +13,8 @@ import MMExampleAPI
 /// ```sh
 /// swift run mm-example-daemon                       # terminal 1
 /// swift run mm-example-cli journal add "hello" journal.notes   # terminal 2
+/// swift run mm-example-cli journal add --input notes.txt journal.notes
+/// printf 'buy milk\n!call mom\n' | swift run mm-example-cli journal add --input - journal.notes
 /// swift run mm-example-cli journal read journal.notes --output text
 /// ```
 ///
@@ -24,7 +27,9 @@ import MMExampleAPI
 /// discovery diff automatically), `Endpoint` makes `--socket`/`--tcp`
 /// optional, and the `Format` entries give `--output text` per-command
 /// rendering keyed by the generated types (json formats always bypass them,
-/// so scripts stay stable).
+/// so scripts stay stable). The `Input` entry decides what `journal add`
+/// does with `--input`: the file arrives as a byte stream, and the body's
+/// pipe turns its lines, read with the other arguments, into appends.
 ///
 /// `journal.notes` is the target **entity** — the noun of the call, and every
 /// command's leading positional. It comes from the daemon's ACL tree
@@ -55,6 +60,35 @@ struct MMExampleCLI {
             Format { (response: Journal.ReadResponse) in
                 response.lines.joined(separator: "\n")
             }
+            // `journal add --input <path>`: one append per line, in order,
+            // skipping blank lines and `#` comments. `arguments` is the
+            // parsed request (here `--meta`), and `options` the call's
+            // CLI options (`--urgent-prefix`), which never reach the daemon.
+            // The plain form, `await append(line)`, keeps the arguments as is.
+            Input(Journal.AppendCommand.self) { input, arguments, options, append in
+                Pipe<Journal.AppendResponse, MMCLIError> {
+                    FromResult(input.lines)
+                    Filter { (line: String) in !line.isEmpty && !line.hasPrefix("#") }
+                    Map { (line: String) in appendRequest(line, arguments, urgentPrefix: options.urgentPrefix) }
+                    AsyncFlatMap { (request: AppendRequest) in await append(request) }
+                }
+            }
         }
     }
+}
+
+/// One input line's append: a line starting with `urgentPrefix` is appended
+/// without it as urgent, credited to `--meta`'s author; any other line goes
+/// as written, with `--meta`.
+private func appendRequest(
+    _ line: String,
+    _ arguments: AppendRequest,
+    urgentPrefix: String
+) -> AppendRequest {
+    guard !urgentPrefix.isEmpty, line.hasPrefix(urgentPrefix) else {
+        return AppendRequest(line: line, meta: arguments.meta)
+    }
+    let author = arguments.meta?.author ?? "cli"
+    let text = String(line.dropFirst(urgentPrefix.count))
+    return AppendRequest(line: text, meta: LineMeta(author: author, priority: .urgent))
 }

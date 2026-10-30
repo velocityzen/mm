@@ -31,6 +31,7 @@ The generated commands contain little code. All runtime behavior lives in this m
   - `inbound` (server stream) prints elements as JSON lines. SIGINT sends a graceful STOP, and a second SIGINT cancels.
   - `outbound` (client stream) sends stdin lines through the credit-gated writer. Single-string-field elements take plain lines, others JSON lines. EOF sends END.
   - `bidirectional` does both.
+- ``MMCLIInputRunner`` runs a command whose request field is `cli: .input`. The value comes from the positional, or as a byte stream (``MMCLIInput``, with `lines` for text) from `--input <path>` (`-` for stdin). An ``Input(_:_:)`` entry in the `MMCLI { }` block gets the stream, the parsed arguments as the request (input field empty), the call's CLI options (`CLI(...) { Field(...) }`) when its body takes four parameters, and the call (``MMCLIInputCall``, which takes a whole request or just the input value), and returns its results as an `AsyncSequence` of `Result`s, such as an FPPipe `Pipe`. Without one, the command makes one call per non-blank line, with a `==> line <==` heading above each under text output. Failures of one value (exit 1 or 65) are reported and the run continues; other failures end it. The first Ctrl-C ends the input, the work in flight finishes, and the command exits 130.
 - ``MMCLIEnumArgument`` makes generated wire enums typed command arguments. Their `unknown` fallback is hidden from help and rejected as input.
 - ``MMCLIJSON`` decodes JSON-literal options for fields with no flat command-line shape.
 
@@ -99,6 +100,17 @@ A tool with a hand-written root uses the `run:` form: `await MMCLI { Contract(..
 
 - ``MMCLIEnumArgument``
 - ``MMCLIJSON``
+
+### Input commands
+
+- ``Input(_:_:)``
+- ``MMCLIInputCommand``
+- ``MMCLIInputCall``
+- ``MMCLIInput``
+- ``MMCLIInputLines``
+- ``MMCLIInputSource``
+- ``MMCLIInputRunner``
+- ``MMCLIError``
 
 ### Stream drivers
 

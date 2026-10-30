@@ -322,6 +322,8 @@ private enum ParsedFieldDefault {
 private enum ParsedCLIArgument {
     case option(name: String?, short: ParsedShort?)
     case argument
+    /// `.input`: the positional, or a file/stdin byte stream via `--input`.
+    case input
     case flag
     case omitted
 }
@@ -370,6 +372,9 @@ private struct ParsedCall {
     var responseStreamPayload: ParsedType?
 
     var cliOverlay: ParsedCLIOverlay?
+    /// The `CLI(...) { ... }` fields: command-line-only options for an
+    /// `Input(...)` body. Nil when the `CLI` part has no block.
+    var cliOptions: [ParsedField]?
 
     /// The namespace-root marker, `Call("@")`: the method IS the namespace —
     /// wire name `search`, not `search.run`.
@@ -548,13 +553,27 @@ private func validateCLI(calls: [ParsedCall], enumNames: Set<String>) throws {
         if call.request.contains(where: { isPositional($0) && positionalIsVariadic($0) }) {
             optionNames.insert("entity")
         }
+        // An input field brings `--input`; see `validateInputFields`.
+        let inputFields = call.request.filter(isInputField)
+        if !inputFields.isEmpty {
+            try validateInputFields(inputFields, call: call)
+            optionNames.insert("input")
+        }
+        // The CLI options share the command line with the request's fields.
+        let cliOptions = call.cliOptions ?? []
+        if call.cliOptions != nil {
+            try validateCLIOptions(cliOptions, call: call, enumNames: enumNames)
+        }
         var shortNames: Set<String> = []
-        for field in call.request {
+        let fields = call.request.map { (field: $0, isCLIOption: false) }
+            + cliOptions.map { (field: $0, isCLIOption: true) }
+        for (field, isCLIOption) in fields {
             if let fieldDefault = field.defaultValue {
                 switch field.cliHint {
                     case nil, .option:
                         try validateFieldDefault(
-                            fieldDefault, field: field, call: call, enumNames: enumNames)
+                            fieldDefault, field: field, call: call, enumNames: enumNames,
+                            requiresOptional: !isCLIOption)
                     default:
                         throw SchemaMacroError(
                             description:
@@ -578,7 +597,7 @@ private func validateCLI(calls: [ParsedCall], enumNames: Set<String>) throws {
                                 "Call(\"\(call.name)\"): field \"\(field.name)\" is cli: .flag but not .bool"
                         )
                     }
-                case .argument:
+                case .argument, .input:
                     continue
                 default:
                     break
@@ -609,6 +628,87 @@ private func validateCLI(calls: [ParsedCall], enumNames: Set<String>) throws {
     }
 }
 
+/// `.input` rules: one per call, on a required `.string` field, and never
+/// on a call that streams requests — its stdin is the request stream's. No
+/// other positional may be optional or an array: with `--input`, the input
+/// positional's slot goes to the entity (see `commandDeclaration`), which
+/// only works when the entity is the one positional after it. No request
+/// field may be named `options`: the command's CLI options take that name.
+private func validateInputFields(_ fields: [ParsedField], call: ParsedCall) throws {
+    guard fields.count == 1, let field = fields.first else {
+        throw SchemaMacroError(
+            description:
+                "Call(\"\(call.name)\"): only one field can be cli: .input")
+    }
+    guard !call.request.contains(where: { $0.name == "options" }) else {
+        throw SchemaMacroError(
+            description:
+                "Call(\"\(call.name)\"): a call with a cli: .input field can't have a request field named \"options\" — the command's CLI options take that name"
+        )
+    }
+    let otherPositional = call.request.first {
+        isPositional($0) && !isInputField($0) && !positionalIsRequired($0)
+    }
+    if let otherPositional {
+        throw SchemaMacroError(
+            description:
+                "Call(\"\(call.name)\"): field \"\(otherPositional.name)\" can't be an optional or array positional next to the cli: .input field \"\(field.name)\""
+        )
+    }
+    guard case .string = field.type else {
+        throw SchemaMacroError(
+            description:
+                "Call(\"\(call.name)\"): field \"\(field.name)\" is cli: .input but not a required .string"
+        )
+    }
+    guard !call.hasRequestStream else {
+        throw SchemaMacroError(
+            description:
+                "Call(\"\(call.name)\"): cli: .input needs stdin, which the request stream already reads"
+        )
+    }
+}
+
+/// `CLI(...) { ... }` option rules: only on a call with a `cli: .input` field (an
+/// `Input(...)` body is what reads them); each an option or a flag with a
+/// flat shape; no name shared with a request field. Defaults, flags, option
+/// names and shorts are checked with the request's fields.
+private func validateCLIOptions(
+    _ options: [ParsedField], call: ParsedCall, enumNames: Set<String>
+) throws {
+    guard call.request.contains(where: isInputField) else {
+        throw SchemaMacroError(
+            description:
+                "Call(\"\(call.name)\"): CLI options need a cli: .input field — an Input(...) body is what reads them"
+        )
+    }
+    let requestNames = Set(call.request.map(\.name))
+    var names: Set<String> = []
+    for field in options {
+        guard !requestNames.contains(field.name), names.insert(field.name).inserted else {
+            throw SchemaMacroError(
+                description:
+                    "Call(\"\(call.name)\"): CLI option \"\(field.name)\" is declared twice, or shares a request field's name"
+            )
+        }
+        switch field.cliHint {
+            case nil, .option, .flag:
+                break
+            default:
+                throw SchemaMacroError(
+                    description:
+                        "Call(\"\(call.name)\"): CLI option \"\(field.name)\" must be an option or a flag"
+                )
+        }
+        guard case .direct = commandFieldForm(field, enumNames: enumNames) else {
+            throw SchemaMacroError(
+                description:
+                    "Call(\"\(call.name)\"): CLI option \"\(field.name)\" needs a flat shape: a scalar, a wire enum, a calendar/clock kind, or an array of those"
+            )
+        }
+    }
+}
+
 /// Field `default:` rules: the field must be optional (an absent field
 /// still decodes as nil — the default is generator metadata, never wire
 /// behavior), and the literal must match the field's flat shape: string
@@ -619,7 +719,8 @@ private func validateFieldDefault(
     _ flagDefault: ParsedFieldDefault,
     field: ParsedField,
     call: ParsedCall,
-    enumNames: Set<String>
+    enumNames: Set<String>,
+    requiresOptional: Bool = true
 ) throws {
     func mismatch(_ expected: String) -> SchemaMacroError {
         SchemaMacroError(
@@ -627,11 +728,20 @@ private func validateFieldDefault(
                 "Call(\"\(call.name)\"): field \"\(field.name)\" default must be \(expected)"
         )
     }
-    guard case .optional(let inner) = field.type else {
-        throw SchemaMacroError(
-            description:
-                "Call(\"\(call.name)\"): field \"\(field.name)\" declares default: but is not optional — an absent field must stay representable"
-        )
+    // A CLI option never reaches the wire, so a required one may
+    // have a default: its value when the option is absent.
+    let inner: ParsedType
+    switch field.type {
+        case .optional(let wrapped):
+            inner = wrapped
+        default:
+            guard !requiresOptional else {
+                throw SchemaMacroError(
+                    description:
+                        "Call(\"\(call.name)\"): field \"\(field.name)\" declares default: but is not optional — an absent field must stay representable"
+                )
+            }
+            inner = field.type
     }
     switch inner {
         case .string:
@@ -911,6 +1021,14 @@ private func parseCall(_ call: FunctionCallExprSyntax) throws -> ParsedCall {
                     throw SchemaMacroError(description: "Call(\"\(name)\"): CLI declared twice")
                 }
                 result.cliOverlay = try parseCLIPart(part, callName: name)
+                if let closure = part.trailingClosure {
+                    guard result.cliOverlay?.omitted == false else {
+                        throw SchemaMacroError(
+                            description:
+                                "Call(\"\(name)\"): CLI(.omitted) takes no options — no command is generated")
+                    }
+                    result.cliOptions = try parseFields(closure, context: "Call(\"\(name)\") CLI options")
+                }
             default:
                 throw SchemaMacroError(
                     description: "Call(\"\(name)\"): unknown part \(partName) (macro static subset)"
@@ -925,17 +1043,19 @@ private func parseCall(_ call: FunctionCallExprSyntax) throws -> ParsedCall {
     return result
 }
 
-/// Parses `CLI(.omitted)` / `CLI(.command("add"))` /
-/// `CLI(.command("add", aliases: ["append"]))`.
+/// Parses the spec of `CLI(.omitted)` / `CLI(.command("add"))` /
+/// `CLI(.command("add", aliases: ["append"]))`, or of a spec-less
+/// `CLI { ... }`, whose options block `parseCall` reads.
 private func parseCLIPart(
     _ part: FunctionCallExprSyntax, callName: String
 ) throws -> ParsedCLIOverlay {
-    guard part.arguments.count == 1, let expression = part.arguments.first?.expression,
-        part.trailingClosure == nil
-    else {
+    if part.arguments.isEmpty, part.trailingClosure != nil {
+        return ParsedCLIOverlay(omitted: false, commandName: nil, aliases: [])
+    }
+    guard part.arguments.count == 1, let expression = part.arguments.first?.expression else {
         throw SchemaMacroError(
             description:
-                "Call(\"\(callName)\"): CLI takes exactly one spec — .omitted or .command(\"name\", aliases: [...])"
+                "Call(\"\(callName)\"): CLI takes one spec — .omitted or .command(\"name\", aliases: [...]) — and an optional block of options"
         )
     }
     switch baseSpec(expression) {
@@ -1018,13 +1138,14 @@ private func parseFieldDefault(
     )
 }
 
-/// Parses a field's `cli:` hint (static subset: `.argument`, `.flag`,
-/// `.omitted`, `.option("name", short: "c")`).
+/// Parses a field's `cli:` hint (static subset: `.argument`, `.input`,
+/// `.flag`, `.omitted`, `.option("name", short: "c")`).
 private func parseCLIArgument(
     _ expression: ExprSyntax, context: String
 ) throws -> ParsedCLIArgument {
     switch baseSpec(expression) {
         case ("argument", nil)?: return .argument
+        case ("input", nil)?: return .input
         case ("flag", nil)?: return .flag
         case ("omitted", nil)?: return .omitted
         case ("option", .some(let call))?:
@@ -1059,7 +1180,7 @@ private func parseCLIArgument(
         default:
             throw SchemaMacroError(
                 description:
-                    "\(context): cli must be .argument, .flag, .omitted, or .option(\"name\", short: \"c\" | .auto) (static subset)"
+                    "\(context): cli must be .argument, .input, .flag, .omitted, or .option(\"name\", short: \"c\" | .auto) (static subset)"
             )
     }
 }
@@ -1904,8 +2025,16 @@ private func commandDeclaration(
                 requestIsExternalReference = true
         }
     }
+    // The `.input` field, when there is one: the command then reads its
+    // values from an input (see `MMCLIInputRunner`).
+    let inputField = requestIsExternalReference ? nil : fields.first(where: isInputField)
     var lines: [String] = []
-    lines.append("public struct \(call.commandTypeName): AsyncParsableCommand {")
+    let conformances = inputField == nil ? "AsyncParsableCommand" : "MMCLIInputCommand"
+    lines.append("public struct \(call.commandTypeName): \(conformances) {")
+    if inputField != nil {
+        lines.append("    public typealias Request = \(call.requestSwiftType)")
+        lines.append("    public typealias Response = \(call.responseSwiftType)")
+    }
     var configuration: [String] = ["commandName: \(quoted(call.cliCommandName))"]
     if let abstract = call.description {
         configuration.append("abstract: \(quoted(abstract))")
@@ -1967,8 +2096,32 @@ private func commandDeclaration(
                 field, call: call, enumNames: enumNames,
                 lines: &lines, preludes: &preludes)
         }
+        if let inputField {
+            let valueName = kebabCased(inputField.name)
+            let inputHelp = "Read <\(valueName)> from this file instead, one per line (- for stdin)"
+            lines.append(
+                "    @Option(name: .customLong(\"input\"), help: \(quoted(inputHelp))) public var input: String?"
+            )
+            lines.append("    public mutating func validate() throws {")
+            // Positionals bind in order, so in `add --input notes.txt
+            // journal.notes` the entity lands in the input field's slot.
+            lines.append("        if input != nil, entity == nil {")
+            lines.append("            entity = \(inputField.name)")
+            lines.append("            \(inputField.name) = nil")
+            lines.append("        }")
+            lines.append(
+                "        _ = try MMCLIInputSource.from(value: \(inputField.name), path: input, name: \(quoted(valueName))).get()"
+            )
+            lines.append("    }")
+            emitCLIOptions(call.cliOptions ?? [], call: call, enumNames: enumNames, lines: &lines)
+        }
         // Request construction uses declaration order, not emission order.
         for field in fields {
+            if isInputField(field) {
+                // Set per call, from the positional or the input.
+                requestArguments.append("\(field.name): \"\"")
+                continue
+            }
             switch commandFieldForm(field, enumNames: enumNames) {
                 case .omitted:
                     requestArguments.append("\(field.name): nil")
@@ -2003,6 +2156,39 @@ private func commandDeclaration(
     } else {
         let requestType = call.requestSwiftType
         lines.append("        let request = \(requestType)(\(requestArguments.joined(separator: ", ")))")
+    }
+    if let inputField {
+        // Unary or server-stream only (validated): the request holds the
+        // parsed arguments, the input field empty; the closure makes one
+        // call with a request. The runner owns the input, output, failures
+        // and Ctrl-C, and hands both to the tool's `Input(...)` body.
+        let shape = descriptorShape(for: call)
+        let descriptor =
+            "\(shape.type)<\(shape.generics)>(name: \"\(wireName)\", access: \(call.accessSource))"
+        let valueName = kebabCased(inputField.name)
+        lines.append(
+            "        let source = try MMCLIInputSource.from(value: \(inputField.name), path: input, name: \(quoted(valueName))).get()"
+        )
+        if call.hasResponseStream {
+            lines.append("        let format = connection.output")
+        }
+        lines.append("        try await MMCLIInputRunner.run(")
+        lines.append("            Self.self, source: source, connection: connection, verifying: \(enclosingType).contract,")
+        lines.append("            arguments: request, options: options, input: \\.\(inputField.name)")
+        lines.append("        ) { client, request in")
+        if call.hasResponseStream {
+            lines.append("            let handle = await client.call(\(descriptor), on: target, request)")
+            lines.append("            return await MMCLIStreamDriver.inboundResult(handle, format: format)")
+        } else {
+            lines.append("            return await client.call(\(descriptor), on: target, request)")
+        }
+        lines.append(
+            "                .mapError { MMCLIError.call($0, method: \"\(wireName)\", entity: entityArgument) }"
+        )
+        lines.append("        }")
+        lines.append("    }")
+        lines.append("}")
+        return lines.joined(separator: "\n")
     }
     lines.append("        let format = connection.output")
     // The stdin line→element mapper, shared by the client-stream and
@@ -2078,13 +2264,21 @@ private func streamElementFields(
 }
 
 private func isPositional(_ field: ParsedField) -> Bool {
-    if case .argument = field.cliHint { return true }
+    switch field.cliHint {
+        case .argument, .input: return true
+        default: return false
+    }
+}
+
+private func isInputField(_ field: ParsedField) -> Bool {
+    if case .input = field.cliHint { return true }
     return false
 }
 
-/// Whether a positional field must be supplied: optional fields parse to nil
-/// and array fields default to empty.
+/// Whether a positional field must be supplied: optional fields parse to nil,
+/// array fields default to empty, and an input field may come from `--input`.
 private func positionalIsRequired(_ field: ParsedField) -> Bool {
+    if isInputField(field) { return false }
     switch field.type {
         case .optional, .array: return false
         default: return true
@@ -2098,6 +2292,28 @@ private func positionalIsVariadic(_ field: ParsedField) -> Bool {
         case .array, .optional(.array): return true
         default: return false
     }
+}
+
+/// Emits an input command's CLI options (`CLI(...) { ... }`) as a nested
+/// `Options` group, the value its `Input(...)` body gets. Validated flat, so
+/// no field needs a run() prelude. Without options the group is empty.
+private func emitCLIOptions(
+    _ options: [ParsedField],
+    call: ParsedCall,
+    enumNames: Set<String>,
+    lines: inout [String]
+) {
+    var properties: [String] = []
+    var preludes: [String] = []
+    for field in options {
+        emitField(field, call: call, enumNames: enumNames, lines: &properties, preludes: &preludes)
+    }
+    let title = options.isEmpty ? "" : "(title: \"Input Options\")"
+    lines.append("    @OptionGroup\(title) public var options: Options")
+    lines.append("    public struct Options: ParsableArguments, Sendable {")
+    lines.append(contentsOf: properties.map { "    " + $0 })
+    lines.append("        public init() {}")
+    lines.append("    }")
 }
 
 /// Emits the property (and any run() prelude) for one request field.
@@ -2123,6 +2339,7 @@ private func emitField(
         }
     }
     var defaultAsFlagArgument: String?
+    var defaultInitializer = ""
     if let fieldDefault = field.defaultValue {
         let literal: String
         switch fieldDefault {
@@ -2130,19 +2347,24 @@ private func emitField(
             case .integer(let source), .floating(let source), .boolean(let source):
                 literal = source
             case .now:
-                // Validated: .now only on an optional calendar/clock field.
-                // Evaluated when the command's properties initialize — the
-                // moment of invocation, not of generation.
+                // Validated: .now only on a calendar/clock field. Evaluated
+                // when the command's properties initialize — the moment of
+                // invocation, not of generation.
                 switch field.type {
-                    case .optional(.date): literal = "MMDate.today()"
-                    case .optional(.datetime): literal = "MMDateTime.now()"
+                    case .optional(.date), .date: literal = "MMDate.today()"
+                    case .optional(.datetime), .datetime: literal = "MMDateTime.now()"
                     default: literal = "MMTimestamp.now()"
                 }
         }
-        defaultAsFlagArgument = "defaultAsFlag: \(literal)"
+        if case .optional = field.type {
+            defaultAsFlagArgument = "defaultAsFlag: \(literal)"
+        } else {
+            // A required CLI option: the value when absent.
+            defaultInitializer = " = \(literal)"
+        }
     }
     // The hybrid @Option initializer binds through the property's `= nil`.
-    let propertyInitializer = defaultAsFlagArgument == nil ? "" : " = nil"
+    let propertyInitializer = defaultAsFlagArgument == nil ? defaultInitializer : " = nil"
     if derivedShort {
         shortName = String(optionName.prefix(1))
     }
@@ -2181,6 +2403,10 @@ private func emitField(
                     initializer = " = []"
                 default:
                     break
+            }
+            if isInputField(field) {
+                // Absent when the values come from `--input`.
+                propertyType += "?"
             }
             if case .flag = field.cliHint {
                 lines.append(

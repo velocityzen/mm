@@ -253,6 +253,7 @@ A top-level `CLI(.enabled)` entry in the schema block generates one swift-argume
 - Rename or omit commands with a `CLI(...)` part: `CLI(.command("add", aliases: ["append"]))`, `CLI(.omitted)`. The default name is the kebab-cased call name.
 - Shape arguments with `Field(..., cli:)`:
   - `.argument`: positional. Required and optional single-value ones come before the omittable `<entity>` (so `retry <id>` binds the id). Array ones come after it.
+  - `.input`: a positional that can also come from `--input <path>` (`-` for stdin) as a byte stream. By default, one call per non-blank line. An `Input(Journal.AppendCommand.self) { input, arguments, append in Pipe { FromResult(input.lines); ...; AsyncFlatMap { await append($0) } } }` entry in the `MMCLI { }` block decides the work instead. `arguments` is the parsed request (input field empty) to read the input with. `append` takes a whole request, or just the input value with the other arguments kept. Settings the server never sees (a delimiter, a column) go in the call's `CLI(...) { Field(...) }` block (or `CLI { ... }` to keep the command name): the body takes `input, arguments, options, append` and reads them typed. They never touch the wire or the fingerprint. One per call, a required `.string`, no other optional or array positional, no request stream.
   - `.flag`: bools.
   - `.option("name", short: "n")`. `short: .auto` derives `-n` from the long name.
   - `.omitted`: optional fields only.

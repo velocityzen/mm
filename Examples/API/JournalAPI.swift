@@ -52,10 +52,19 @@ public enum Journal: MethodNamespace {
         }
         Call("append", description: "Appends one line to a journal") {
             // The wire method stays journal.append; the CLI says `journal add`.
-            CLI(.command("add", aliases: ["append"]))
+            // Its block holds options for reading `--input` that never reach
+            // the daemon: the CLI's Input(...) body gets them, typed.
+            CLI(.command("add", aliases: ["append"])) {
+                Field(
+                    "urgentPrefix", .string,
+                    description: "Input lines starting with this are appended as urgent",
+                    default: "!")
+            }
             Access { .write }
             Request {
-                Field("line", .string, description: "The line text", cli: .argument)
+                // `journal add "text"`, or `journal add --input notes.txt`
+                // for a file's lines (`--input -` reads stdin).
+                Field("line", .string, description: "The line text", cli: .input)
                 Field(
                     "meta",
                     .optional(.reference("LineMeta")),

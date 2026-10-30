@@ -31,6 +31,9 @@ public struct MMCLIDefaults: Sendable {
     /// type (which is per-command: every response and stream element has its
     /// own generated type). Types without an entry render as compact JSON.
     public var formatters: MMCLIFormatters
+    /// The tool's ``Input(_:_:)`` entries: what each input command does with
+    /// its input. Commands without one make one call per line.
+    public var inputs: MMCLIInputs
 
     /// The binding commands read; empty unless the tool declared one via
     /// the ``MMCLI(_:)`` block (or bound it with ``withCLI(_:_:)``).
@@ -40,12 +43,14 @@ public struct MMCLIDefaults: Sendable {
         serverContract: MMCLIServerContract? = nil,
         endpoint: MMEndpoint? = nil,
         output: OutputFormat? = nil,
-        formatters: MMCLIFormatters = MMCLIFormatters()
+        formatters: MMCLIFormatters = MMCLIFormatters(),
+        inputs: MMCLIInputs = MMCLIInputs()
     ) {
         self.serverContract = serverContract
         self.endpoint = endpoint
         self.output = output
         self.formatters = formatters
+        self.inputs = inputs
     }
 }
 
@@ -166,9 +171,10 @@ public func Format<T: Encodable & Sendable>(
 // MARK: - The declarative entry point
 
 /// One declaration in an ``MMCLI(_:)`` block: the root command's
-/// shape, the claim, the endpoint, the default output, or a per-type text
-/// renderer. Constructed by ``Configuration(_:)``, ``Contract(_:)``,
-/// ``Endpoint(_:)``, ``Output(_:)``, and ``Format(_:_:)-(_,(T)->String)``.
+/// shape, the claim, the endpoint, the default output, a per-type text
+/// renderer, or an input command's body. Constructed by
+/// ``Configuration(_:)``, ``Contract(_:)``, ``Endpoint(_:)``, ``Output(_:)``,
+/// ``Format(_:_:)-(_,(T)->String)``, and ``Input(_:_:)``.
 public struct MMCLIPart: Sendable {
     enum Kind: Sendable {
         case configuration(CommandConfiguration)
@@ -180,6 +186,7 @@ public struct MMCLIPart: Sendable {
         case endpoint(MMEndpoint)
         case output(OutputFormat)
         case format(MMCLIFormatEntry)
+        case input(MMCLIInputEntry)
     }
 
     let kind: Kind
@@ -249,6 +256,11 @@ public enum MMCLIBuilder: MMListBuilding {
     public static func buildExpression(_ entry: MMCLIFormatEntry) -> [MMCLIPart] {
         [MMCLIPart(kind: .format(entry))]
     }
+
+    /// `Input(_:_:)` entries too.
+    public static func buildExpression(_ entry: MMCLIInputEntry) -> [MMCLIPart] {
+        [MMCLIPart(kind: .input(entry))]
+    }
 }
 
 /// The whole entry point of a companion CLI, declared as data — the CLI twin
@@ -273,7 +285,8 @@ public enum MMCLIBuilder: MMListBuilding {
 /// ```
 ///
 /// Declaring ``Contract(_:)``, ``Endpoint(_:)``, or ``Output(_:)`` twice is a
-/// programmer error caught at startup; a repeated
+/// programmer error caught at startup, and so is a second
+/// ``Input(_:_:)`` for one command; a repeated
 /// ``Format(_:_:)-(_,(T)->String)`` type keeps the last entry.
 /// ``withCLI(_:_:)`` and ``MMCLIDefaults`` remain the value-level spelling
 /// underneath.
@@ -336,6 +349,7 @@ func assembleParts(
     var commands: [any ParsableCommand.Type]?
     var version: String?
     var formatters: [MMCLIFormatEntry] = []
+    var inputs: [MMCLIInputEntry] = []
     for part in parts {
         switch part.kind {
             case .configuration(let value):
@@ -370,9 +384,12 @@ func assembleParts(
                 defaults.output = format
             case .format(let entry):
                 formatters.append(entry)
+            case .input(let entry):
+                inputs.append(entry)
         }
     }
     defaults.formatters = MMCLIFormatters(entries: formatters)
+    defaults.inputs = MMCLIInputs(entries: inputs)
 
     // The sugar parts merge onto Configuration(...) when both appear; the
     // same field declared both ways is a programmer error, not an override.

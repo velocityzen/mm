@@ -1,3 +1,4 @@
+import FP
 import MMClient
 
 /// The streaming glue between a generated CLI command and a live stream
@@ -39,27 +40,56 @@ public enum MMCLIStreamDriver {
         }
     }
 
+    /// ``inbound(_:format:method:entity:)`` with the terminal as a `Result`
+    /// rather than a thrown exit, for an input command's call: one failed
+    /// call need not end the run (see ``MMCLIInputRunner``).
+    public static func inboundResult<Element: Codable & Sendable, Response: Codable & Sendable>(
+        _ handle: InboundStreamHandle<Element, Never, Response>,
+        format: OutputFormat
+    ) async -> Result<Response, MMCallError> {
+        await Result.fromAsync {
+            try await MMCLISignals.withGracefulSigint(
+                onFirst: { await handle.stop() },
+                onSecond: { await handle.cancel() }
+            ) {
+                await Self.drainInbound(handle, format: format)
+            }
+        }
+        // The signal watcher fails only when its group is cancelled.
+        .mapError { _ in MMCallError.cancelled }
+        .flatMap { $0 }
+    }
+
     /// The signal-free body of ``inbound(_:format:method:entity:)``: drain the
     /// element sequence to stdout, then unwrap the terminal.
     static func inboundStdio<Element: Codable & Sendable, Response: Codable & Sendable>(
         _ handle: InboundStreamHandle<Element, Never, Response>,
         format: OutputFormat, method: String, entity: String
     ) async throws -> Response {
+        try MMCLIFailure.unwrap(await Self.drainInbound(handle, format: format), method: method, entity: entity)
+    }
+
+    /// Drains the element sequence to stdout, then returns the terminal.
+    private static func drainInbound<Element: Codable & Sendable, Response: Codable & Sendable>(
+        _ handle: InboundStreamHandle<Element, Never, Response>,
+        format: OutputFormat
+    ) async -> Result<Response, MMCallError> {
         var first = true
         for await element in handle {
             MMCLIOutput.emitStreamElement(element, format: format, first: first)
             first = false
         }
-        return try MMCLIFailure.unwrap(await handle.result(), method: method, entity: entity)
+        return await handle.result()
     }
 
     // MARK: - Outbound (client stream)
 
-    /// Client-stream driver: reads stdin line by line (async — see
-    /// `MMCLIStandardInputLines`; never a blocking `readLine` on a
-    /// cooperative thread), skips empty lines, maps each through
-    /// `makeElement` (which throws `ValidationError` for bad input), and
-    /// sends through the credit-gated handle. On `.peerStopped` it stops
+    /// Client-stream driver: reads stdin's ``MMCLIInput/lines`` (pulled one
+    /// chunk at a time on NIO's blocking pool, never on a cooperative thread),
+    /// skips empty lines, maps each through `makeElement` (which throws
+    /// `ValidationError` for bad input), and sends through the credit-gated
+    /// handle. A stdin read failure (exit 74) or an over-long line (65)
+    /// abandons the call. On `.peerStopped` it stops
     /// reading; on `.callEnded`/`.connectionClosed` it stops and lets
     /// `result()` surface the error; on stdin EOF it calls `finish()`. First
     /// SIGINT: `finish()` (graceful END — the terminal still arrives; the
@@ -76,7 +106,7 @@ public enum MMCLIStreamDriver {
         ) {
             try await Self.outboundStdio(
                 handle,
-                lines: MMCLIStandardInputLines(),
+                lines: MMCLIInput.standardInput.lines,
                 makeElement: makeElement,
                 method: method,
                 entity: entity
@@ -100,7 +130,7 @@ public enum MMCLIStreamDriver {
         makeElement: @Sendable @escaping (String) throws -> Element,
         method: String,
         entity: String
-    ) async throws -> Response where Lines.Element == String {
+    ) async throws -> Response where Lines.Element == Result<String, MMCLIError>, Lines.Failure == Never {
         try await withThrowingTaskGroup(of: Void.self) { tasks in
             tasks.addTask {
                 try await Self.pipe(
@@ -147,7 +177,7 @@ public enum MMCLIStreamDriver {
         ) {
             try await Self.bidirectionalStdio(
                 handle,
-                lines: MMCLIStandardInputLines(),
+                lines: MMCLIInput.standardInput.lines,
                 makeElement: makeElement,
                 format: format,
                 method: method,
@@ -173,7 +203,7 @@ public enum MMCLIStreamDriver {
         format: OutputFormat,
         method: String,
         entity: String
-    ) async throws -> Response where Lines.Element == String {
+    ) async throws -> Response where Lines.Element == Result<String, MMCLIError>, Lines.Failure == Never {
         try await withThrowingTaskGroup(of: Void.self) { tasks in
             let outbound = handle.outbound
             tasks.addTask {
@@ -202,10 +232,11 @@ public enum MMCLIStreamDriver {
     /// reading gracefully; `.callEnded` (also what a send sees after the
     /// first SIGINT's `finish()`) and `.connectionClosed` end reading and
     /// leave the diagnosis to the caller's `result()`. Every normal exit —
-    /// including EOF and a cancellation that arrives after the terminal —
-    /// sends END via `finish()` (idempotent). A `map` throw (or a
-    /// failing source) abandons the call via `cancel()` so the terminal
-    /// resolves promptly, then rethrows.
+    /// including EOF and a cancellation that arrives after the terminal,
+    /// which ends the lines — sends END via `finish()` (idempotent). A `map`
+    /// throw, or a failed line (reported on stderr, thrown as its exit code),
+    /// abandons the call via `cancel()` so the terminal resolves promptly,
+    /// then rethrows.
     private static func pipe<
         Element: Codable & Sendable,
         InboundElement: Codable & Sendable,
@@ -215,26 +246,34 @@ public enum MMCLIStreamDriver {
         input: Lines,
         map: (String) throws -> Element,
         output: OutboundStreamHandle<Element, InboundElement, Response>
-    ) async throws where Lines.Element == String {
+    ) async throws where Lines.Element == Result<String, MMCLIError>, Lines.Failure == Never {
         do {
-            for try await line in input {
-                if line.isEmpty {
+            for await line in input {
+                let text = try Self.unwrap(line)
+                if text.isEmpty {
                     continue
                 }
 
-                let element = try map(line)
+                let element = try map(text)
                 guard await output.send(element) == .sent else {
                     break
                 }
             }
             await output.finish()
-        } catch is CancellationError {
-            // The driver cancelled a reader still parked on its source after
-            // the terminal arrived; finishing then is a harmless no-op.
-            await output.finish()
         } catch {
             await output.cancel()
             throw error
+        }
+    }
+
+    /// A line, or its failure reported on stderr and thrown as its exit code.
+    private static func unwrap(_ line: Result<String, MMCLIError>) throws -> String {
+        switch line {
+            case .success(let text):
+                return text
+            case .failure(let error):
+                MMCLIOutput.note(error.localizedDescription)
+                throw error.exitCode
         }
     }
 }

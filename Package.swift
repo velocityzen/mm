@@ -26,6 +26,7 @@ let package = Package(
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0"..<"700.0.0"),
         .package(url: "https://github.com/velocityzen/fp-swift.git", from: "4.0.0"),
         .package(url: "https://github.com/velocityzen/fp-swift-bracket.git", from: "2.0.0"),
+        .package(url: "https://github.com/velocityzen/fp-swift-pipe.git", from: "2.0.0"),
         .package(url: "https://github.com/velocityzen/fp-swift-service.git", branch: "main"),
     ],
     targets: [
@@ -129,6 +130,7 @@ let package = Package(
                 "MMSchema",
                 "MMCLI",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "FPPipe", package: "fp-swift-pipe"),
             ],
             path: "Examples/CLI",
             plugins: ["MMCLIGeneratorPlugin"]
@@ -229,6 +231,7 @@ let package = Package(
                 "MMServer",
                 "MMWire",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "FPPipe", package: "fp-swift-pipe"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "Logging", package: "swift-log"),
             ],

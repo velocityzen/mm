@@ -181,5 +181,81 @@ struct SchemaContractMacroTests {
             ],
             macros: macros
         )
+        // `.input`: a required string, one per call, never with a request
+        // stream, and `--input` is taken.
+        let inputCases: [(String, String)] = [
+            (
+                #"Request { Field("n", .optional(.string), cli: .input) }"#,
+                #"Call("find"): field "n" is cli: .input but not a required .string"#
+            ),
+            (
+                #"Request { Field("a", .string, cli: .input); Field("b", .string, cli: .input) }"#,
+                #"Call("find"): only one field can be cli: .input"#
+            ),
+            (
+                #"Request { Field("a", .string, cli: .input); Field("input", .optional(.string)) }"#,
+                #"Call("find"): option --input collides with another option — rename with cli: .option("name")"#
+            ),
+            (
+                #"Request { Field("a", .string, cli: .input); Field("b", .optional(.string), cli: .argument) }"#,
+                #"Call("find"): field "b" can't be an optional or array positional next to the cli: .input field "a""#
+            ),
+            (
+                #"CLI { Field("d", .string) }; Request { Field("a", .string) }"#,
+                #"Call("find"): CLI options need a cli: .input field — an Input(...) body is what reads them"#
+            ),
+            (
+                #"CLI { Field("d", .string, cli: .argument) }; Request { Field("a", .string, cli: .input) }"#,
+                #"Call("find"): CLI option "d" must be an option or a flag"#
+            ),
+            (
+                #"CLI { Field("a", .string) }; Request { Field("a", .string, cli: .input) }"#,
+                #"Call("find"): CLI option "a" is declared twice, or shares a request field's name"#
+            ),
+            (
+                #"CLI { Field("d", .map(key: .string, value: .int)) }; Request { Field("a", .string, cli: .input) }"#,
+                #"Call("find"): CLI option "d" needs a flat shape: a scalar, a wire enum, a calendar/clock kind, or an array of those"#
+            ),
+            (
+                #"CLI { Field("input", .string) }; Request { Field("a", .string, cli: .input) }"#,
+                #"Call("find"): option --input collides with another option — rename with cli: .option("name")"#
+            ),
+            (
+                #"CLI { Field("d", .string, default: 1) }; Request { Field("a", .string, cli: .input) }"#,
+                #"Call("find"): field "d" default must be a string literal"#
+            ),
+            (
+                #"Request { Field("a", .string, cli: .input); Field("options", .optional(.string)) }"#,
+                #"Call("find"): a call with a cli: .input field can't have a request field named "options" — the command's CLI options take that name"#
+            ),
+            (
+                #"CLI(.command("seek")) { Field("d", .string, cli: .argument) }; Request { Field("a", .string, cli: .input) }"#,
+                #"Call("find"): CLI option "d" must be an option or a flag"#
+            ),
+            (
+                #"CLI(.omitted) { Field("d", .string) }; Request { Field("a", .string, cli: .input) }"#,
+                #"Call("find"): CLI(.omitted) takes no options — no command is generated"#
+            ),
+            (
+                #"Request { Field("a", .string, cli: .input) }; RequestStream("Line") { Field("l", .string) }"#,
+                #"Call("find"): cli: .input needs stdin, which the request stream already reads"#
+            ),
+        ]
+        for (parts, message) in inputCases {
+            let source = """
+                #schema("box") {
+                    Call("find") {
+                        Access(.read)
+                        \(parts.replacingOccurrences(of: "; ", with: "\n"))
+                    }
+                }
+                """
+            assertMacroExpansion(
+                source,
+                expandedSource: source,
+                diagnostics: [DiagnosticSpec(message: message, line: 1, column: 1)],
+                macros: macros
+            )
+        }
     }
 }

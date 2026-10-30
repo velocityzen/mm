@@ -76,6 +76,28 @@ enum Jobs: MethodNamespace {
     }
 }
 
+/// An input positional: `find <term>` or `find --input <path>`.
+enum Finder: MethodNamespace {
+    #schema("finder", description: "Finds things.") {
+        CLI(.enabled)
+        Call("find", description: "Finds one term") {
+            CLI {
+                Field("separator", .string, description: "Splits each line", default: ",")
+                Field("strict", .bool, cli: .flag)
+                Field("column", .optional(.int), cli: .option(short: .auto))
+            }
+            Access { .read }
+            Request {
+                Field("term", .string, description: "What to find", cli: .input)
+                Field("limit", .optional(.int))
+                Field("tags", .array(.string), cli: .option("tag"))
+            }
+            ResponseStream("Hit") { Field("name", .string) }
+            Response { Field("count", .int) }
+        }
+    }
+}
+
 /// A description-less namespace: the group abstract falls back to the
 /// template and `namespaceDescription` stays the protocol default.
 enum Petty: MethodNamespace {
@@ -195,6 +217,52 @@ struct GeneratedCommandTests {
         ])
         #expect(targeted.ids == ["job-7"])
         #expect(targeted.entity == "jobs.main")
+    }
+
+    @Test("an input positional takes one value, or --input, never both or neither")
+    func inputPositional() throws {
+        let base = ["--socket", "/tmp/finder.sock"]
+        let one = try Finder.FindCommand.parse(base + ["aphex twin", "--limit", "5", "--tag", "x"])
+        #expect(one.term == "aphex twin")
+        #expect(one.input == nil)
+        #expect(one.limit == 5)
+        #expect(one.entity == nil)
+
+        let batch = try Finder.FindCommand.parse(base + ["--input", "-", "--tag", "x", "--tag", "y"])
+        #expect(batch.term == nil)
+        #expect(batch.input == "-")
+        #expect(batch.tags == ["x", "y"])
+
+        // The entity still binds after the value.
+        let targeted = try Finder.FindCommand.parse(base + ["burial", "finder.main"])
+        #expect(targeted.term == "burial")
+        #expect(targeted.entity == "finder.main")
+
+        // With --input, the lone positional is the entity.
+        let targetedBatch = try Finder.FindCommand.parse(base + ["--input", "terms.txt", "finder.main"])
+        #expect(targetedBatch.term == nil)
+        #expect(targetedBatch.entity == "finder.main")
+
+        #expect(throws: (any Error).self) { try Finder.FindCommand.parse(base) }
+        #expect(throws: (any Error).self) {
+            try Finder.FindCommand.parse(base + ["burial", "finder.main", "--input", "terms.txt"])
+        }
+        // CLI options parse into the nested Options group, defaults applied.
+        #expect(one.options.separator == ",")
+        #expect(one.options.strict == false)
+        #expect(one.options.column == nil)
+        let tuned = try Finder.FindCommand.parse(
+            base + ["--input", "-", "--separator", ";", "--strict", "-c", "2"])
+        #expect(tuned.options.separator == ";")
+        #expect(tuned.options.strict)
+        #expect(tuned.options.column == 2)
+
+        let help = Finder.FindCommand.helpMessage()
+        #expect(help.contains("--input <input>"))
+        #expect(help.contains("INPUT OPTIONS:"))
+        #expect(help.contains("--separator <separator>"))
+        let flattened = help.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        #expect(flattened.contains("Read <term> from this file instead, one per line (- for stdin)"))
     }
 
     @Test("array fields are repeatable options defaulting to empty, never required")
@@ -363,5 +431,24 @@ struct GeneratedCommandTests {
             }
         }
         #expect(Ledger.contract.fingerprint() == stripped.fingerprint())
+    }
+
+    @Test("CLI options and cli: .input never touch the wire either")
+    func inputOverlayIsWireInert() throws {
+        let breaks = try Finder.contract.verify(against: Finder.self).get()
+        #expect(breaks.isEmpty)
+        let stripped = Schema("finder") {
+            Call("find", description: "Finds one term") {
+                Access { .read }
+                Request {
+                    Field("term", .string, description: "What to find")
+                    Field("limit", .optional(.int))
+                    Field("tags", .array(.string))
+                }
+                ResponseStream("Hit") { Field("name", .string) }
+                Response { Field("count", .int) }
+            }
+        }
+        #expect(Finder.contract.fingerprint() == stripped.fingerprint())
     }
 }
