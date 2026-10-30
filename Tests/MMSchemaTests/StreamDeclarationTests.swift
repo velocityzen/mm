@@ -245,6 +245,9 @@ struct StreamDeclarationTests {
         #expect(ticks.signatures[0].requestStream == nil)
     }
 
+    // Exit tests run their body in a child process, which iOS, tvOS,
+    // watchOS and visionOS do not allow.
+    #if !os(iOS) && !os(tvOS) && !os(watchOS) && !os(visionOS)
     @Test("duplicate RequestStream is programmer error")
     func duplicateRequestStream() async throws {
         await #expect(processExitsWith: .failure) {
@@ -270,6 +273,7 @@ struct StreamDeclarationTests {
             }
         }
     }
+    #endif
 
     @Test("the streaming contract matches the stream descriptors exactly")
     func contractHolds() throws {

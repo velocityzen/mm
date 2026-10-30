@@ -116,6 +116,9 @@ struct DeathTests {
         }
     }
 
+    // Exit tests run their body in a child process, which iOS, tvOS,
+    // watchOS and visionOS do not allow.
+    #if !os(iOS) && !os(tvOS) && !os(watchOS) && !os(visionOS)
     @Test("a second run() while the loop is live is programmer error")
     func secondRunTraps() async throws {
         // Whichever of the two runs reaches the lifecycle check second traps;
@@ -126,6 +129,7 @@ struct DeathTests {
             }
         }
     }
+    #endif
 
     @Test("a state stream subscribed after death yields the terminal state and finishes")
     func lateSubscriberSeesTerminalState() async throws {

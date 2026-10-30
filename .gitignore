@@ -1,6 +1,10 @@
 .build/
 .build-*/
-.swiftpm/
+.swiftpm/*
+# Except the shared schemes, such as MMClientStackTests for device simulators.
+!.swiftpm/xcode/
+.swiftpm/xcode/*
+!.swiftpm/xcode/xcshareddata/
 .index-build/
 .DS_Store
 *.xcodeproj

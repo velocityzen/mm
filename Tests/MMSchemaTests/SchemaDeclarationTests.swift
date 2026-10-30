@@ -244,6 +244,9 @@ struct SchemaDeclarationTests {
         #expect(explicit.fingerprint() == omitted.fingerprint())
     }
 
+    // Exit tests run their body in a child process, which iOS, tvOS,
+    // watchOS and visionOS do not allow.
+    #if !os(iOS) && !os(tvOS) && !os(watchOS) && !os(visionOS)
     @Test("duplicate method declarations are programmer error")
     func duplicateMethod() async throws {
         await #expect(processExitsWith: .failure) {
@@ -268,6 +271,7 @@ struct SchemaDeclarationTests {
             }
         }
     }
+    #endif
 
     @Test("request key 0 is an ordinary field key — nothing is reserved")
     func requestKeyZeroPinnable() {

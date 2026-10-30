@@ -39,3 +39,50 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run tests
         run: swift test
+
+  test-apple-device-platforms:
+    name: Client tests (${{ matrix.name }})
+    # Same image as test-macos: the simulators come with Xcode 27.
+    runs-on: xcode-27
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: iOS
+            platform: iOS
+            device: iPhone
+          - name: iPadOS
+            platform: iOS
+            device: iPad
+          - name: tvOS
+            platform: tvOS
+            device: Apple TV
+          - name: watchOS
+            platform: watchOS
+            device: Apple Watch
+          - name: visionOS
+            platform: visionOS
+            device: Apple Vision
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pick a simulator
+        id: simulator
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          DEVICE: ${{ matrix.device }}
+        run: |
+          udid=$(.github/scripts/simulator-destination.sh "$PLATFORM" "$DEVICE")
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+      - name: Run client tests
+        # The MMClientStackTests scheme builds and runs the tests of what the
+        # client links (MMWire, MMSchema, MMClient), never the server, CLI or
+        # integration targets. Exit tests are compiled out on these platforms.
+        env:
+          UDID: ${{ steps.simulator.outputs.udid }}
+        run: >
+          xcodebuild test
+          -scheme MMClientStackTests
+          -destination "id=$UDID"
+          -skipMacroValidation
+          -skipPackagePluginValidation

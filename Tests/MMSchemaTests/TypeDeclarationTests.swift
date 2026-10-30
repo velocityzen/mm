@@ -137,6 +137,9 @@ struct TypeDeclarationTests {
         )
     }
 
+    // Exit tests run their body in a child process, which iOS, tvOS,
+    // watchOS and visionOS do not allow.
+    #if !os(iOS) && !os(tvOS) && !os(watchOS) && !os(visionOS)
     @Test("an undotted reference that resolves nowhere is programmer error")
     func unresolvedReferenceExits() async {
         await #expect(processExitsWith: .failure) {
@@ -160,6 +163,7 @@ struct TypeDeclarationTests {
             }
         }
     }
+    #endif
 
     @Test("any named type can BE the request — and stay a value type elsewhere")
     func namedTypeRequest() {
