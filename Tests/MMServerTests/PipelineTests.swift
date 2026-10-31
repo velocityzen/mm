@@ -51,6 +51,7 @@ struct PipelineTests {
         #expect(idleState.readTimeout == nil)
         #expect(idleState.writeTimeout == nil)
         #expect(throws: Never.self) { try sync.handler(type: MMIdleCloseHandler.self) }
+        #expect(throws: Never.self) { try sync.handler(type: ConnectionDrainHandler.self) }
         #expect(throws: Never.self) {
             try sync.handler(type: ByteToMessageHandler<MMFrameDecoder>.self)
         }

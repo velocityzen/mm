@@ -93,9 +93,11 @@ public enum MMServiceError: Error, Sendable, Hashable {
 ///
 /// On graceful shutdown (the bracket's dispose) the server (1) stops
 /// accepting — every listening channel closes; (2) every open connection —
-/// including one still waiting for its peer's hello — stops *reading*
-/// (input-half close) while in-flight handlers complete and their responses
-/// flush through the connection's writer; (3) connection channels close;
+/// including one still waiting for its peer's hello — stops taking requests
+/// while in-flight handlers complete and their responses flush through the
+/// connection's writer. The socket keeps reading and discards what the peer
+/// sends, so a peer that writes during the drain is never failed for it (see
+/// `ConnectionDrainHandler`); (3) connection channels close;
 /// (4) for unix endpoints, each socket file is removed, unless another server
 /// instance has already replaced it at the same path during the drain (the
 /// file's device/inode is compared against the one this instance bound — see
@@ -209,8 +211,8 @@ package struct ServerRuntime: Sendable {
     /// scope returns, so the task can neither leak nor outlive the resource.
     private struct RunningServer: Sendable {
         let localAddresses: [SocketAddress]
-        /// Requesting it starts the drain: every listener and every open
-        /// connection stop reading. Idempotent.
+        /// Requesting it starts the drain: every listener stops accepting and
+        /// every open connection stops taking requests. Idempotent.
         let shutdown: Shutdown
         /// The accept loops; returns once every connection has closed.
         let loop: Task<Result<Void, MMServiceError>, Never>
@@ -349,13 +351,11 @@ package struct ServerRuntime: Sendable {
                 .serverChannelInitializer { channel in
                     self.initializeServerChannel(channel)
                 }
-                // Half-closure is load-bearing for the graceful drain: the
-                // shutdown path closes the input half (see handleConnection)
-                // and expects in-flight responses to keep flushing. Without
-                // this option, Linux (epoll) reports the shut-down input as
-                // read-EOF and NIO escalates it to a full channel close,
-                // killing the write side before terminals flush; kqueue does
-                // not, which is how the drain worked on Darwin only.
+                // A peer that shuts down its writing side still gets its
+                // in-flight responses: the request loop ends, and they flush
+                // before the channel closes. Without this option, NIO turns
+                // the read-EOF into a full close, killing the write side
+                // before they flush.
                 .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
                 .bind(descriptor) { channel in
                     self.initializeChildChannel(channel, transport: .unix)
@@ -385,8 +385,8 @@ package struct ServerRuntime: Sendable {
                 self.initializeServerChannel(channel)
             }
             .childChannelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
-            // Same rationale as the unix bootstrap: the graceful-shutdown
-            // input close must not escalate to a full close on Linux.
+            // Same rationale as the unix bootstrap: a peer's read-EOF must not
+            // escalate to a full close before its responses flush.
             .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
             .bind(host: host, port: port) { channel in
                 self.initializeChildChannel(channel, transport: .tcp)
@@ -494,9 +494,9 @@ package struct ServerRuntime: Sendable {
     }
 
     /// Per-connection pipeline, head to tail: idle timeout (+ close on idle,
-    /// which also reaps pre-hello dead clients), framing codec with the
-    /// configured cap, then the hello handler. Must run on the channel's
-    /// event loop. Internal so handler assembly is testable on
+    /// which also reaps pre-hello dead clients), the drain handler, framing
+    /// codec with the configured cap, then the hello handler. Must run on the
+    /// channel's event loop. Internal so handler assembly is testable on
     /// `EmbeddedChannel`.
     ///
     /// Idleness is judged on **all** traffic (`allTimeout`), not reads alone:
@@ -514,6 +514,7 @@ package struct ServerRuntime: Sendable {
         let sync = channel.pipeline.syncOperations
         try sync.addHandler(IdleStateHandler(allTimeout: idleTimeout))
         try sync.addHandler(MMIdleCloseHandler())
+        try sync.addHandler(ConnectionDrainHandler())
         try sync.addHandler(ByteToMessageHandler(MMFrameDecoder(maxFrameLength: maxFrameLength)))
         try sync.addHandler(MessageToByteHandler(MMFrameEncoder(maxFrameLength: maxFrameLength)))
         try sync.addHandler(
@@ -649,12 +650,12 @@ package struct ServerRuntime: Sendable {
             // channel: a connection still waiting for its peer's hello would
             // otherwise be invisible to shutdown and stall the whole drain
             // until the idle timeout (or indefinitely, against a peer that
-            // trickles bytes without ever completing a frame). Input-half
-            // close is safe in every phase — it ends the hello read and the
-            // request loop alike (the inbound stream finishes), while
-            // in-flight handlers still complete and their responses flush
-            // through the writer before `executeThenClose` closes the channel.
-            try await withShutdownHandler(on: shutdown, { channel.close(mode: .input, promise: nil) }) {
+            // trickles bytes without ever completing a frame). The drain is
+            // safe in every phase — it ends the hello read and the request
+            // loop alike (the inbound stream finishes), while in-flight
+            // handlers still complete and their responses flush through the
+            // writer before `executeThenClose` closes the channel.
+            try await withShutdownHandler(on: shutdown, { ConnectionDrainHandler.begin(on: channel) }) {
                 await Result.fromAsync {
                     try await self.serveConnection(
                         connection,
@@ -687,8 +688,8 @@ package struct ServerRuntime: Sendable {
             // activation (ServerHelloHandler); the peer's first frame
             // must be its hello. The handler already closed on garbage,
             // in which case the stream ends before yielding a frame. On
-            // graceful shutdown the input-half close (registered by
-            // handleConnection) ends this read with a nil frame.
+            // graceful shutdown the drain (registered by handleConnection)
+            // ends this read with a nil frame.
             var frames = inbound.makeAsyncIterator()
             guard let helloFrame = try await frames.next() else {
                 return
@@ -838,7 +839,7 @@ package struct ServerRuntime: Sendable {
                     metadata: ["error": "\(error)"]
                 )
             }
-            // The read loop ended (peer EOF, graceful-shutdown input close,
+            // The read loop ended (peer EOF, the graceful-shutdown drain,
             // decode violation, or transport error): drain live streams so their
             // handlers unwind and flush terminals through the writer, then the
             // discarding group waits for every handler (unary and stream) to

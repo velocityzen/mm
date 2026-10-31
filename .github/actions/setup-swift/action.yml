@@ -1,0 +1,58 @@
+name: Set up Swift
+description: >-
+  Installs a swift.org toolchain with swiftly and puts it on the PATH, on
+  macOS and on x86_64 Linux.
+inputs:
+  swift-version:
+    description: >-
+      The release, e.g. "6.4" (the latest 6.4.x) or "6.4.2".
+    required: true
+runs:
+  using: composite
+  steps:
+    # swiftly (swift.org's toolchain installer) is pinned and checked, so a
+    # new swiftly release cannot change CI unnoticed. It verifies the
+    # toolchain's signature itself.
+    - name: Install Swift ${{ inputs.swift-version }} with swiftly
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        SWIFT_VERSION: ${{ inputs.swift-version }}
+        SWIFTLY_VERSION: "1.2.0"
+        SWIFTLY_SHA256: a1b48692b00ea6902957423473c87bee7c7f3e18c015a4a09317102f6820b987
+      run: |
+        curl -fsSLo "$RUNNER_TEMP/swiftly.pkg" "https://download.swift.org/swiftly/darwin/swiftly-$SWIFTLY_VERSION.pkg"
+        echo "$SWIFTLY_SHA256  $RUNNER_TEMP/swiftly.pkg" | shasum -a 256 -c -
+        installer -pkg "$RUNNER_TEMP/swiftly.pkg" -target CurrentUserHomeDirectory
+        ~/.swiftly/bin/swiftly init --assume-yes --quiet-shell-followup --skip-install
+        . "$HOME/.swiftly/env.sh"
+        swiftly install --assume-yes --use "$SWIFT_VERSION"
+        echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
+
+    - name: Install Swift ${{ inputs.swift-version }} with swiftly
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        SWIFT_VERSION: ${{ inputs.swift-version }}
+        SWIFTLY_VERSION: "1.2.0"
+        SWIFTLY_SHA256: 0b26b568811404374c7d7f07276b6aad4145db5d1893a45f307de6a94ca8d9c3
+      run: |
+        if [ "$RUNNER_ARCH" != X64 ]; then
+          echo "::error::Only the x86_64 swiftly is pinned here; this runner is $RUNNER_ARCH."
+          exit 1
+        fi
+        curl -fsSLo "$RUNNER_TEMP/swiftly.tar.gz" "https://download.swift.org/swiftly/linux/swiftly-$SWIFTLY_VERSION-x86_64.tar.gz"
+        echo "$SWIFTLY_SHA256  $RUNNER_TEMP/swiftly.tar.gz" | sha256sum -c -
+        tar -xzf "$RUNNER_TEMP/swiftly.tar.gz" -C "$RUNNER_TEMP"
+        "$RUNNER_TEMP/swiftly" init --assume-yes --quiet-shell-followup --skip-install
+        . "${SWIFTLY_HOME_DIR:-$HOME/.local/share/swiftly}/env.sh"
+        swiftly install --assume-yes --use --post-install-file="$RUNNER_TEMP/post-install.sh" "$SWIFT_VERSION"
+        if [ -s "$RUNNER_TEMP/post-install.sh" ]; then
+          sudo apt-get update -q
+          sudo bash "$RUNNER_TEMP/post-install.sh"
+        fi
+        echo "$SWIFTLY_BIN_DIR" >> "$GITHUB_PATH"
+
+    - name: Show Swift version
+      shell: bash
+      run: swift --version

@@ -4,13 +4,28 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
+# The jobs only read the repository; none of them needs a write token.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The package requires Swift 6.4 (swift-tools-version 6.4). It is swift.org's:
+# installed by .github/actions/setup-swift on the runners, or the image's in
+# the Linux containers. The simulator jobs use Xcode's. The longer shell steps
+# are in .github/scripts.
 jobs:
   no-dispatch:
     name: No Dispatch symbols
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
       - name: Forbid Dispatch and GCD symbols in sources and tests
         run: |
           # Matches GCD API symbols only — not the English word "Dispatch" in prose.
@@ -19,56 +34,48 @@ jobs:
             exit 1
           fi
 
-  test-macos:
-    name: Test (macOS)
-    # The package requires Swift 6.4 (swift-tools-version 6.4), which ships
-    # with Xcode 27. macos-26 has only Xcode 26.x (Swift 6.3), so this uses
-    # the xcode-27 image (a GitHub preview image on macOS 27).
-    runs-on: xcode-27
+  macos:
+    name: Test macOS
+    runs-on: macos-26
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - name: Run tests
-        run: swift test
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-  test-linux:
-    name: Test (Linux)
-    runs-on: ubuntu-24.04
-    # The package requires Swift 6.4 (swift-tools-version 6.4).
-    container: swift:6.4
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run tests
-        run: swift test
-
-  test-android:
-    name: Test (Android)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build and test on an Android emulator
-        uses: skiptools/swift-android-action@v2
+      # The image's Xcode ships Swift 6.3; this installs the toolchain the
+      # Linux jobs build with.
+      - name: Set up Swift
+        uses: ./.github/actions/setup-swift
         with:
-          # The Swift SDK for Android ships per patch release, so the
-          # version is exact (6.4 alone names no release).
-          swift-version: "6.4.2"
-          # Peer capture reads SO_PEERGROUPS (Linux 4.13+); the API 34
-          # emulator runs kernel 5.15 or newer.
-          android-api-level: 34
-          # Android has no /tmp; temp socket paths go under the emulator's
-          # writable scratch directory.
-          test-env: TMPDIR=/data/local/tmp
-          # The emulator fails to boot on a nearly full runner disk.
-          free-disk-space: true
+          swift-version: "6.4"
 
-  test-apple-device-platforms:
-    name: Client tests (${{ matrix.name }})
-    # Same image as test-macos: the simulators come with Xcode 27.
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test
+        run: swift test
+
+      # The concurrency pool with one thread, the narrowest it gets (the
+      # simulators can have one or two): anything that holds a pool thread
+      # while it waits hangs here every time, not now and then.
+      - name: Test with a one-thread concurrency pool
+        env:
+          LIBDISPATCH_COOPERATIVE_POOL_STRICT: "1"
+        run: swift test
+
+  apple:
+    name: Test ${{ matrix.name }} Simulator
+    # The simulators need Xcode 27 (Swift 6.4), which only this GitHub
+    # preview image (macOS 27) has.
     runs-on: xcode-27
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
+        # The platforms Package.swift declares besides macOS, and the iPad.
         include:
           - name: iOS
             platform: iOS
@@ -86,7 +93,14 @@ jobs:
             platform: visionOS
             device: Apple Vision
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Show Xcode version
+        run: |
+          xcodebuild -version
+          swift --version
+
       - name: Pick a simulator
         id: simulator
         env:
@@ -95,23 +109,158 @@ jobs:
         run: |
           udid=$(.github/scripts/simulator-destination.sh "$PLATFORM" "$DEVICE")
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
+
+      # A simulator that xcodebuild boots itself can still be starting up
+      # when the test runner launches, and the runner then hangs before it
+      # connects. Booting first and waiting for it leaves no such race.
       - name: Boot the simulator
-        # A simulator that xcodebuild boots itself can still be starting up
-        # when the test runner launches, and the runner then hangs before it
-        # connects. Booting first and waiting for it leaves no such race.
         timeout-minutes: 10
         env:
           UDID: ${{ steps.simulator.outputs.udid }}
         run: xcrun simctl bootstatus "$UDID" -b
-      - name: Run client tests
-        # The MMClientStackTests scheme builds and runs the tests of what the
-        # client links (MMWire, MMSchema, MMClient), never the server, CLI or
-        # integration targets. Exit tests are compiled out on these platforms.
+
+      # The client stack only: the server, CLI and integration targets don't
+      # build for these platforms. Exit tests are compiled out here.
+      - name: Test on the ${{ matrix.name }} Simulator
         env:
           UDID: ${{ steps.simulator.outputs.udid }}
-        run: >
-          xcodebuild test
-          -scheme MMClientStackTests
-          -destination "id=$UDID"
-          -skipMacroValidation
-          -skipPackagePluginValidation
+        run: .github/scripts/test-simulator.sh "$UDID"
+
+  linux:
+    name: Test Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    container:
+      image: swift:6.4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test
+        run: swift test
+
+  musl:
+    name: Build static Linux (Musl)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # A Swift SDK only works with the exact compiler release it was built for,
+    # so the image is pinned to the SDK's patch release (swift:6.4 moves on).
+    # Update the image and the SDK together.
+    container:
+      image: swift:6.4.1
+    env:
+      # "Swift SDK for Static Linux" from https://www.swift.org/install/linux/
+      STATIC_SDK_URL: https://download.swift.org/swift-6.4.1-release/static-sdk/swift-6.4.1-RELEASE/swift-6.4.1-RELEASE_static-linux-0.1.0.artifactbundle.tar.gz
+      STATIC_SDK_SHA256: cef5592d7430ed3c5ae1ddda479849c6f5252bd94a5723db1559f984caf38a7c
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Install the Static Linux SDK
+        run: |
+          swift sdk install "$STATIC_SDK_URL" --checksum "$STATIC_SDK_SHA256"
+          swift sdk list
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      # Without --build-tests: the Static Linux SDK ships neither Testing nor
+      # XCTest, so the test targets cannot be built for Musl.
+      - name: Build
+        run: swift build --swift-sdk x86_64-swift-linux-musl
+
+      # The runner is x86_64 Linux, so the static binaries run as they are.
+      # Since the tests cannot be built for Musl, this is where the Musl
+      # code runs: sockets, peer credentials, stdin input and signals.
+      - name: Run the static examples
+        timeout-minutes: 5
+        run: .github/scripts/run-examples.sh "$(swift build --swift-sdk x86_64-swift-linux-musl --show-bin-path)"
+
+  android:
+    name: Test Android (emulator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      # A Swift SDK only works with the exact compiler release it was built
+      # for, so the toolchain and the SDK are pinned together.
+      SWIFT_VERSION: "6.4.2"
+      # "Swift SDK for Android" from https://www.swift.org/install/
+      ANDROID_SDK_URL: https://download.swift.org/swift-6.4.2-release/android-sdk/swift-6.4.2-RELEASE/swift-6.4.2-RELEASE_android.artifactbundle.tar.gz
+      ANDROID_SDK_SHA256: 4d6ad63ea74becd58e123ff58b1b48c3be5ec0db0dff0ea5abe37ac007dd3233
+      ANDROID_SDK_ID: swift-6.4.2-RELEASE_android
+      # The NDK release the SDK is made for; the runner image has it.
+      ANDROID_NDK_MAJOR: "30"
+      # The API level of the build and of the emulator. Peer credentials read
+      # SO_PEERGROUPS (Linux 4.13+), and the API 34 emulator runs kernel 5.15
+      # or newer.
+      ANDROID_API: "34"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Swift
+        uses: ./.github/actions/setup-swift
+        with:
+          swift-version: ${{ env.SWIFT_VERSION }}
+
+      # The SDK's setup script links the NDK's headers and libraries in. The
+      # build itself finds the NDK through ANDROID_NDK_ROOT or
+      # ANDROID_NDK_HOME first, which the image sets to an older one (whose
+      # headers Swift imports differently), so both are pointed at it too.
+      - name: Install the Swift SDK for Android
+        run: |
+          swift sdk install "$ANDROID_SDK_URL" --checksum "$ANDROID_SDK_SHA256" --swift-sdks-path "$RUNNER_TEMP/swift-sdks"
+          ndk="$(ls -d "$ANDROID_HOME/ndk/$ANDROID_NDK_MAJOR".* | tail -n 1)"
+          ANDROID_NDK_HOME="$ndk" "$RUNNER_TEMP/swift-sdks/$ANDROID_SDK_ID.artifactbundle/swift-android/scripts/setup-android-sdk.sh"
+          echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      # Every architecture the SDK has. armv7 is 32-bit (a 32-bit Int,
+      # time_t and pointer), so it catches the widths and layouts the 64-bit
+      # builds take for granted. Only x86_64 runs, on the emulator below, so
+      # only it builds the tests.
+      - name: Build
+        run: |
+          for arch in aarch64 armv7; do
+            echo "== $arch"
+            swift build --swift-sdks-path "$RUNNER_TEMP/swift-sdks" \
+              --swift-sdk "$ANDROID_SDK_ID" --triple "$arch-unknown-linux-android$ANDROID_API"
+          done
+          echo "== x86_64, with the tests"
+          swift build --build-tests --swift-sdks-path "$RUNNER_TEMP/swift-sdks" \
+            --swift-sdk "$ANDROID_SDK_ID" --triple "x86_64-unknown-linux-android$ANDROID_API"
+
+      # The script gives the boot 10 minutes, and shows the emulator's log
+      # if it fails.
+      - name: Start the Android emulator
+        timeout-minutes: 15
+        run: .github/scripts/android-start-emulator.sh "$ANDROID_API"
+
+      - name: Test on the Android emulator
+        timeout-minutes: 20
+        run: |
+          .github/scripts/android-test.sh "$RUNNER_TEMP/swift-sdks" "$ANDROID_SDK_ID" \
+            "x86_64-unknown-linux-android$ANDROID_API"

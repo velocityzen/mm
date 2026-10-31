@@ -503,7 +503,7 @@ A daemon with more resources composes them into one bracket with `BracketAsyncDo
 
 `For(Journal.self)` (or `namespaces: [Journal.self]` in the parameter form) enables the second and third checks. A namespace left out silently skips its cross-check, so declare every namespace you register routes for.
 
-Graceful shutdown is correct end to end. The listener closes first. Open connections stop reading while in-flight handlers complete and flush. Channels close. For unix endpoints, the socket file is unlinked last, after a device/inode identity check, so a slow drain never deletes a newer instance's socket.
+Graceful shutdown is correct end to end. The listener closes first. Open connections stop taking requests while in-flight handlers complete and flush. Their sockets keep reading and discard what peers send, so a peer that writes during the drain still gets every response. Channels close. For unix endpoints, the socket file is unlinked last, after a device/inode identity check, so a slow drain never deletes a newer instance's socket.
 
 Optionally, bootstrap swift-log with `MMLogContext.metadataProvider` (or merge it into your provider). Then every log line in a connection's task tree carries the `connection` id, including lines your handlers write with your own loggers.
 

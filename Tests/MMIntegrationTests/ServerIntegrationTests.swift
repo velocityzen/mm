@@ -572,6 +572,44 @@ struct ServerIntegrationTests {
         }
     }
 
+    @Test("a peer that writes during the drain still gets its in-flight response")
+    func drainSurvivesPeerWrites() async throws {
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            let drain = Signal<Void>()
+            async let served: Void = runServerUntilDrained(server, drain: drain)
+            _ = try await withDeadline { try await server.bound.wait() }
+            try await withWireSession(unixPath: path) { session in
+                _ = try await session.handshake()
+                try await session.send(
+                    request(
+                        msgid: 9, method: "slow.wait", entity: entity("box.item"),
+                        TargetRequest(entity: entity("box.item"))
+                    )
+                )
+                _ = try await withDeadline { try await server.slowStarted.wait() }
+                drain.fire(())
+                try await expectConnectRefused(unixPath: path)
+                // The drain takes no more requests. A drain that shut the
+                // socket's input failed this write with EPIPE on Linux, and
+                // the session closed with the response to 9 never read.
+                try await session.send(
+                    request(
+                        msgid: 10, method: "echo.run", entity: entity("box.item"),
+                        EchoRequest(entity: entity("box.item"), value: 10)
+                    )
+                )
+                server.slowGate.fire(())
+                let reply = try await session.response(msgid: 9)
+                #expect(reply.error == nil)
+                #expect(try decodeResult(EchoResponse.self, from: reply.result).value == 99)
+                #expect(await session.drainUntilClosedByServer())
+            }
+            try await served
+            #expect(statMode(path: path) == nil)
+        }
+    }
+
     @Test("graceful shutdown releases a connection that never sent its hello")
     func gracefulShutdownReleasesPreHelloConnection() async throws {
         try await withTempSocketPath { path in
