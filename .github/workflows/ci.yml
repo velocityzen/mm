@@ -238,17 +238,14 @@ jobs:
       - name: Resolve dependencies
         run: swift package resolve
 
-      # Every architecture the SDK has. armv7 is 32-bit (a 32-bit Int,
-      # time_t and pointer), so it catches the widths and layouts the 64-bit
-      # builds take for granted. Only x86_64 runs, on the emulator below, so
-      # only it builds the tests.
+      # aarch64 is the architecture the package supports on Android; x86_64
+      # is the emulator's. Only x86_64 runs, on the emulator below, so only it
+      # builds the tests. 32-bit armv7 is not supported.
       - name: Build
         run: |
-          for arch in aarch64 armv7; do
-            echo "== $arch"
-            swift build --swift-sdks-path "$RUNNER_TEMP/swift-sdks" \
-              --swift-sdk "$ANDROID_SDK_ID" --triple "$arch-unknown-linux-android$ANDROID_API"
-          done
+          echo "== aarch64"
+          swift build --swift-sdks-path "$RUNNER_TEMP/swift-sdks" \
+            --swift-sdk "$ANDROID_SDK_ID" --triple "aarch64-unknown-linux-android$ANDROID_API"
           echo "== x86_64, with the tests"
           swift build --build-tests --swift-sdks-path "$RUNNER_TEMP/swift-sdks" \
             --swift-sdk "$ANDROID_SDK_ID" --triple "x86_64-unknown-linux-android$ANDROID_API"
