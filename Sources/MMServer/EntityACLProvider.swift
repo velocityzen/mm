@@ -1,4 +1,5 @@
 import MMSchema
+import Synchronization
 
 /// The host application's source of entity ACLs. Real providers typically sit
 /// on SQLite (hence `async`); the library ships ``InMemoryACLProvider`` for
@@ -31,30 +32,33 @@ public protocol EntityACLProvider: Sendable {
 
 /// A dictionary-backed ``EntityACLProvider`` for tests and small daemons.
 ///
-/// An actor so `set`/`remove` may race with in-flight dispatches safely; each
-/// lookup reads the live dictionary.
-public actor InMemoryACLProvider: EntityACLProvider {
-    private var acls: [EntityName: EntityACL]
+/// The dictionary sits behind a mutex, so `set`/`remove` may race with
+/// in-flight dispatches safely and each lookup reads the live dictionary.
+/// A lookup takes the lock in place, with no hop to another executor.
+public final class InMemoryACLProvider: EntityACLProvider {
+    private let acls: Mutex<[EntityName: EntityACL]>
 
     public init(_ acls: [EntityName: EntityACL] = [:]) {
-        self.acls = acls
+        self.acls = Mutex(acls)
     }
 
     /// Sets (or replaces) the ACL for `entity`.
-    public func set(_ acl: EntityACL, for entity: EntityName) {
-        self.acls[entity] = acl
+    public func set(_ acl: EntityACL, for entity: EntityName) async {
+        self.acls.withLock { $0[entity] = acl }
     }
 
     /// Removes the ACL record for `entity`, if any.
-    public func remove(_ entity: EntityName) {
-        self.acls[entity] = nil
+    public func remove(_ entity: EntityName) async {
+        self.acls.withLock { $0[entity] = nil }
     }
 
+    @concurrent
     public func acl(for entity: EntityName) async -> Result<EntityACL?, ACLProviderError> {
-        .success(self.acls[entity])
+        .success(self.acls.withLock { $0[entity] })
     }
 
     /// A no-op, documented as such: this provider never caches — every lookup
     /// reads the live dictionary, so there is nothing to drop.
+    @concurrent
     public func invalidate(_ entity: EntityName) async {}
 }

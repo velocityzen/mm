@@ -57,4 +57,12 @@ enum MPFormat {
             default: return false
         }
     }
+
+    /// True for every format in the array family (fixarray, array16/32).
+    static func isArray(_ format: UInt8) -> Bool {
+        switch format {
+            case 0x90...0x9f, 0xdc...0xdd: return true
+            default: return false
+        }
+    }
 }

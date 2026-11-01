@@ -245,29 +245,37 @@ public struct Accepts: Sendable {
         }
     }
 
-    /// Whether the (non-root) `entity` is accepted.
+    /// Whether the (non-root) `entity` is accepted. Runs on every dispatch,
+    /// so it compares the name's bytes in place instead of splitting it.
     func admits(_ entity: EntityName) -> Bool {
-        let entitySegments = entity.rawValue.split(separator: ".")
+        let name = entity.rawValue.utf8
+        let entitySegmentCount = name.count(where: { $0 == UInt8(ascii: ".") }) + 1
         return self.patterns.contains { pattern in
             switch pattern.kind {
                 case .root:
                     return false
+
                 case .entities(let segments, let descendants):
                     guard
                         descendants
-                            ? entitySegments.count > segments.count
-                            : entitySegments.count == segments.count
+                            ? entitySegmentCount > segments.count
+                            : entitySegmentCount == segments.count
                     else {
                         return false
                     }
-                    return zip(segments, entitySegments).allSatisfy { pattern, actual in
-                        switch pattern {
-                            case .anyOne:
-                                return true
-                            case .literal(let text):
-                                return text == actual
+
+                    var start = name.startIndex
+                    for segment in segments {
+                        let end = name[start...].firstIndex(of: UInt8(ascii: ".")) ?? name.endIndex
+                        if case .literal(let text) = segment,
+                            !text.utf8.elementsEqual(name[start..<end])
+                        {
+                            return false
                         }
+                        start = end == name.endIndex ? end : name.index(after: end)
                     }
+
+                    return true
             }
         }
     }

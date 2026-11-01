@@ -91,12 +91,34 @@ public struct EntityName: Sendable, Hashable {
     /// This is the traversal list for the x-on-every-ancestor rule; ``root`` is
     /// deliberately excluded (it carries no ACL).
     public var ancestors: [EntityName] {
-        guard !isRoot else { return [] }
-        var result: [EntityName] = []
-        for index in rawValue.indices where rawValue[index] == "." {
-            result.append(EntityName(validated: String(rawValue[..<index])))
+        Array(ancestorSequence)
+    }
+
+    /// ``ancestors`` one at a time, without building the array: the router
+    /// walks them on every dispatch.
+    package var ancestorSequence: AncestorSequence {
+        AncestorSequence(name: rawValue)
+    }
+
+    /// The prefixes before each dot of a name, outermost first.
+    package struct AncestorSequence: Sequence, IteratorProtocol {
+        private let name: String
+        private var position: String.Index
+
+        init(name: String) {
+            self.name = name
+            self.position = name.utf8.startIndex
         }
-        return result
+
+        package mutating func next() -> EntityName? {
+            let utf8 = name.utf8
+            guard let dot = utf8[position...].firstIndex(of: UInt8(ascii: ".")) else {
+                position = utf8.endIndex
+                return nil
+            }
+            position = utf8.index(after: dot)
+            return EntityName(validated: String(name[..<dot]))
+        }
     }
 
     /// The immediate enclosing name: `a.b.c` → `a.b`. A single-segment name's

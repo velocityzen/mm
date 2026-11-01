@@ -519,32 +519,34 @@ public struct Router: Sendable {
                 }
 
                 // (4) Traversal: x on every ancestor prefix, outermost first.
-                return await entity.ancestors
-                    .traverseAsync { ancestor in
-                        await self.requireAccess(
-                            .execute,
-                            on: ancestor,
-                            context: context,
-                            method: method
-                        )
+                // A loop rather than traverseAsync, which would build the
+                // ancestors array and an array of results nobody reads.
+                for ancestor in entity.ancestorSequence {
+                    let access = await self.requireAccess(
+                        .execute,
+                        on: ancestor,
+                        context: context,
+                        method: method
+                    )
+                    if case .failure(let error) = access {
+                        return .failure(error)
                     }
-                    .flatMapAsync { _ -> Result<Void, MMError> in
-                        // (5) Target check. Root is "the whole tree" and
-                        // carries no ACL, so there is nothing to check here —
-                        // root only reaches this point on an opted-in route
-                        // (see the root gate above).
-                        if entity.isRoot {
-                            return .success(())
-                        }
+                }
 
-                        return await self.requireAccess(
-                            route.access,
-                            on: entity,
-                            context: context,
-                            method: method
-                        )
-                    }
-                    .as(entity)
+                // (5) Target check. Root is "the whole tree" and carries no
+                // ACL, so there is nothing to check here — root only reaches
+                // this point on an opted-in route (see the root gate above).
+                if entity.isRoot {
+                    return .success(entity)
+                }
+
+                return await self.requireAccess(
+                    route.access,
+                    on: entity,
+                    context: context,
+                    method: method
+                )
+                .as(entity)
             }
     }
 

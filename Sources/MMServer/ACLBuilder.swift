@@ -117,7 +117,7 @@ func assembleACLTable(_ entries: [ACLEntry]) -> [EntityName: EntityACL] {
 
 extension InMemoryACLProvider {
     /// Builds the provider from a declared entity tree. See ``ACLEntry``.
-    public init(@ACLBuilder _ entities: () -> [ACLEntry]) {
+    public convenience init(@ACLBuilder _ entities: () -> [ACLEntry]) {
         self.init(assembleACLTable(entities()))
     }
 }

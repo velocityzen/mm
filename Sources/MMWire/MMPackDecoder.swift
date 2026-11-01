@@ -280,7 +280,12 @@ final class MPDecodingState {
             self.scope = enclosingScope
         }
         let decoder = MPDecoderImplementation(state: self, frame: frame)
-        if let arrayType = type as? any MPArrayDecodable.Type {
+        // The format byte first: the conformance cast costs a lookup, and only
+        // an array payload can take the reserving path.
+        if let format = buffer.getInteger(at: buffer.readerIndex, as: UInt8.self),
+            MPFormat.isArray(format),
+            let arrayType = type as? any MPArrayDecodable.Type
+        {
             // Guarded force cast: the conformance cast above proves T.
             return try arrayType.decodeReservingCapacity(from: decoder) as! T
         }

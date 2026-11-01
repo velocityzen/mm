@@ -380,7 +380,7 @@ Caching notes, most important first:
 - **Invalidate on creation and deletion, not only chmod.** This provider caches misses (`nil` rows), so a journal created at runtime (say `journal.drafts`) stays invisible until you call `invalidate` for it. If your mutation paths cannot reliably list the affected entities, cache only positive rows.
 - **Never cache failures.** A temporary storage error must not become a permanent denial.
 - **Know the ACL semantics you serve.** The first matching class wins: a peer classified as owner is judged by owner bits alone, even if group or other bits would grant. uid 0 is not special. Traversal requires `x` on every ancestor prefix. The router enforces all of this through `EntityACL.permitted`; the provider only stores and fetches.
-- The static `ACLProvider { ... }` table is an `InMemoryACLProvider` (an actor over a dictionary). Its `invalidate` is a documented no-op, because it never caches.
+- The static `ACLProvider { ... }` table is an `InMemoryACLProvider` (a dictionary behind a mutex). Its `invalidate` is a documented no-op, because it never caches.
 
 ### Grants are per entity and per mode: declare what a route accepts when that is too broad
 
