@@ -156,6 +156,36 @@ jobs:
       - name: Test
         run: swift test
 
+  benchmarks:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The thresholds are the counts on x86_64 Linux with this exact Swift
+    # release: allocation counts differ between platforms and can move
+    # between compiler releases. Update the image and the thresholds together.
+    container:
+      image: swift:6.4.2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Show Swift version
+        run: swift --version
+
+      # Allocation and syscall counts, not time: they come out the same on
+      # every run, so a change in them is a change in the code.
+      - name: Check the benchmark thresholds
+        run: .github/scripts/check-benchmark-thresholds.sh Benchmarks/Thresholds/linux
+
+      # A failed check leaves the measured counts in the thresholds
+      # directory: download them from the run to review and commit.
+      - name: Upload the measured thresholds
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchmark-thresholds
+          path: Benchmarks/Thresholds/linux
+
   musl:
     name: Build static Linux (Musl)
     runs-on: ubuntu-latest

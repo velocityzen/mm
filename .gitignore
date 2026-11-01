@@ -6,6 +6,7 @@
 .swiftpm/xcode/*
 !.swiftpm/xcode/xcshareddata/
 .index-build/
+.benchmarkBaselines/
 .DS_Store
 *.xcodeproj
 

@@ -410,6 +410,24 @@ swift test --filter MMWireTests    # one test target
 
 Tests use Swift Testing (`import Testing`) in three tiers: `EmbeddedChannel` for channel handlers, plain unit tests for domain logic, and integration tests over real Unix sockets in a temp directory.
 
+### Benchmarks
+
+`Benchmarks/` is a separate package, built on [benchmark](https://github.com/ordo-one/benchmark), so library users never resolve it. It counts allocations and syscalls rather than timing: those come out the same on every run, so a change in them is a change in the code. `MMWireBenchmarks` covers the envelopes, the MessagePack coders on `#schema` types, and the framing. `MMServerBenchmarks` covers `Router.dispatch` for unary calls, deep entities, denials and unknown methods.
+
+```sh
+swift package --package-path Benchmarks benchmark                                  # all of them
+swift package --package-path Benchmarks benchmark --filter 'Router.*'              # a subset
+swift package --package-path Benchmarks benchmark --metric wallClock               # timing instead
+swift package --package-path Benchmarks benchmark --filter MMPackEncoder.item --allocation-stacks
+```
+
+CI holds the counts to `Benchmarks/Thresholds/linux`, measured on x86_64 Linux (macOS counts differ). A count that moves either way fails the job, which then prints the measured counts as a diff and uploads them as the `benchmark-thresholds` artifact, to commit with the change. On macOS, compare against a baseline of your own:
+
+```sh
+swift package --package-path Benchmarks --allow-writing-to-package-directory benchmark baseline update main
+swift package --package-path Benchmarks benchmark baseline compare main
+```
+
 ## Versioning
 
 The wire protocol version is a single `u8`, currently **1**, independent of the package version. Packages follow semantic versioning. The protocol version changes only on wire-level breaks. Hello negotiation picks the lower version. A fingerprint mismatch triggers discovery, never a disconnect. Schemas evolve without version bumps: payloads are int-keyed maps, unknown keys are skipped, and new fields must be optional.
