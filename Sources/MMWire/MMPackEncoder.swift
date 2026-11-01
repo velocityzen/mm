@@ -125,11 +125,14 @@ final class MPEncodingState {
         description: "an encoding container was used after its parent was written to"
     )
 
-    var buffer: ByteBuffer
-    var frames: [MPEncodingFrame] = []
-    private var lastIdentifier = 0
+    // Unchecked exclusivity: each access is a short read or write that never
+    // calls an `Encodable` or anything else that could reach this state, so no
+    // two accesses overlap and the runtime check would only cost time.
+    @exclusivity(unchecked) var buffer: ByteBuffer
+    @exclusivity(unchecked) var frames: [MPEncodingFrame] = []
+    @exclusivity(unchecked) private var lastIdentifier = 0
     /// Set on misuse, so the encode fails even when the value swallows the error.
-    private var usedOutOfOrder = false
+    @exclusivity(unchecked) private var usedOutOfOrder = false
 
     init(buffer: ByteBuffer) {
         self.buffer = buffer
@@ -726,9 +729,12 @@ struct MPSingleValueEncoding: SingleValueEncodingContainer {
 /// numeric-but-non-canonical string key ("05", "+5") travels as a string key —
 /// honoring its claimed int would silently rewrite it on round trip and could
 /// collide with a distinct real int key.
+///
+/// Checked cheapest first: a property name fails to parse at its first
+/// character, so only a numeric string pays for formatting `intValue`.
 func mpFaithfulIntKey(_ key: some CodingKey) -> Int? {
-    guard let intKey = key.intValue,
-        String(intKey) == key.stringValue || Int(key.stringValue) == nil
-    else { return nil }
-    return intKey
+    guard let intKey = key.intValue else { return nil }
+    let stringValue = key.stringValue
+    guard let parsed = Int(stringValue) else { return intKey }
+    return parsed == intKey && String(intKey) == stringValue ? intKey : nil
 }

@@ -201,10 +201,13 @@ final class MPDecodingState {
     )
 
     let cap: Int
-    var stack: [MPDecodingFrame] = []
+    // Unchecked exclusivity: each access is a short read or write that never
+    // calls a `Decodable` or anything else that could reach this state, so no
+    // two accesses overlap and the runtime check would only cost time.
+    @exclusivity(unchecked) var stack: [MPDecodingFrame] = []
     /// Where the innermost value decode's part of the stack begins.
-    private var scope = 0
-    private var lastIdentifier = 0
+    @exclusivity(unchecked) private var scope = 0
+    @exclusivity(unchecked) private var lastIdentifier = 0
 
     init(cap: Int) {
         self.cap = cap
