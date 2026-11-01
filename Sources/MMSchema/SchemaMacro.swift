@@ -33,6 +33,10 @@
 ///   `<Call>Request` / `<Call>Response` / `<Call>RequestItem` /
 ///   `<Call>ResponseItem`; override with a leading string literal
 ///   (`Response("FollowSummary") { ... }`).
+/// - On every generated struct and enum, MessagePack code (`MMPackCodable`):
+///   the wire coders, the server's routes, and the client's calls and
+///   streams use it in place of the type's `Codable`, writing the same
+///   bytes without an `Encoder` or `Decoder`.
 /// - The typed descriptor per call (`Method`, `ServerStreamMethod`,
 ///   `ClientStreamMethod`, or `BidirectionalStreamMethod`, chosen by which stream parts
 ///   are declared), named after the call (`Journal.append`). `Call("@")`

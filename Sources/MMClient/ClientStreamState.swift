@@ -125,6 +125,10 @@ final class ClientStreamState<
     private let sinks: ClientStreamSinks
     private let logger: Logger
     private let metrics: ClientMetrics
+    /// The item coders, picked once when the stream opens: through the
+    /// generated code when the type has some, through `Codable` otherwise.
+    private let decodeInbound: @Sendable (ByteBuffer) -> Result<Inbound, MMWireError>
+    private let encodeOutbound: @Sendable (Outbound) -> Result<ByteBuffer, MMWireError>
 
     init(
         msgid: UInt32,
@@ -145,6 +149,8 @@ final class ClientStreamState<
         self.sinks = sinks
         self.logger = logger
         self.metrics = metrics
+        self.decodeInbound = MMPackDecoder().decoding(Inbound.self)
+        self.encodeOutbound = MMPackEncoder().encoding(Outbound.self)
     }
 
     /// Installs the producer source and its consumer sequence after
@@ -242,7 +248,7 @@ extension ClientStreamState: ClientStreamControl {
 
     func deliverInboundItem(_ item: ByteBuffer) -> InboundDeliveryOutcome {
         let element: Inbound
-        switch MMPackDecoder().decode(Inbound.self, from: item) {
+        switch self.decodeInbound(item) {
             case .failure(let error):
                 self.metrics.streamItemDecodeFailures.increment()
                 self.logger.warning(
@@ -447,7 +453,7 @@ extension ClientStreamState {
     func send(_ element: Outbound) async -> StreamSendOutcome {
         // Encode outside the lock.
         let item: ByteBuffer
-        switch MMPackEncoder().encode(element) {
+        switch self.encodeOutbound(element) {
             case .failure:
                 // A local encode failure on an outbound element: treat as call
                 // ended rather than inventing a new outcome — the caller cannot

@@ -980,8 +980,9 @@ public actor MMClientConnection {
         return state
     }
 
-    /// The open-request send path every call shape shares: encode params,
-    /// reserve a msgid under the in-flight cap, build the envelope, enforce
+    /// The open-request send path every call shape shares: encode params
+    /// (through the request type's generated code when it has some, found by
+    /// a check per call), reserve a msgid under the in-flight cap, build the envelope, enforce
     /// the outbound frame cap *before* the pipeline (`MMFrameEncoder` would
     /// throw at the handler seam, poisoning the encoder and tearing down the
     /// whole connection — one oversized request must fail one call, locally),
@@ -995,7 +996,7 @@ public actor MMClientConnection {
         entity: EntityName,
         request: some Codable & Sendable
     ) async -> Result<(msgid: UInt32, frame: ByteBuffer, writer: Writer), MMCallError> {
-        await MMPackEncoder().encode(request)
+        await MMPackEncoder().encodeCheckingForGeneratedCode(request)
             .mapError { MMCallError.encode($0) }
             .flatMap { params in
                 self.calls.withLockedValue {

@@ -126,6 +126,15 @@ Every server also serves the ``Builtins``:
 - ``TypeNamespace``
 - ``SchemaDescribable``
 
+### Generated MessagePack code
+
+- ``MMPackEncodable``
+- ``MMPackDecodable``
+- ``MMPackCodable``
+- ``MMPackWriter``
+- ``MMPackReader``
+- ``MMPackMapKey``
+
 ### Schema-shaped values
 
 - ``SchemaValue``

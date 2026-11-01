@@ -61,7 +61,6 @@ public struct Router: Sendable {
     private let routesByName: [String: Route]
     private let aclProvider: any EntityACLProvider
     private let logger: Logger
-    private let decoder: MMPackDecoder
     private let metrics: RouterMetrics
 
     /// Builds the route table and runs all startup cross-checks.
@@ -153,7 +152,6 @@ public struct Router: Sendable {
         self.routesByName = routesByName
         self.aclProvider = aclProvider
         self.logger = logger
-        self.decoder = MMPackDecoder()
         self.metrics = RouterMetrics()
     }
 

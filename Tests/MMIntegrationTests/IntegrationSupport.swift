@@ -279,6 +279,35 @@ enum TestMethods {
     >(
         name: "box.pipe", access: .write
     )
+
+    // The coding-path probes, one per call shape: each handler answers with
+    // probes carrying the paths of everything it received.
+
+    /// Answers with the request's paths.
+    static let probeUnary = Method<CodingPathProbe, CodingPathProbe>(
+        name: "probe.unary", access: .write
+    )
+
+    /// Streams one element, then the terminal, each carrying the request's paths.
+    static let probeServerStream = ServerStreamMethod<
+        CodingPathProbe, CodingPathProbe, CodingPathProbe
+    >(
+        name: "probe.serverStream", access: .write
+    )
+
+    /// The terminal carries the request's paths, then each element's.
+    static let probeClientStream = ClientStreamMethod<
+        CodingPathProbe, CodingPathProbe, CodingPathProbe
+    >(
+        name: "probe.clientStream", access: .write
+    )
+
+    /// Echoes each element with its paths; the terminal carries the request's.
+    static let probeBidirectional = BidirectionalStreamMethod<
+        CodingPathProbe, CodingPathProbe, CodingPathProbe, CodingPathProbe
+    >(
+        name: "probe.bidirectional", access: .write
+    )
 }
 
 // MARK: - Streaming payload types
@@ -338,6 +367,71 @@ struct StreamSummary: Codable, Hashable, Sendable {
 
     enum CodingKeys: Int, CodingKey {
         case count = 0
+    }
+}
+
+/// A payload that records which path coded it on each hop. Its generated code
+/// writes `true` in slot 1 where its `Codable` conformance writes `false`, and
+/// each decode notes which path it took; a handler passes what it received on
+/// in ``observed``, so the client sees every hop's paths.
+struct CodingPathProbe: Codable, Hashable, Sendable, MMPackCodable {
+    /// The paths of the hops before this one, in order, `true` for generated code.
+    var observed: [Bool]
+    /// Whether the sender encoded this copy through generated code.
+    var encodedByGeneratedCode: Bool
+    /// Whether this copy was decoded through generated code.
+    var decodedByGeneratedCode: Bool
+
+    enum CodingKeys: Int, CodingKey {
+        case observed = 0
+        case encodedByGeneratedCode = 1
+    }
+
+    /// A probe to send, passing on `observed`.
+    init(observed: [Bool]) {
+        self.observed = observed
+        self.encodedByGeneratedCode = false
+        self.decodedByGeneratedCode = false
+    }
+
+    /// The paths of every hop so far, this one last: its encode, then its decode.
+    var observedWithThisHop: [Bool] {
+        self.observed + [self.encodedByGeneratedCode, self.decodedByGeneratedCode]
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.observed = try container.decode([Bool].self, forKey: .observed)
+        self.encodedByGeneratedCode = try container.decode(
+            Bool.self,
+            forKey: .encodedByGeneratedCode
+        )
+        self.decodedByGeneratedCode = false
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.observed, forKey: .observed)
+        try container.encode(false, forKey: .encodedByGeneratedCode)
+    }
+
+    /// Reads the two slots in the order both paths write them, which is all a
+    /// fixture needs.
+    init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {
+        _ = try reader.readMapHeader(depth: depth)
+        _ = try reader.readMapKey(depth: depth + 1)
+        self.observed = try reader.readArray(depth: depth + 1) { reader in try reader.readBool() }
+        _ = try reader.readMapKey(depth: depth + 1)
+        self.encodedByGeneratedCode = try reader.readBool()
+        self.decodedByGeneratedCode = true
+    }
+
+    func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {
+        writer.writeMapHeader(count: 2)
+        writer.writeInt(0)
+        writer.writeArray(self.observed) { writer, value in writer.writeBool(value) }
+        writer.writeInt(1)
+        writer.writeBool(true)
     }
 }
 
@@ -668,6 +762,30 @@ func makeTestServer(
                 }
             }
             return .success(StreamSummary(count: echoed))
+        }
+
+        Handle(TestMethods.probeUnary) { request, _ in
+            .success(CodingPathProbe(observed: request.observedWithThisHop))
+        }
+
+        Handle(TestMethods.probeServerStream) { request, sink, _ in
+            _ = await sink.send(CodingPathProbe(observed: request.observedWithThisHop))
+            return .success(CodingPathProbe(observed: request.observedWithThisHop))
+        }
+
+        Handle(TestMethods.probeClientStream) { request, elements, _ in
+            var observed = request.observedWithThisHop
+            for await element in elements {
+                observed += element.observedWithThisHop
+            }
+            return .success(CodingPathProbe(observed: observed))
+        }
+
+        Handle(TestMethods.probeBidirectional) { request, elements, sink, _ in
+            for await element in elements {
+                _ = await sink.send(CodingPathProbe(observed: element.observedWithThisHop))
+            }
+            return .success(CodingPathProbe(observed: request.observedWithThisHop))
         }
     }
     return TestServer(

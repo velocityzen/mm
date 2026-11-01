@@ -28,7 +28,8 @@ package enum SchemaCodeGenerator {
     ///
     /// - one struct per request / response / stream element (integer
     ///   `CodingKeys` from 0, `Codable & Hashable & Sendable`, public
-    ///   memberwise inits) — every generated struct is `SchemaDescribable` so
+    ///   memberwise inits, and `MMPackCodable` MessagePack code agreeing with
+    ///   that `Codable`) — every generated struct is `SchemaDescribable` so
     ///   field descriptions and named-type references reach discovery (the
     ///   call's target entity is envelope metadata, never a payload field),
     /// - one Swift type per `Enum` / `Type` declaration (`String`-raw enums
@@ -1647,6 +1648,7 @@ private func generateStruct(
     let describable = describedAs != nil || keyed.isEmpty
     var conformances = ["Codable", "Hashable", "Sendable"]
     if describable { conformances.append("SchemaDescribable") }
+    conformances.append("MMPackCodable")
     lines.append("public struct \(name): \(conformances.joined(separator: ", ")) {")
     switch describedAs {
         case .reference(let qualified):
@@ -1687,6 +1689,7 @@ private func generateStruct(
     lines.append("    public init(\(parameters.joined(separator: ", "))) {")
     lines.append(contentsOf: assignments)
     lines.append("    }")
+    lines.append(contentsOf: mmPackStructMembers(keyed).map { "    \($0)" })
     if !keyed.isEmpty {
         lines.append("    enum CodingKeys: Int, CodingKey {")
         for (field, key) in keyed {
@@ -1710,6 +1713,176 @@ private func nestedStructures(in fields: [ParsedField]) -> [(name: String, field
     return result
 }
 
+// MARK: - Generated MessagePack code
+
+/// The members giving a generated struct its MessagePack code
+/// (`MMPackCodable`). The encode writes what synthesized `Encodable` writes
+/// through `MMPackEncoder`: a map of the fields that are present (nil
+/// optionals left out), each under its integer key, in declaration order. The
+/// decode accepts what synthesized `Decodable` accepts through
+/// `MMPackDecoder`: the whole map is walked and checked first, the first
+/// occurrence of a key wins, and a field is found under its integer key, else
+/// under its name.
+private func mmPackStructMembers(_ keyed: [(field: ParsedField, key: Int)]) -> [String] {
+    var lines: [String] = []
+    lines.append("public func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {")
+    let optionalFields = keyed.filter { field, _ in
+        if case .optional = field.type { true } else { false }
+    }
+    if optionalFields.isEmpty {
+        lines.append("    writer.writeMapHeader(count: \(keyed.count))")
+    } else {
+        lines.append("    var count = \(keyed.count - optionalFields.count)")
+        for (field, _) in optionalFields {
+            lines.append("    if self.\(field.name) != nil { count += 1 }")
+        }
+        lines.append("    writer.writeMapHeader(count: count)")
+    }
+    for (field, key) in keyed {
+        if case .optional(let wrapped) = field.type {
+            lines.append("    if let value = self.\(field.name) {")
+            lines.append("        writer.writeInt(\(key))")
+            lines.append("        \(mmPackWrite(wrapped, value: "value"))")
+            lines.append("    }")
+        } else {
+            lines.append("    writer.writeInt(\(key))")
+            lines.append("    \(mmPackWrite(field.type, value: "self.\(field.name)"))")
+        }
+    }
+    lines.append("}")
+    lines.append(
+        "public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {"
+    )
+    guard !keyed.isEmpty else {
+        // Synthesized decoding of a property-less struct reads nothing. The
+        // value is still stepped over, so an array of them stays in step.
+        lines.append("    try reader.skipValue(depth: depth)")
+        lines.append("}")
+        return lines
+    }
+    for (field, _) in keyed {
+        lines.append("    var \(field.name)AtKey: Int?")
+        lines.append("    var \(field.name)AtName: Int?")
+    }
+    lines.append("    let count = try reader.readMapHeader(depth: depth)")
+    lines.append("    for _ in 0..<count {")
+    lines.append("        switch try reader.readMapKey(depth: depth + 1) {")
+    for (field, key) in keyed {
+        lines.append(
+            "            case .int(\(key)) where \(field.name)AtKey == nil: \(field.name)AtKey = reader.position"
+        )
+    }
+    for (field, _) in keyed {
+        lines.append(
+            "            case .string(\(quoted(field.name))) where \(field.name)AtName == nil: \(field.name)AtName = reader.position"
+        )
+    }
+    lines.append("            default: break")
+    lines.append("        }")
+    lines.append("        try reader.skipValue(depth: depth + 1)")
+    lines.append("    }")
+    lines.append("    let end = reader.position")
+    for (field, key) in keyed {
+        let position = "\(field.name)AtKey ?? \(field.name)AtName"
+        if case .optional = field.type {
+            lines.append("    if let position = \(position) {")
+            lines.append("        reader.seek(to: position)")
+            lines.append("        self.\(field.name) = \(mmPackRead(field.type, level: 1))")
+            lines.append("    } else {")
+            lines.append("        self.\(field.name) = nil")
+            lines.append("    }")
+        } else {
+            lines.append("    try reader.seek(toRequiredField: \(position), key: \(key))")
+            lines.append("    self.\(field.name) = \(mmPackRead(field.type, level: 1))")
+        }
+    }
+    lines.append("    reader.seek(to: end)")
+    lines.append("}")
+    return lines
+}
+
+/// The members giving a generated enum its MessagePack code: its raw value as
+/// a string, decoding unrecognized values to `unknown`, as its `Codable` does.
+private func mmPackEnumMembers(_ name: String) -> [String] {
+    [
+        "public func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {",
+        "    writer.writeString(self.rawValue)",
+        "}",
+        "public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {",
+        "    let raw = try reader.readString()",
+        "    self = \(name)(rawValue: raw) ?? .unknown",
+        "}",
+    ]
+}
+
+/// Whether writing a value of `type` can throw: only values written through
+/// their own generated code or through `Encodable` can.
+private func mmPackWriteThrows(_ type: ParsedType) -> Bool {
+    switch type {
+        case .bool, .int, .uint, .float, .double, .string, .date, .datetime, .timestamp:
+            return false
+        case .optional(let wrapped), .array(let wrapped):
+            return mmPackWriteThrows(wrapped)
+        case .map, .structure, .reference, .external:
+            return true
+    }
+}
+
+/// One statement writing `value`, a Swift expression of `type`. Maps write
+/// through `Encodable`; external types through their generated code when
+/// they have some, which the `write` overloads pick at compile time.
+private func mmPackWrite(_ type: ParsedType, value: String) -> String {
+    let marker = mmPackWriteThrows(type) ? "try " : ""
+    switch type {
+        case .bool: return "writer.writeBool(\(value))"
+        case .int: return "writer.writeInt(\(value))"
+        case .uint: return "writer.writeUInt(\(value))"
+        case .float: return "writer.writeFloat(\(value))"
+        case .double: return "writer.writeDouble(\(value))"
+        case .string: return "writer.writeString(\(value))"
+        case .date: return "writer.writeDate(\(value))"
+        case .datetime: return "writer.writeDateTime(\(value))"
+        case .timestamp: return "writer.writeTimestamp(\(value))"
+        case .optional(let wrapped):
+            return
+                "\(marker)writer.writeOptional(\(value)) { writer, value in \(mmPackWrite(wrapped, value: "value")) }"
+        case .array(let element):
+            return
+                "\(marker)writer.writeArray(\(value)) { writer, element in \(mmPackWrite(element, value: "element")) }"
+        case .map: return "try writer.writeEncodable(\(value))"
+        case .structure, .reference: return "try \(value).encode(mmPack: &writer)"
+        case .external: return "try writer.write(\(value))"
+    }
+}
+
+/// An expression reading a value of `type` that sits at nesting `level`
+/// below the struct's own map: its fields sit at 1, and each array's
+/// elements one deeper than the array. An optional's value sits at the
+/// optional's own level, as with `Decodable`.
+private func mmPackRead(_ type: ParsedType, level: Int) -> String {
+    let depth = "depth + \(level)"
+    switch type {
+        case .bool: return "try reader.readBool()"
+        case .int: return "try reader.readInt()"
+        case .uint: return "try reader.readUInt()"
+        case .float: return "try reader.readFloat()"
+        case .double: return "try reader.readDouble()"
+        case .string: return "try reader.readString()"
+        case .date: return "try reader.readDate()"
+        case .datetime: return "try reader.readDateTime()"
+        case .timestamp: return "try reader.readTimestamp()"
+        case .optional(let wrapped):
+            return "try reader.readOptional { reader in \(mmPackRead(wrapped, level: level)) }"
+        case .array(let element):
+            return
+                "try reader.readArray(depth: \(depth)) { reader in \(mmPackRead(element, level: level + 1)) }"
+        case .map: return "try reader.readDecodable(\(swiftType(type)).self, depth: \(depth))"
+        case .structure(let name, _), .reference(let name):
+            return "try \(name)(mmPack: &reader, depth: \(depth))"
+        case .external(let path): return "try reader.read(\(path).self, depth: \(depth))"
+    }
+}
+
 private func generateNamedType(
     _ type: ParsedTypeDecl, namespace: String
 ) throws -> String {
@@ -1722,7 +1895,7 @@ private func generateNamedType(
         case .enumeration(let cases):
             var lines: [String] = []
             lines.append(
-                "public enum \(type.name): String, Codable, Sendable, CaseIterable, SchemaDescribable {"
+                "public enum \(type.name): String, Codable, Sendable, CaseIterable, SchemaDescribable, MMPackCodable {"
             )
             for enumCase in cases {
                 if let description = enumCase.description {
@@ -1736,6 +1909,7 @@ private func generateNamedType(
             lines.append("        let raw = try decoder.singleValueContainer().decode(String.self)")
             lines.append("        self = \(type.name)(rawValue: raw) ?? .unknown")
             lines.append("    }")
+            lines.append(contentsOf: mmPackEnumMembers(type.name).map { "    \($0)" })
             lines.append("    public static var schema: TypeSchema {")
             lines.append("        .reference(\(quoted(qualified)))")
             lines.append("    }")

@@ -146,6 +146,9 @@ final class MMRequestStreamSource<Element: Codable & Sendable>: Sendable {
 
     let msgid: UInt32
     private let state: NIOLockedValueBox<State>
+    /// The element decode its `Handle` picked once for the route: through the
+    /// generated code when `Element` has some, through `Decodable` otherwise.
+    private let decode: @Sendable (ByteBuffer) -> Result<Element, MMWireError>
     private let frameSink: FrameSink
     /// Coalesced "grant may be due" nudges to the pump loop. Dropping duplicate
     /// nudges is correct: the pump reads the exact `pendingGrant` amount, so one
@@ -157,6 +160,7 @@ final class MMRequestStreamSource<Element: Codable & Sendable>: Sendable {
 
     init(
         msgid: UInt32,
+        decode: @escaping @Sendable (ByteBuffer) -> Result<Element, MMWireError>,
         frameSink: @escaping FrameSink,
         metrics: MMStreamMetrics
     ) {
@@ -164,6 +168,7 @@ final class MMRequestStreamSource<Element: Codable & Sendable>: Sendable {
         self.state = NIOLockedValueBox(
             State(source: nil, clientCredit: MMStreamFlowControl.initialWindow)
         )
+        self.decode = decode
         self.frameSink = frameSink
         self.metrics = metrics
         let (stream, continuation) = AsyncStream<Void>.makeStream(
@@ -201,7 +206,7 @@ final class MMRequestStreamSource<Element: Codable & Sendable>: Sendable {
     /// stream violation surfaced to the caller (which sends the code-6
     /// terminal); the element is dropped.
     func deliver(_ item: ByteBuffer) -> Result<Void, MMWireError> {
-        MMPackDecoder().decode(Element.self, from: item).map { decoded in
+        self.decode(item).map { decoded in
             let source = self.state.withLockedValue { state -> Source? in
                 guard !state.terminated, let source = state.source else { return nil }
                 state.clientCredit &-= 1

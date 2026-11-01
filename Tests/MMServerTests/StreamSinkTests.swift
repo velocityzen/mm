@@ -31,7 +31,7 @@ private func makeSink(
         itemSink: { seq, item in await recorder.sink(seq, item) },
         metrics: MMStreamMetrics(factory: factory)
     )
-    return (MMResponseSink<Int>(state: state), state)
+    return (MMResponseSink<Int>(state: state, encode: MMPackEncoder().encoding(Int.self)), state)
 }
 
 @Suite("Response sink credit accounting")

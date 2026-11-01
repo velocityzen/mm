@@ -10,10 +10,22 @@ import NIOCore
 func vptsValue<T>(
     _ type: T.Type, from buffer: inout ByteBuffer
 ) throws -> T? {
-    let isDate = type == MMDate.self
-    let isDateTime = type == MMDateTime.self
-    let isTimestamp = type == MMTimestamp.self
-    guard isDate || isDateTime || isTimestamp else { return nil }
+    // Guarded force casts: each identity check proves T (the standard
+    // Codable short-circuit idiom, as with ByteBuffer).
+    if type == MMDate.self {
+        return (try mpReadDate(from: &buffer) as! T)
+    }
+    if type == MMDateTime.self {
+        return (try mpReadDateTime(from: &buffer) as! T)
+    }
+    if type == MMTimestamp.self {
+        return (try mpReadTimestamp(from: &buffer) as! T)
+    }
+    return nil
+}
+
+/// Reads a `bin` holding a VPTS encoding that is not the null timestamp.
+private func mpReadVPTS(from buffer: inout ByteBuffer) throws -> MMVPTS {
     let bin = try buffer.readMessagePackBinary().get()
     let decoded: MMVPTS?
     switch MMVPTS.decode(bin.readableBytesView) {
@@ -25,25 +37,30 @@ func vptsValue<T>(
     guard let vpts = decoded else {
         throw MMWireError.decodingFailed(description: "null VPTS where a value is required")
     }
-    // Guarded force casts: the identity checks above prove T (the standard
-    // Codable short-circuit idiom, as with ByteBuffer).
-    if isDate {
-        guard let value = vpts.dateValue else {
-            throw MMWireError.decodingFailed(description: "VPTS precision is not a date")
-        }
-        return (value as! T)
+    return vpts
+}
+
+func mpReadDate(from buffer: inout ByteBuffer) throws -> MMDate {
+    guard let value = try mpReadVPTS(from: &buffer).dateValue else {
+        throw MMWireError.decodingFailed(description: "VPTS precision is not a date")
     }
-    if isDateTime {
-        guard let value = vpts.dateTimeValue else {
-            throw MMWireError.decodingFailed(
-                description: "VPTS is not an offset-free wall-clock datetime")
-        }
-        return (value as! T)
+    return value
+}
+
+func mpReadDateTime(from buffer: inout ByteBuffer) throws -> MMDateTime {
+    guard let value = try mpReadVPTS(from: &buffer).dateTimeValue else {
+        throw MMWireError.decodingFailed(
+            description: "VPTS is not an offset-free wall-clock datetime"
+        )
     }
-    guard let value = vpts.timestampValue else {
+    return value
+}
+
+func mpReadTimestamp(from buffer: inout ByteBuffer) throws -> MMTimestamp {
+    guard let value = try mpReadVPTS(from: &buffer).timestampValue else {
         throw MMWireError.decodingFailed(description: "VPTS is not a datetime with offset")
     }
-    return (value as! T)
+    return value
 }
 
 /// The standard-library scalars schema fields use, read straight from the
@@ -146,15 +163,6 @@ public struct MMPackDecoder: Sendable {
 
 // MARK: - Decoding state
 
-/// A map key as the wire spells it.
-enum MPMapKey: Equatable {
-    case int(Int64)
-    case string(String)
-    /// A key that can never match a `CodingKey` (out-of-range uint64, invalid UTF-8,
-    /// or a non-int/str family); consumed structurally so decoding continues.
-    case unusable
-}
-
 /// Where a map's entries are. Small maps keep theirs on the decode's stack and
 /// are searched in order; large ones hash, so lookups stay constant-time.
 enum MPMapIndex {
@@ -181,7 +189,7 @@ struct MPDecodingFrame {
     /// Frames: the key this value sits under in its parent, for `codingPath`.
     let codingKey: (any CodingKey)?
     /// Map entries: the entry's key.
-    let mapKey: MPMapKey
+    let mapKey: MMPackMapKey
     /// Frames: the index built by the first keyed-container request; repeated
     /// requests reuse it, so the map bytes are consumed exactly once.
     var mapIndex: MPMapIndex?
@@ -439,13 +447,13 @@ final class MPDecodingState {
         switch index {
             case .stack(let positions, let hasStringKeys):
                 if let intKey = mpFaithfulIntKey(key) {
-                    let wanted = MPMapKey.int(Int64(intKey))
+                    let wanted = MMPackMapKey.int(Int64(intKey))
                     if let found = positions.first(where: { self.stack[$0].mapKey == wanted }) {
                         return self.stack[found].buffer
                     }
                 }
                 guard hasStringKeys else { return nil }
-                let wanted = MPMapKey.string(key.stringValue)
+                let wanted = MMPackMapKey.string(key.stringValue)
                 guard let found = positions.first(where: { self.stack[$0].mapKey == wanted })
                 else { return nil }
                 return self.stack[found].buffer
@@ -461,7 +469,7 @@ final class MPDecodingState {
     /// stack index.
     func keys<Key: CodingKey>(in index: MPMapIndex, as type: Key.Type) -> [Key] {
         var keys: [Key] = []
-        func append(_ mapKey: MPMapKey) {
+        func append(_ mapKey: MMPackMapKey) {
             switch mapKey {
                 case .int(let intKey):
                     if let exact = Int(exactly: intKey), let key = Key(intValue: exact) {
@@ -501,7 +509,7 @@ final class MPDecodingState {
         from buffer: inout ByteBuffer,
         keyDepth: Int,
         cap: Int
-    ) throws -> MPMapKey {
+    ) throws -> MMPackMapKey {
         guard let format = buffer.peekMessagePackFormat() else { throw MMWireError.truncated }
         if MPFormat.isInteger(format) {
             switch buffer.readMessagePackInt() {

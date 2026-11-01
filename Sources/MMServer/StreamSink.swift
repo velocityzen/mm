@@ -24,6 +24,9 @@ import NIOCore
 /// `.callEnded` the call is already over (the item was not delivered).
 public struct MMResponseSink<Element: Codable & Sendable>: Sendable {
     let state: MMResponseSinkState
+    /// The element encode its `Handle` picked once for the route: through the
+    /// generated code when `Element` has some, through `Encodable` otherwise.
+    let encode: @Sendable (Element) -> Result<ByteBuffer, MMWireError>
 
     /// Encodes and enqueues one response element, suspending at zero credit
     /// until the client grants more. See ``MMResponseSink`` for the outcomes.
@@ -35,7 +38,7 @@ public struct MMResponseSink<Element: Codable & Sendable>: Sendable {
     /// terminal. The element is not delivered.
     public func send(_ element: Element) async -> StreamSendOutcome {
         let item: ByteBuffer
-        switch MMPackEncoder().encode(element) {
+        switch self.encode(element) {
             case .failure:
                 self.state.end()
                 return .callEnded

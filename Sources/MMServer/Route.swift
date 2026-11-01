@@ -288,6 +288,8 @@ public struct Accepts: Sendable {
 /// `MMPackDecoder`, (b) runs the typed body, (c) encodes `Response` via
 /// `MMPackEncoder`. Decode failure maps to `malformedParams`; encode failure
 /// of the response maps to `internalError` (and is logged by the router).
+/// Types the schema macros generated MessagePack code for go through that
+/// code, chosen once here rather than on every call.
 ///
 /// Handlers return `Result<Response, MMError>` — the wire error
 /// directly, so a domain failure reaches the peer verbatim. Protocol codes
@@ -305,7 +307,9 @@ public func Handle<Request: Codable & Sendable, Response: Codable & Sendable>(
     _ accepts: Accepts = Accepts(.all),
     _ body: @escaping @Sendable @concurrent (Request, MMContext) async -> Result<Response, MMError>
 ) -> Route {
-    Route(
+    let decodeRequest = MMPackDecoder().decoding(Request.self)
+    let encodeResponse = MMPackEncoder().encoding(Response.self)
+    return Route(
         name: method.name,
         access: method.access,
         accepts: accepts,
@@ -313,11 +317,11 @@ public func Handle<Request: Codable & Sendable, Response: Codable & Sendable>(
         kind: .unary { params, context in
             // Three stages, each folding its failure into the outcome that
             // names it: decode → handler → encode.
-            await MMPackDecoder().decode(Request.self, from: params).matchAsync(
+            await decodeRequest(params).matchAsync(
                 { request in
                     await body(request, context).match(
                         { response in
-                            MMPackEncoder().encode(response).match(
+                            encodeResponse(response).match(
                                 { .reply($0) },
                                 { .responseEncodingFailed($0) }
                             )
@@ -334,15 +338,16 @@ public func Handle<Request: Codable & Sendable, Response: Codable & Sendable>(
 // MARK: - Stream handler registration
 
 /// Encodes a handler's terminal `Result<Response, MMError>` into a
-/// ``StreamTerminal``. A response that fails to encode is a server-side
-/// programmer error, mapped to an internal-error terminal (the peer never sees
-/// the cause).
+/// ``StreamTerminal`` through `encode`, the response encode its `Handle`
+/// picked. A response that fails to encode is a server-side programmer error,
+/// mapped to an internal-error terminal (the peer never sees the cause).
 private func streamTerminal<Response: Codable & Sendable>(
-    _ result: Result<Response, MMError>
+    _ result: Result<Response, MMError>,
+    encode: (Response) -> Result<ByteBuffer, MMWireError>
 ) -> StreamTerminal {
     result.match(
         { response in
-            MMPackEncoder().encode(response).match(
+            encode(response).match(
                 { .success($0) },
                 { _ in .failure(Router.error(.internalError)) }
             )
@@ -354,7 +359,10 @@ private func streamTerminal<Response: Codable & Sendable>(
 /// The construction every stream `Handle` shares: open-request decode (a
 /// malformed request abandons startup with `nil`; the router replies
 /// `malformedParams` itself) and the `Route` assembly. Each shape supplies
-/// only its startup — control wiring and run choreography.
+/// only its startup — control wiring and run choreography. Like the unary
+/// `Handle`, every coder is picked once per route, here and in each shape's
+/// `Handle`, so a stream's items reach the generated code without a check
+/// per item.
 private func streamRoute<Request: Codable & Sendable>(
     name: String,
     access: AccessMode,
@@ -365,13 +373,14 @@ private func streamRoute<Request: Codable & Sendable>(
             Request, MMContext, UInt32, StreamWireSeams, MMStreamMetrics
         ) -> StreamStartup
 ) -> Route {
-    Route(
+    let decodeRequest = MMPackDecoder().decoding(Request.self)
+    return Route(
         name: name,
         access: access,
         accepts: accepts,
         signatureThunk: signatureThunk,
         kind: .stream { params, context, msgid, seams, metrics in
-            switch MMPackDecoder().decode(Request.self, from: params) {
+            switch decodeRequest(params) {
                 case .failure:
                     return nil
                 case .success(let request):
@@ -401,17 +410,16 @@ private func runWithGrantPump<Element: Codable & Sendable>(
 
 /// Builds a request-stream source and its typed sequence, wiring credit grants
 /// through `seams`. Shared by the client- and bidirectional-streaming
-/// `Handle`s. The element type parameter exists purely to pin `Element` —
-/// nothing else in the argument list mentions it (the house convention for
-/// return-type-only generics, as in `openStream(inbound:outbound:response:)`).
+/// `Handle`s, which pass the element decode they picked for the route.
 private func makeRequestStream<Element: Codable & Sendable>(
-    of _: Element.Type,
+    decoding decode: @escaping @Sendable (ByteBuffer) -> Result<Element, MMWireError>,
     msgid: UInt32,
     seams: StreamWireSeams,
     metrics: MMStreamMetrics
 ) -> (source: MMRequestStreamSource<Element>, stream: MMRequestStream<Element>) {
     let source = MMRequestStreamSource<Element>(
         msgid: msgid,
+        decode: decode,
         frameSink: seams.sendFrame,
         metrics: metrics
     )
@@ -442,7 +450,9 @@ public func Handle<
         @escaping @Sendable @concurrent (Request, MMResponseSink<Element>, MMContext) async ->
         Result<Response, MMError>
 ) -> Route {
-    streamRoute(
+    let encodeElement = MMPackEncoder().encoding(Element.self)
+    let encodeResponse = MMPackEncoder().encoding(Response.self)
+    return streamRoute(
         name: method.name,
         access: method.access,
         accepts: accepts,
@@ -457,9 +467,9 @@ public func Handle<
             requestSource: nil,
             responseSink: sinkState
         )
-        let sink = MMResponseSink<Element>(state: sinkState)
+        let sink = MMResponseSink<Element>(state: sinkState, encode: encodeElement)
         return StreamStartup(control: control) {
-            streamTerminal(await body(request, sink, context))
+            streamTerminal(await body(request, sink, context), encode: encodeResponse)
         }
     }
 }
@@ -480,14 +490,16 @@ public func Handle<
         @escaping @Sendable @concurrent (Request, MMRequestStream<Element>, MMContext) async ->
         Result<Response, MMError>
 ) -> Route {
-    streamRoute(
+    let decodeElement = MMPackDecoder().decoding(Element.self)
+    let encodeResponse = MMPackEncoder().encoding(Response.self)
+    return streamRoute(
         name: method.name,
         access: method.access,
         accepts: accepts,
         signatureThunk: { method.signature() }
     ) { (request: Request, context, msgid, seams, metrics) in
         let (source, stream) = makeRequestStream(
-            of: Element.self,
+            decoding: decodeElement,
             msgid: msgid,
             seams: seams,
             metrics: metrics
@@ -499,7 +511,7 @@ public func Handle<
         )
         return StreamStartup(control: control) {
             await runWithGrantPump(source) {
-                streamTerminal(await body(request, stream, context))
+                streamTerminal(await body(request, stream, context), encode: encodeResponse)
             }
         }
     }
@@ -522,14 +534,17 @@ public func Handle<
             Request, MMRequestStream<RequestElement>, MMResponseSink<ResponseElement>, MMContext
         ) async -> Result<Response, MMError>
 ) -> Route {
-    streamRoute(
+    let decodeRequestElement = MMPackDecoder().decoding(RequestElement.self)
+    let encodeResponseElement = MMPackEncoder().encoding(ResponseElement.self)
+    let encodeResponse = MMPackEncoder().encoding(Response.self)
+    return streamRoute(
         name: method.name,
         access: method.access,
         accepts: accepts,
         signatureThunk: { method.signature() }
     ) { (request: Request, context, msgid, seams, metrics) in
         let (source, stream) = makeRequestStream(
-            of: RequestElement.self,
+            decoding: decodeRequestElement,
             msgid: msgid,
             seams: seams,
             metrics: metrics
@@ -545,10 +560,13 @@ public func Handle<
             requestSource: source,
             responseSink: sinkState
         )
-        let sink = MMResponseSink<ResponseElement>(state: sinkState)
+        let sink = MMResponseSink<ResponseElement>(state: sinkState, encode: encodeResponseElement)
         return StreamStartup(control: control) {
             await runWithGrantPump(source, endSink: { sinkState.end() }) {
-                streamTerminal(await body(request, stream, sink, context))
+                streamTerminal(
+                    await body(request, stream, sink, context),
+                    encode: encodeResponse
+                )
             }
         }
     }

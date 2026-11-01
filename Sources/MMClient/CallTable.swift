@@ -15,15 +15,18 @@ struct ResponseSlots: Sendable, Equatable {
     /// an encoded top-level `Optional.none` are the same byte (0xc0), so the
     /// nil slot decodes as the MessagePack nil value: an Optional `Response`
     /// succeeds with nil, a non-optional fails with a truthful decode error
-    /// for this call only.
-    func decodeResponse<Response: Codable>(
+    /// for this call only. A `Response` with generated code decodes through
+    /// it, found by a check per decode: there is one decode per call, so no
+    /// resolved decode to keep.
+    func decodeResponse<Response: Codable & Sendable>(
         _ type: Response.Type
     ) -> Result<Response, MMCallError> {
         if let error = self.error {
             return .failure(.from(error: error))
         }
         let result = self.result ?? ByteBuffer(bytes: [0xc0])
-        return MMPackDecoder().decode(Response.self, from: result).mapError { .decode($0) }
+        return MMPackDecoder().decodeCheckingForGeneratedCode(Response.self, from: result)
+            .mapError { .decode($0) }
     }
 }
 

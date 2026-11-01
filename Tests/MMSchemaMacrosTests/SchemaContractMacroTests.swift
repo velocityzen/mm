@@ -24,18 +24,30 @@ struct SchemaContractMacroTests {
             }
             """,
             expandedSource: """
-                public struct PingRequest: Codable, Hashable, Sendable, SchemaDescribable {
+                public struct PingRequest: Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable {
                     public static var schema: TypeSchema {
                         .structure(fields: [])
                     }
                     public init() {
+                    }
+                    public func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {
+                        writer.writeMapHeader(count: 0)
+                    }
+                    public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {
+                        try reader.skipValue(depth: depth)
                     }
                 }
-                public struct PingResponse: Codable, Hashable, Sendable, SchemaDescribable {
+                public struct PingResponse: Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable {
                     public static var schema: TypeSchema {
                         .structure(fields: [])
                     }
                     public init() {
+                    }
+                    public func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {
+                        writer.writeMapHeader(count: 0)
+                    }
+                    public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {
+                        try reader.skipValue(depth: depth)
                     }
                 }
                 public static let `ping` = Method<PingRequest, PingResponse>(
@@ -66,18 +78,30 @@ struct SchemaContractMacroTests {
             }
             """,
             expandedSource: """
-                public struct PingRequest: Codable, Hashable, Sendable, SchemaDescribable {
+                public struct PingRequest: Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable {
                     public static var schema: TypeSchema {
                         .structure(fields: [])
                     }
                     public init() {
+                    }
+                    public func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {
+                        writer.writeMapHeader(count: 0)
+                    }
+                    public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {
+                        try reader.skipValue(depth: depth)
                     }
                 }
-                public struct PingResponse: Codable, Hashable, Sendable, SchemaDescribable {
+                public struct PingResponse: Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable {
                     public static var schema: TypeSchema {
                         .structure(fields: [])
                     }
                     public init() {
+                    }
+                    public func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {
+                        writer.writeMapHeader(count: 0)
+                    }
+                    public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {
+                        try reader.skipValue(depth: depth)
                     }
                 }
                 public static let `ping` = Method<PingRequest, PingResponse>(
