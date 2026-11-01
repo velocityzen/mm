@@ -1,23 +1,34 @@
 import MMSchema
 import NIOCore
 
-/// The wire time kinds ride as MessagePack `bin` holding a VPTS encoding
-/// (the VPTS article in this catalog) — a coder-level short-circuit like `ByteBuffer`'s, so
-/// the types' own `Codable` (canonical ISO strings) keeps serving JSON
-/// coders, display, and tests, while the wire gets the compact,
-/// byte-sortable binary form. Returns nil for every other type.
-func vptsBinary<T: Encodable>(for value: T) -> ByteBuffer? {
-    let encoded: [UInt8]
-    if let date = value as? MMDate {
-        encoded = MMVPTS(date).encoded()
-    } else if let dateTime = value as? MMDateTime {
-        encoded = MMVPTS(dateTime).encoded()
-    } else if let timestamp = value as? MMTimestamp {
-        encoded = MMVPTS(timestamp).encoded()
+/// Whether values of `type` take ``mpWriteBinaryShortcut(_:into:)`` instead of
+/// their own `Encodable` conformance.
+func mpHasBinaryShortcut<T>(_ type: T.Type) -> Bool {
+    type == ByteBuffer.self || type == MMDate.self || type == MMDateTime.self
+        || type == MMTimestamp.self
+}
+
+/// `ByteBuffer` values encode as MessagePack `bin`, and the wire time kinds ride
+/// as `bin` holding a VPTS encoding (the VPTS article in this catalog) — a
+/// coder-level short-circuit, so the time types' own `Codable` (canonical ISO
+/// strings) keeps serving JSON coders, display, and tests, while the wire gets
+/// the compact, byte-sortable binary form. Returns false, writing nothing, for
+/// every other type.
+func mpWriteBinaryShortcut<T: Encodable>(_ value: T, into buffer: inout ByteBuffer) -> Bool {
+    // Guarded force casts: each identity check proves T (the standard Codable
+    // short-circuit idiom, mirrored by the decoder).
+    if T.self == ByteBuffer.self {
+        buffer.writeMessagePackBinary(value as! ByteBuffer)
+    } else if T.self == MMDate.self {
+        buffer.writeMessagePackBinary(bytes: MMVPTS(value as! MMDate).encoded())
+    } else if T.self == MMDateTime.self {
+        buffer.writeMessagePackBinary(bytes: MMVPTS(value as! MMDateTime).encoded())
+    } else if T.self == MMTimestamp.self {
+        buffer.writeMessagePackBinary(bytes: MMVPTS(value as! MMTimestamp).encoded())
     } else {
-        return nil
+        return false
     }
-    return ByteBuffer(bytes: encoded)
+    return true
 }
 
 /// Encodes `Encodable` values as MessagePack directly into `ByteBuffer`.
@@ -25,8 +36,14 @@ func vptsBinary<T: Encodable>(for value: T) -> ByteBuffer? {
 /// Keyed containers encode as maps with integer keys taken from `CodingKeys.intValue`;
 /// keys without an `intValue` fall back to string keys. `ByteBuffer` values encode as
 /// `bin`; the wire time kinds (`MMDate`, `MMDateTime`, `MMTimestamp`) encode as `bin`
-/// holding their VPTS form. Scalars are written straight to bytes — no intermediate
-/// `Data`, no boxing.
+/// holding their VPTS form.
+///
+/// Values stream straight into the output buffer: a container writes a one-byte
+/// header placeholder and patches it with the final count when it closes, so
+/// containers must be written in order, as synthesized and standard-library
+/// conformances do. Using a container or encoder after its parent (or any
+/// container below it) was written to again fails the encode with
+/// `.encodingFailed`.
 public struct MMPackEncoder: Sendable {
     public init() {}
 
@@ -41,596 +58,663 @@ public struct MMPackEncoder: Sendable {
         _ value: T,
         into buffer: inout ByteBuffer
     ) -> Result<Void, MMWireError> {
-        if let payload = value as? ByteBuffer {
-            buffer.writeMessagePackBinary(payload)
+        if mpWriteBinaryShortcut(value, into: &buffer) {
             return .success(())
         }
-        if let vpts = vptsBinary(for: value) {
-            buffer.writeMessagePackBinary(vpts)
-            return .success(())
+        let start = buffer.writerIndex
+        // The state holds the only reference while encoding, so its writes
+        // never copy the storage.
+        let state = MPEncodingState(buffer: buffer)
+        buffer = ByteBuffer()
+        let result = state.encodeRoot(value)
+        buffer = state.takeBuffer()
+        if case .failure = result {
+            buffer.moveWriterIndex(to: start)
         }
+        return result
+    }
+}
 
-        let root = MPEncodedNode()
-        let encoder = MPEncoderImplementation(sink: .node(root), codingPath: [])
+// MARK: - Encoding state
+
+/// Names an open frame. The identifier tells a frame from a later one pushed
+/// at the same index, so a handle outliving its frame is caught, not misrouted.
+struct MPFrameReference {
+    let index: Int
+    let identifier: Int
+
+    /// Never open: handed out where a container or encoder is requested out of order.
+    static let invalid = MPFrameReference(index: .max, identifier: 0)
+}
+
+/// A slot or container on the path from the root to the value being written.
+struct MPEncodingFrame {
+    enum Kind {
+        /// A position for exactly one value: the root, a value encoded at a key
+        /// or array position, or a super encoder's slot.
+        case slot
+        case map
+        case array
+    }
+
+    enum Emission {
+        case nothing
+        case scalar
+        /// The container the slot's value encodes as, open just above the slot.
+        case container(MPFrameReference)
+    }
+
+    let kind: Kind
+    let identifier: Int
+    /// The key this frame's value sits under in its parent, for `codingPath`.
+    let key: (any CodingKey)?
+    /// Containers: where the one-byte header placeholder sits.
+    let headerOffset: Int
+    /// Containers: the entries written so far.
+    var count = 0
+    /// Slots: what the slot's value wrote.
+    var emission = Emission.nothing
+}
+
+/// The output buffer and the stack of open frames for one encode, shared by
+/// every encoder and container handle in it. Writing to a frame first closes
+/// the frames opened above it — that is how a container learns its nested
+/// containers and slots are done.
+final class MPEncodingState {
+    static let outOfOrder = MMWireError.encodingFailed(
+        description: "an encoding container was used after its parent was written to"
+    )
+
+    var buffer: ByteBuffer
+    var frames: [MPEncodingFrame] = []
+    private var lastIdentifier = 0
+    /// Set on misuse, so the encode fails even when the value swallows the error.
+    private var usedOutOfOrder = false
+
+    init(buffer: ByteBuffer) {
+        self.buffer = buffer
+        self.frames.reserveCapacity(8)
+    }
+
+    func takeBuffer() -> ByteBuffer {
+        var taken = ByteBuffer()
+        swap(&taken, &self.buffer)
+        return taken
+    }
+
+    func encodeRoot<T: Encodable>(_ value: T) -> Result<Void, MMWireError> {
+        let root = self.pushSlot(key: nil)
         do {
-            try value.encode(to: encoder)
+            try value.encode(to: MPEncoderImplementation(state: self, slot: root))
+            try self.closeSlot(root)
         } catch let error as MMWireError {
             return .failure(error)
         } catch {
             return .failure(.encodingFailed(description: String(describing: error)))
         }
-        root.write(into: &buffer)
-        return .success(())
-    }
-}
-
-// MARK: - Encoded value tree
-
-/// A slot for exactly one encoded value; used for the root and for deferred
-/// (`superEncoder`) positions. An unfilled node writes `nil`.
-final class MPEncodedNode {
-    enum Value {
-        case scalar(ByteBuffer)
-        case container(MPEncContainer)
+        return self.usedOutOfOrder ? .failure(Self.outOfOrder) : .success(())
     }
 
-    var value: Value?
+    func isOpen(_ reference: MPFrameReference) -> Bool {
+        reference.index < self.frames.count
+            && self.frames[reference.index].identifier == reference.identifier
+    }
 
-    func write(into out: inout ByteBuffer) {
-        switch self.value {
-            case .none:
-                out.writeMessagePackNil()
-            case .scalar(let bytes):
-                out.writeImmutableBuffer(bytes)
-            case .container(let container):
-                container.write(into: &out)
+    /// Readies `reference` for a write by closing every frame above it.
+    /// Returns false, recording the misuse, when the frame is no longer open.
+    func activate(_ reference: MPFrameReference) -> Bool {
+        guard self.isOpen(reference) else {
+            self.usedOutOfOrder = true
+            return false
+        }
+        while self.frames.count > reference.index + 1 {
+            self.closeTop()
+        }
+        return true
+    }
+
+    func codingPath(through reference: MPFrameReference) -> [any CodingKey] {
+        guard self.isOpen(reference) else { return [] }
+        var path: [any CodingKey] = []
+        for frame in self.frames[...reference.index] {
+            if let key = frame.key {
+                path.append(key)
+            }
+        }
+        return path
+    }
+
+    private func push(_ kind: MPEncodingFrame.Kind, key: (any CodingKey)?) -> MPFrameReference {
+        self.lastIdentifier += 1
+        let reference = MPFrameReference(index: self.frames.count, identifier: self.lastIdentifier)
+        self.frames.append(
+            MPEncodingFrame(
+                kind: kind,
+                identifier: self.lastIdentifier,
+                key: key,
+                headerOffset: self.buffer.writerIndex
+            )
+        )
+        return reference
+    }
+
+    func pushSlot(key: (any CodingKey)?) -> MPFrameReference {
+        self.push(.slot, key: key)
+    }
+
+    func pushContainer(_ kind: MPEncodingFrame.Kind, key: (any CodingKey)?) -> MPFrameReference {
+        let reference = self.push(kind, key: key)
+        self.buffer.writeInteger(UInt8(0))
+        return reference
+    }
+
+    /// The container `slot`'s value encodes as. Repeated requests for the same
+    /// style return the same container (required for class-inheritance encoding
+    /// through a shared encoder).
+    func openContainer(
+        _ kind: MPEncodingFrame.Kind,
+        for slot: MPFrameReference
+    ) -> MPFrameReference {
+        guard self.isOpen(slot) else {
+            self.usedOutOfOrder = true
+            return .invalid
+        }
+        switch self.frames[slot.index].emission {
+            case .nothing:
+                // Nothing sits above a slot that has written nothing.
+                let container = self.pushContainer(kind, key: nil)
+                self.frames[slot.index].emission = .container(container)
+                return container
+            case .container(let existing)
+            where self.isOpen(existing) && self.frames[existing.index].kind == kind:
+                return existing
+            default:
+                preconditionFailure("value already encoded through this encoder")
         }
     }
-}
 
-/// An in-progress array or map. Scalar bytes (including keys) accumulate in `tail`;
-/// nested containers interleave as segments so ordering is preserved. The header is
-/// written at finalization time, once the element count is known.
-final class MPEncContainer {
-    enum Style {
-        case array
-        case map
+    /// Marks `slot` as holding a scalar, which the caller writes next.
+    func beginScalar(in slot: MPFrameReference) throws {
+        guard self.isOpen(slot) else {
+            self.usedOutOfOrder = true
+            throw Self.outOfOrder
+        }
+        guard case .nothing = self.frames[slot.index].emission else {
+            preconditionFailure("value already encoded through this encoder")
+        }
+        self.frames[slot.index].emission = .scalar
     }
 
-    enum Segment {
-        case bytes(ByteBuffer)
-        case child(MPEncContainer)
-        case node(MPEncodedNode)
-    }
-
-    let style: Style
-    var count = 0
-    var segments: [Segment] = []
-    var tail = ByteBuffer()
-
-    init(style: Style) {
-        self.style = style
-    }
-
-    /// Snapshot of the container's state, taken before speculatively writing an
-    /// element (a map key, or an array slot) whose value encode may throw.
     struct Checkpoint {
+        let container: MPFrameReference
+        let writerIndex: Int
         let count: Int
-        let segmentCount: Int
-        let tailWriterIndex: Int
     }
 
-    func checkpoint() -> Checkpoint {
+    /// Taken in an active container before it counts an entry whose value encode may throw.
+    func checkpoint(_ container: MPFrameReference) -> Checkpoint {
         Checkpoint(
-            count: self.count,
-            segmentCount: self.segments.count,
-            tailWriterIndex: self.tail.writerIndex
+            container: container,
+            writerIndex: self.buffer.writerIndex,
+            count: self.frames[container.index].count
         )
     }
 
-    /// Rolls back everything appended after `checkpoint`. If a child container was
-    /// opened in between, `flushTail` moved the then-current tail (committed bytes
-    /// plus the speculative key) into the first appended segment; recover it as the
-    /// tail before truncating, so committed bytes are preserved and only the
-    /// speculative key and the partial child are discarded.
-    func restore(to checkpoint: Checkpoint) {
-        self.count = checkpoint.count
-        if self.segments.count > checkpoint.segmentCount {
-            if case .bytes(let flushed) = self.segments[checkpoint.segmentCount] {
-                self.tail = flushed
+    /// Encodes `value` through a new slot as the entry just counted in the
+    /// container `checkpoint` was taken in. On a throw, everything written
+    /// since the checkpoint — the entry's key and any partial value — rolls
+    /// back, so a caller that swallows the error cannot finalize a container
+    /// whose count includes an entry with no value: structurally corrupt
+    /// MessagePack.
+    func encodeEntry<T: Encodable>(
+        _ value: T,
+        key: (any CodingKey)?,
+        restoring checkpoint: Checkpoint
+    ) throws {
+        let slot = self.pushSlot(key: key)
+        do {
+            try value.encode(to: MPEncoderImplementation(state: self, slot: slot))
+            try self.closeSlot(slot)
+        } catch {
+            // A container already closed by misuse has nothing to restore; the
+            // misuse fails the encode.
+            if self.isOpen(checkpoint.container) {
+                self.frames.removeSubrange((checkpoint.container.index + 1)...)
+                self.buffer.moveWriterIndex(to: checkpoint.writerIndex)
+                self.frames[checkpoint.container.index].count = checkpoint.count
             }
-            self.segments.removeSubrange(checkpoint.segmentCount...)
-        }
-        self.tail.moveWriterIndex(to: checkpoint.tailWriterIndex)
-    }
-
-    func addChild(style: Style) -> MPEncContainer {
-        self.flushTail()
-        let child = MPEncContainer(style: style)
-        self.segments.append(.child(child))
-        return child
-    }
-
-    func addNode() -> MPEncodedNode {
-        self.flushTail()
-        let node = MPEncodedNode()
-        self.segments.append(.node(node))
-        return node
-    }
-
-    private func flushTail() {
-        if self.tail.readableBytes > 0 {
-            self.segments.append(.bytes(self.tail))
-            self.tail = ByteBuffer()
+            throw error
         }
     }
 
-    func write(into out: inout ByteBuffer) {
-        switch self.style {
-            case .array:
-                out.writeMessagePackArrayHeader(count: self.count)
+    /// Closes `slot`, and the containers its value opened, once the value is encoded.
+    func closeSlot(_ slot: MPFrameReference) throws {
+        guard self.activate(slot) else { throw Self.outOfOrder }
+        self.closeTop()
+    }
+
+    /// Pops the innermost frame and finishes its bytes: a container's
+    /// placeholder becomes its header, and a slot nothing was written to becomes nil.
+    private func closeTop() {
+        let frame = self.frames.removeLast()
+        switch frame.kind {
+            case .slot:
+                if case .nothing = frame.emission {
+                    self.buffer.writeMessagePackNil()
+                }
             case .map:
-                out.writeMessagePackMapHeader(count: self.count)
+                self.patchHeader(
+                    at: frame.headerOffset,
+                    count: frame.count,
+                    fixBase: MPFormat.fixmapBase,
+                    format16: MPFormat.map16,
+                    format32: MPFormat.map32
+                )
+            case .array:
+                self.patchHeader(
+                    at: frame.headerOffset,
+                    count: frame.count,
+                    fixBase: MPFormat.fixarrayBase,
+                    format16: MPFormat.array16,
+                    format32: MPFormat.array32
+                )
         }
-        for segment in self.segments {
-            switch segment {
-                case .bytes(let bytes):
-                    out.writeImmutableBuffer(bytes)
-                case .child(let container):
-                    container.write(into: &out)
-                case .node(let node):
-                    node.write(into: &out)
-            }
+    }
+
+    /// Rewrites the placeholder at `offset` as the smallest header for `count`
+    /// (the forms `writeMessagePackMapHeader(count:)` and
+    /// `writeMessagePackArrayHeader(count:)` choose), moving the body right when
+    /// the header takes more than the placeholder's one byte.
+    private func patchHeader(
+        at offset: Int,
+        count: Int,
+        fixBase: UInt8,
+        format16: UInt8,
+        format32: UInt8
+    ) {
+        precondition(count <= UInt32.max, "container exceeds MessagePack length limits")
+        if count < 16 {
+            self.buffer.setInteger(fixBase | UInt8(truncatingIfNeeded: count), at: offset)
+            return
         }
-        if self.tail.readableBytes > 0 {
-            out.writeImmutableBuffer(self.tail)
+        let isWide = count > Int(UInt16.max)
+        let growth = isWide ? 4 : 2
+        let bodyStart = offset + 1
+        let bodyLength = self.buffer.writerIndex - bodyStart
+        let readerIndex = self.buffer.readerIndex
+        self.buffer.writeRepeatingByte(0, count: growth)
+        self.buffer.withUnsafeMutableReadableBytes { bytes in
+            let body = bodyStart - readerIndex
+            // copyMemory moves like memmove, so the overlapping ranges are safe.
+            UnsafeMutableRawBufferPointer(rebasing: bytes[(body + growth)...]).copyMemory(
+                from: UnsafeRawBufferPointer(rebasing: bytes[body..<(body + bodyLength)])
+            )
+        }
+        if isWide {
+            self.buffer.setInteger(format32, at: offset)
+            self.buffer.setInteger(UInt32(truncatingIfNeeded: count), at: bodyStart)
+        } else {
+            self.buffer.setInteger(format16, at: offset)
+            self.buffer.setInteger(UInt16(truncatingIfNeeded: count), at: bodyStart)
         }
     }
 }
 
 // MARK: - Encoder
 
-final class MPEncoderImplementation: Encoder {
-    enum Sink {
-        case node(MPEncodedNode)
-        case container(MPEncContainer)
-    }
+/// The encoder for one slot. Like the containers, a small handle onto the
+/// shared state, so it fits an existential's inline buffer without boxing.
+struct MPEncoderImplementation: Encoder {
+    let state: MPEncodingState
+    let slot: MPFrameReference
 
-    let sink: Sink
-    let codingPath: [any CodingKey]
+    var codingPath: [any CodingKey] { self.state.codingPath(through: self.slot) }
     var userInfo: [CodingUserInfoKey: Any] { [:] }
-    private(set) var hasEmitted = false
-    private var emittedContainer: MPEncContainer?
-
-    init(sink: Sink, codingPath: [any CodingKey]) {
-        self.sink = sink
-        self.codingPath = codingPath
-    }
 
     func container<Key: CodingKey>(keyedBy type: Key.Type) -> KeyedEncodingContainer<Key> {
         KeyedEncodingContainer(
             MPKeyedEncoding<Key>(
-                container: self.containerForEmission(style: .map),
-                codingPath: self.codingPath
+                state: self.state,
+                frame: self.state.openContainer(.map, for: self.slot)
             )
         )
     }
 
     func unkeyedContainer() -> UnkeyedEncodingContainer {
         MPUnkeyedEncoding(
-            container: self.containerForEmission(style: .array),
-            codingPath: self.codingPath
+            state: self.state,
+            frame: self.state.openContainer(.array, for: self.slot)
         )
     }
 
     func singleValueContainer() -> SingleValueEncodingContainer {
-        MPSingleValueEncoding(encoder: self)
-    }
-
-    /// Repeated requests for the same container style return the same container
-    /// (required for class-inheritance encoding through a shared encoder).
-    private func containerForEmission(style: MPEncContainer.Style) -> MPEncContainer {
-        if let existing = self.emittedContainer, existing.style == style {
-            return existing
-        }
-        precondition(!self.hasEmitted, "value already encoded through this encoder")
-        self.hasEmitted = true
-        let container: MPEncContainer
-        switch self.sink {
-            case .node(let node):
-                container = MPEncContainer(style: style)
-                node.value = .container(container)
-            case .container(let parent):
-                container = parent.addChild(style: style)
-        }
-        self.emittedContainer = container
-        return container
-    }
-
-    func emitScalar(_ write: (inout ByteBuffer) -> Void) {
-        precondition(!self.hasEmitted, "value already encoded through this encoder")
-        self.hasEmitted = true
-        switch self.sink {
-            case .node(let node):
-                var bytes = ByteBuffer()
-                write(&bytes)
-                node.value = .scalar(bytes)
-            case .container(let parent):
-                write(&parent.tail)
-        }
+        MPSingleValueEncoding(state: self.state, slot: self.slot)
     }
 }
 
 // MARK: - Keyed encoding container
 
 struct MPKeyedEncoding<Key: CodingKey>: KeyedEncodingContainerProtocol {
-    let container: MPEncContainer
-    let codingPath: [any CodingKey]
+    let state: MPEncodingState
+    let frame: MPFrameReference
+
+    var codingPath: [any CodingKey] { self.state.codingPath(through: self.frame) }
 
     /// Integer keys from `CodingKeys.intValue`; string fallback otherwise —
     /// see ``mpFaithfulIntKey(_:)``, the rule the decoder mirrors exactly.
+    /// The map must be active.
     private func writeKey(_ key: Key) {
         if let intKey = mpFaithfulIntKey(key) {
-            self.container.tail.writeMessagePackInt(Int64(intKey))
+            self.state.buffer.writeMessagePackInt(Int64(intKey))
         } else {
-            self.container.tail.writeMessagePackString(key.stringValue)
+            self.state.buffer.writeMessagePackString(key.stringValue)
         }
-        self.container.count += 1
+        self.state.frames[self.frame.index].count += 1
+    }
+
+    /// Activates the map and writes `key`. Returns false, writing nothing, when
+    /// the map is no longer open.
+    private func beginEntry(_ key: Key) -> Bool {
+        guard self.state.activate(self.frame) else { return false }
+        self.writeKey(key)
+        return true
+    }
+
+    private func entry(_ key: Key, _ write: (inout ByteBuffer) -> Void) throws {
+        guard self.beginEntry(key) else { throw MPEncodingState.outOfOrder }
+        write(&self.state.buffer)
     }
 
     mutating func encodeNil(forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackNil()
+        try self.entry(key) { $0.writeMessagePackNil() }
     }
 
     mutating func encode(_ value: Bool, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackBool(value)
+        try self.entry(key) { $0.writeMessagePackBool(value) }
     }
 
     mutating func encode(_ value: String, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackString(value)
+        try self.entry(key) { $0.writeMessagePackString(value) }
     }
 
     mutating func encode(_ value: Double, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackDouble(value)
+        try self.entry(key) { $0.writeMessagePackDouble(value) }
     }
 
     mutating func encode(_ value: Float, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackFloat(value)
+        try self.entry(key) { $0.writeMessagePackFloat(value) }
     }
 
     mutating func encode(_ value: Int, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackInt(Int64(value))
+        try self.entry(key) { $0.writeMessagePackInt(Int64(value)) }
     }
 
     mutating func encode(_ value: Int8, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackInt(Int64(value))
+        try self.entry(key) { $0.writeMessagePackInt(Int64(value)) }
     }
 
     mutating func encode(_ value: Int16, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackInt(Int64(value))
+        try self.entry(key) { $0.writeMessagePackInt(Int64(value)) }
     }
 
     mutating func encode(_ value: Int32, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackInt(Int64(value))
+        try self.entry(key) { $0.writeMessagePackInt(Int64(value)) }
     }
 
     mutating func encode(_ value: Int64, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackInt(value)
+        try self.entry(key) { $0.writeMessagePackInt(value) }
     }
 
     mutating func encode(_ value: UInt, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackUInt(UInt64(value))
+        try self.entry(key) { $0.writeMessagePackUInt(UInt64(value)) }
     }
 
     mutating func encode(_ value: UInt8, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackUInt(UInt64(value))
+        try self.entry(key) { $0.writeMessagePackUInt(UInt64(value)) }
     }
 
     mutating func encode(_ value: UInt16, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackUInt(UInt64(value))
+        try self.entry(key) { $0.writeMessagePackUInt(UInt64(value)) }
     }
 
     mutating func encode(_ value: UInt32, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackUInt(UInt64(value))
+        try self.entry(key) { $0.writeMessagePackUInt(UInt64(value)) }
     }
 
     mutating func encode(_ value: UInt64, forKey key: Key) throws {
-        self.writeKey(key)
-        self.container.tail.writeMessagePackUInt(value)
+        try self.entry(key) { $0.writeMessagePackUInt(value) }
     }
 
     mutating func encode<T: Encodable>(_ value: T, forKey key: Key) throws {
-        let checkpoint = self.container.checkpoint()
+        guard self.state.activate(self.frame) else { throw MPEncodingState.outOfOrder }
+        let checkpoint = self.state.checkpoint(self.frame)
         self.writeKey(key)
-        if let payload = value as? ByteBuffer {
-            self.container.tail.writeMessagePackBinary(payload)
+        if mpWriteBinaryShortcut(value, into: &self.state.buffer) {
             return
         }
-        if let vpts = vptsBinary(for: value) {
-            self.container.tail.writeMessagePackBinary(vpts)
-            return
-        }
-        let child = MPEncoderImplementation(
-            sink: .container(self.container),
-            codingPath: self.codingPath + [key]
-        )
-        do {
-            try value.encode(to: child)
-        } catch {
-            // Roll the speculative key (and any partial child output) back so a
-            // caller that swallows the error cannot finalize a map whose count
-            // includes a key with no value — structurally corrupt MessagePack.
-            self.container.restore(to: checkpoint)
-            throw error
-        }
-        if !child.hasEmitted {
-            self.container.tail.writeMessagePackNil()
-        }
+        try self.state.encodeEntry(value, key: key, restoring: checkpoint)
     }
 
     mutating func nestedContainer<NestedKey: CodingKey>(
         keyedBy keyType: NestedKey.Type,
         forKey key: Key
     ) -> KeyedEncodingContainer<NestedKey> {
-        self.writeKey(key)
-        return KeyedEncodingContainer(
-            MPKeyedEncoding<NestedKey>(
-                container: self.container.addChild(style: .map),
-                codingPath: self.codingPath + [key]
-            )
-        )
+        let nested = self.beginEntry(key) ? self.state.pushContainer(.map, key: key) : .invalid
+        return KeyedEncodingContainer(MPKeyedEncoding<NestedKey>(state: self.state, frame: nested))
     }
 
     mutating func nestedUnkeyedContainer(forKey key: Key) -> UnkeyedEncodingContainer {
-        self.writeKey(key)
-        return MPUnkeyedEncoding(
-            container: self.container.addChild(style: .array),
-            codingPath: self.codingPath + [key]
-        )
+        let nested = self.beginEntry(key) ? self.state.pushContainer(.array, key: key) : .invalid
+        return MPUnkeyedEncoding(state: self.state, frame: nested)
     }
 
     mutating func superEncoder() -> Encoder {
-        self.container.tail.writeMessagePackString("super")
-        self.container.count += 1
-        return MPEncoderImplementation(
-            sink: .node(self.container.addNode()), codingPath: self.codingPath)
+        guard self.state.activate(self.frame) else {
+            return MPEncoderImplementation(state: self.state, slot: .invalid)
+        }
+        self.state.buffer.writeMessagePackString("super")
+        self.state.frames[self.frame.index].count += 1
+        return MPEncoderImplementation(state: self.state, slot: self.state.pushSlot(key: nil))
     }
 
     mutating func superEncoder(forKey key: Key) -> Encoder {
-        self.writeKey(key)
-        return MPEncoderImplementation(
-            sink: .node(self.container.addNode()),
-            codingPath: self.codingPath + [key]
-        )
+        let slot = self.beginEntry(key) ? self.state.pushSlot(key: key) : .invalid
+        return MPEncoderImplementation(state: self.state, slot: slot)
     }
 }
 
 // MARK: - Unkeyed encoding container
 
 struct MPUnkeyedEncoding: UnkeyedEncodingContainer {
-    let container: MPEncContainer
-    let codingPath: [any CodingKey]
+    let state: MPEncodingState
+    let frame: MPFrameReference
 
-    var count: Int { self.container.count }
+    var codingPath: [any CodingKey] { self.state.codingPath(through: self.frame) }
+
+    var count: Int {
+        self.state.isOpen(self.frame) ? self.state.frames[self.frame.index].count : 0
+    }
+
+    /// Activates the array and counts an element. Returns false when the array
+    /// is no longer open.
+    private func beginElement() -> Bool {
+        guard self.state.activate(self.frame) else { return false }
+        self.state.frames[self.frame.index].count += 1
+        return true
+    }
+
+    private func element(_ write: (inout ByteBuffer) -> Void) throws {
+        guard self.beginElement() else { throw MPEncodingState.outOfOrder }
+        write(&self.state.buffer)
+    }
 
     mutating func encodeNil() throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackNil()
+        try self.element { $0.writeMessagePackNil() }
     }
 
     mutating func encode(_ value: Bool) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackBool(value)
+        try self.element { $0.writeMessagePackBool(value) }
     }
 
     mutating func encode(_ value: String) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackString(value)
+        try self.element { $0.writeMessagePackString(value) }
     }
 
     mutating func encode(_ value: Double) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackDouble(value)
+        try self.element { $0.writeMessagePackDouble(value) }
     }
 
     mutating func encode(_ value: Float) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackFloat(value)
+        try self.element { $0.writeMessagePackFloat(value) }
     }
 
     mutating func encode(_ value: Int) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackInt(Int64(value))
+        try self.element { $0.writeMessagePackInt(Int64(value)) }
     }
 
     mutating func encode(_ value: Int8) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackInt(Int64(value))
+        try self.element { $0.writeMessagePackInt(Int64(value)) }
     }
 
     mutating func encode(_ value: Int16) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackInt(Int64(value))
+        try self.element { $0.writeMessagePackInt(Int64(value)) }
     }
 
     mutating func encode(_ value: Int32) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackInt(Int64(value))
+        try self.element { $0.writeMessagePackInt(Int64(value)) }
     }
 
     mutating func encode(_ value: Int64) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackInt(value)
+        try self.element { $0.writeMessagePackInt(value) }
     }
 
     mutating func encode(_ value: UInt) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackUInt(UInt64(value))
+        try self.element { $0.writeMessagePackUInt(UInt64(value)) }
     }
 
     mutating func encode(_ value: UInt8) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackUInt(UInt64(value))
+        try self.element { $0.writeMessagePackUInt(UInt64(value)) }
     }
 
     mutating func encode(_ value: UInt16) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackUInt(UInt64(value))
+        try self.element { $0.writeMessagePackUInt(UInt64(value)) }
     }
 
     mutating func encode(_ value: UInt32) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackUInt(UInt64(value))
+        try self.element { $0.writeMessagePackUInt(UInt64(value)) }
     }
 
     mutating func encode(_ value: UInt64) throws {
-        self.container.count += 1
-        self.container.tail.writeMessagePackUInt(value)
+        try self.element { $0.writeMessagePackUInt(value) }
     }
 
     mutating func encode<T: Encodable>(_ value: T) throws {
-        let checkpoint = self.container.checkpoint()
-        self.container.count += 1
-        if let payload = value as? ByteBuffer {
-            self.container.tail.writeMessagePackBinary(payload)
+        guard self.state.activate(self.frame) else { throw MPEncodingState.outOfOrder }
+        let checkpoint = self.state.checkpoint(self.frame)
+        self.state.frames[self.frame.index].count += 1
+        if mpWriteBinaryShortcut(value, into: &self.state.buffer) {
             return
         }
-        if let vpts = vptsBinary(for: value) {
-            self.container.tail.writeMessagePackBinary(vpts)
-            return
-        }
-        let child = MPEncoderImplementation(
-            sink: .container(self.container), codingPath: self.codingPath)
-        do {
-            try value.encode(to: child)
-        } catch {
-            // Mirror of the keyed rollback: never leave the array's count claiming
-            // an element that was not fully written.
-            self.container.restore(to: checkpoint)
-            throw error
-        }
-        if !child.hasEmitted {
-            self.container.tail.writeMessagePackNil()
-        }
+        try self.state.encodeEntry(value, key: nil, restoring: checkpoint)
     }
 
     mutating func nestedContainer<NestedKey: CodingKey>(
         keyedBy keyType: NestedKey.Type
     ) -> KeyedEncodingContainer<NestedKey> {
-        self.container.count += 1
-        return KeyedEncodingContainer(
-            MPKeyedEncoding<NestedKey>(
-                container: self.container.addChild(style: .map),
-                codingPath: self.codingPath
-            )
-        )
+        let nested = self.beginElement() ? self.state.pushContainer(.map, key: nil) : .invalid
+        return KeyedEncodingContainer(MPKeyedEncoding<NestedKey>(state: self.state, frame: nested))
     }
 
     mutating func nestedUnkeyedContainer() -> UnkeyedEncodingContainer {
-        self.container.count += 1
-        return MPUnkeyedEncoding(
-            container: self.container.addChild(style: .array),
-            codingPath: self.codingPath
-        )
+        let nested = self.beginElement() ? self.state.pushContainer(.array, key: nil) : .invalid
+        return MPUnkeyedEncoding(state: self.state, frame: nested)
     }
 
     mutating func superEncoder() -> Encoder {
-        self.container.count += 1
-        return MPEncoderImplementation(
-            sink: .node(self.container.addNode()), codingPath: self.codingPath)
+        let slot = self.beginElement() ? self.state.pushSlot(key: nil) : .invalid
+        return MPEncoderImplementation(state: self.state, slot: slot)
     }
 }
 
 // MARK: - Single-value encoding container
 
 struct MPSingleValueEncoding: SingleValueEncodingContainer {
-    let encoder: MPEncoderImplementation
-    var codingPath: [any CodingKey] { self.encoder.codingPath }
+    let state: MPEncodingState
+    let slot: MPFrameReference
+
+    var codingPath: [any CodingKey] { self.state.codingPath(through: self.slot) }
+
+    private func scalar(_ write: (inout ByteBuffer) -> Void) throws {
+        try self.state.beginScalar(in: self.slot)
+        write(&self.state.buffer)
+    }
 
     mutating func encodeNil() throws {
-        self.encoder.emitScalar { $0.writeMessagePackNil() }
+        try self.scalar { $0.writeMessagePackNil() }
     }
 
     mutating func encode(_ value: Bool) throws {
-        self.encoder.emitScalar { $0.writeMessagePackBool(value) }
+        try self.scalar { $0.writeMessagePackBool(value) }
     }
 
     mutating func encode(_ value: String) throws {
-        self.encoder.emitScalar { $0.writeMessagePackString(value) }
+        try self.scalar { $0.writeMessagePackString(value) }
     }
 
     mutating func encode(_ value: Double) throws {
-        self.encoder.emitScalar { $0.writeMessagePackDouble(value) }
+        try self.scalar { $0.writeMessagePackDouble(value) }
     }
 
     mutating func encode(_ value: Float) throws {
-        self.encoder.emitScalar { $0.writeMessagePackFloat(value) }
+        try self.scalar { $0.writeMessagePackFloat(value) }
     }
 
     mutating func encode(_ value: Int) throws {
-        self.encoder.emitScalar { $0.writeMessagePackInt(Int64(value)) }
+        try self.scalar { $0.writeMessagePackInt(Int64(value)) }
     }
 
     mutating func encode(_ value: Int8) throws {
-        self.encoder.emitScalar { $0.writeMessagePackInt(Int64(value)) }
+        try self.scalar { $0.writeMessagePackInt(Int64(value)) }
     }
 
     mutating func encode(_ value: Int16) throws {
-        self.encoder.emitScalar { $0.writeMessagePackInt(Int64(value)) }
+        try self.scalar { $0.writeMessagePackInt(Int64(value)) }
     }
 
     mutating func encode(_ value: Int32) throws {
-        self.encoder.emitScalar { $0.writeMessagePackInt(Int64(value)) }
+        try self.scalar { $0.writeMessagePackInt(Int64(value)) }
     }
 
     mutating func encode(_ value: Int64) throws {
-        self.encoder.emitScalar { $0.writeMessagePackInt(value) }
+        try self.scalar { $0.writeMessagePackInt(value) }
     }
 
     mutating func encode(_ value: UInt) throws {
-        self.encoder.emitScalar { $0.writeMessagePackUInt(UInt64(value)) }
+        try self.scalar { $0.writeMessagePackUInt(UInt64(value)) }
     }
 
     mutating func encode(_ value: UInt8) throws {
-        self.encoder.emitScalar { $0.writeMessagePackUInt(UInt64(value)) }
+        try self.scalar { $0.writeMessagePackUInt(UInt64(value)) }
     }
 
     mutating func encode(_ value: UInt16) throws {
-        self.encoder.emitScalar { $0.writeMessagePackUInt(UInt64(value)) }
+        try self.scalar { $0.writeMessagePackUInt(UInt64(value)) }
     }
 
     mutating func encode(_ value: UInt32) throws {
-        self.encoder.emitScalar { $0.writeMessagePackUInt(UInt64(value)) }
+        try self.scalar { $0.writeMessagePackUInt(UInt64(value)) }
     }
 
     mutating func encode(_ value: UInt64) throws {
-        self.encoder.emitScalar { $0.writeMessagePackUInt(value) }
+        try self.scalar { $0.writeMessagePackUInt(value) }
     }
 
     mutating func encode<T: Encodable>(_ value: T) throws {
-        if let payload = value as? ByteBuffer {
-            self.encoder.emitScalar { $0.writeMessagePackBinary(payload) }
+        if mpHasBinaryShortcut(T.self) {
+            try self.scalar { _ = mpWriteBinaryShortcut(value, into: &$0) }
             return
         }
-        if let vpts = vptsBinary(for: value) {
-            self.encoder.emitScalar { $0.writeMessagePackBinary(vpts) }
-            return
-        }
-        try value.encode(to: self.encoder)
+        try value.encode(to: MPEncoderImplementation(state: self.state, slot: self.slot))
     }
 }
 
