@@ -24,9 +24,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-metrics.git", from: "2.11.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.0"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0"..<"700.0.0"),
-        .package(url: "https://github.com/velocityzen/fp-swift.git", from: "4.0.0"),
-        .package(url: "https://github.com/velocityzen/fp-swift-bracket.git", from: "2.0.0"),
-        .package(url: "https://github.com/velocityzen/fp-swift-pipe.git", from: "2.0.0"),
+        .package(url: "https://github.com/velocityzen/fp-swift.git", from: "4.2.1"),
+        .package(url: "https://github.com/velocityzen/fp-swift-bracket.git", from: "2.1.0"),
+        .package(url: "https://github.com/velocityzen/fp-swift-pipe.git", from: "2.1.0"),
         .package(url: "https://github.com/velocityzen/fp-swift-service.git", branch: "main"),
     ],
     targets: [
