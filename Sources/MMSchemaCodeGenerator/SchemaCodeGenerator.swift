@@ -2348,6 +2348,7 @@ private func commandDeclaration(
         }
         lines.append("        try await MMCLIInputRunner.run(")
         lines.append("            Self.self, source: source, connection: connection, verifying: \(enclosingType).contract,")
+        lines.append("            method: \"\(wireName)\", entity: entityArgument,")
         lines.append("            arguments: request, options: options, input: \\.\(inputField.name)")
         lines.append("        ) { client, request in")
         if call.hasResponseStream {
@@ -2374,9 +2375,10 @@ private func commandDeclaration(
             structsByName: structsByName),
         elementSwiftType: call.requestElementSwiftType)
     // `verifying:` hands the runner this namespace's compiled contract for
-    // the automatic pre-dispatch schema check.
+    // the automatic pre-dispatch schema check; `method:`/`entity:` name the
+    // call in the command's status record.
     lines.append(
-        "        let response = try await MMCLIRunner.invoke(connection, verifying: \(enclosingType).contract) { client in"
+        "        let response = try await MMCLIRunner.invoke(connection, verifying: \(enclosingType).contract, method: \"\(wireName)\", entity: entityArgument) { client in"
     )
     switch (call.hasRequestStream, call.hasResponseStream) {
         case (false, false):

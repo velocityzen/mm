@@ -50,6 +50,9 @@ public struct MMCLIOutput: Sendable {
     /// failure (effectively unreachable for the generated wire types, which
     /// contain no non-finite floats) is reported on stderr instead of
     /// producing partial stdout output.
+    ///
+    /// With ``ProgramStatusReporting(app:)``, the value's ``Status(_:_:)``
+    /// entry reports it to the terminal too.
     public static func emit<T: Encodable>(_ value: T, format: OutputFormat) {
         do {
             let rendered = try Self.render(value, format: format)
@@ -57,6 +60,7 @@ public struct MMCLIOutput: Sendable {
         } catch {
             Self.note("output encoding failed: \(error)")
         }
+        MMCLIDefaults.current.programStatus?.report(value)
     }
 
     /// Renders one element of a stream. Above the first one, under
@@ -87,6 +91,7 @@ public struct MMCLIOutput: Sendable {
         } catch {
             Self.note("output encoding failed: \(error)")
         }
+        MMCLIDefaults.current.programStatus?.report(value)
     }
 
     /// Writes already-rendered output to stdout as one line. The raw-call
@@ -98,9 +103,11 @@ public struct MMCLIOutput: Sendable {
     }
 
     /// Writes a one-line diagnostic to stderr. Results go to stdout via
-    /// ``emit(_:format:)``; everything meant for humans goes here.
+    /// ``emit(_:format:)``; everything meant for humans goes here. The last
+    /// one is the reason a failed command's `error` record gives.
     public static func note(_ message: String) {
         Self.write(message + "\n", to: .standardError)
+        MMCLIStatusSession.current?.diagnose(message)
     }
 
     /// The single write seam. A failed write (e.g. a closed pipe downstream)

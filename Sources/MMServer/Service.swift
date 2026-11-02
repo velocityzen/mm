@@ -8,6 +8,7 @@ import Metrics
 import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
+import ProgramStatus
 
 #if canImport(Darwin)
 import Darwin
@@ -124,6 +125,8 @@ extension BracketAsync where R == [SocketAddress], E == MMServiceError {
     ///   - threadPool: Used for startup socket syscalls; defaults to the
     ///     process singleton.
     ///   - logger: Base logger; per-connection ids ride in metadata.
+    ///   - programStatus: Reports the server's lifecycle to the terminal;
+    ///     see ``ProgramStatusReporting(app:)``. `nil` reports nothing.
     ///   - routes: The application's routes, built with `Handle`.
     public init(
         configuration: MMServerConfiguration,
@@ -133,6 +136,7 @@ extension BracketAsync where R == [SocketAddress], E == MMServiceError {
         eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
         threadPool: NIOThreadPool = .singleton,
         logger: Logger = Logger(label: "mm.server"),
+        programStatus: ProgramStatusReporter? = nil,
         @RouterBuilder routes: sending () -> [Route]
     ) {
         self = ServerRuntime(
@@ -143,6 +147,7 @@ extension BracketAsync where R == [SocketAddress], E == MMServiceError {
             eventLoopGroup: eventLoopGroup,
             threadPool: threadPool,
             logger: logger,
+            programStatus: programStatus.map(ServerProgramStatus.init(reporter:)),
             routes: routes
         )
         .start()
@@ -163,6 +168,7 @@ package struct ServerRuntime: Sendable {
     private let threadPool: NIOThreadPool
     private let logger: Logger
     private let serverHello: MMHello
+    private let programStatus: ServerProgramStatus?
 
     private let metrics: ServiceMetrics
     /// Stream frames dropped for an unknown/retired msgid, or an advisory frame
@@ -229,6 +235,7 @@ package struct ServerRuntime: Sendable {
         eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup.singleton,
         threadPool: NIOThreadPool = .singleton,
         logger: Logger = Logger(label: "mm.server"),
+        programStatus: ServerProgramStatus? = nil,
         @RouterBuilder routes: () -> [Route]
     ) {
         var serviceLogger = logger
@@ -237,6 +244,7 @@ package struct ServerRuntime: Sendable {
         self.group = eventLoopGroup
         self.threadPool = threadPool
         self.logger = serviceLogger
+        self.programStatus = programStatus
         self.router = Router(
             namespaces: namespaces,
             sharedTypes: sharedTypes,
@@ -260,20 +268,61 @@ package struct ServerRuntime: Sendable {
     package func start() -> MMService {
         BracketAsync<RunningServer, MMServiceError>(
             acquire: {
-                await self.bindEndpoints().map(self.startAccepting)
+                let started = await self.bindEndpoints().map(self.startAccepting)
+                await self.reportStatus(self.status(started))
+                return started
             },
             dispose: { running in
                 running.shutdown.request()
+                await self.reportStatus(ServerProgramStatus.draining)
                 // Cancelling the disposing task (a host's second signal, its
                 // timeout) cancels the loop: the drain becomes a teardown.
-                return await withTaskCancellationHandler {
+                let stopped = await withTaskCancellationHandler {
                     await running.loop.value
                 } onCancel: {
                     running.loop.cancel()
                 }
+                await self.reportStatus(self.status(stopped))
+                return stopped
             }
         )
         .map(\.localAddresses)
+    }
+
+    // MARK: - Program status
+
+    /// The record a start leaves: listening, or why it could not.
+    private func status(_ started: Result<RunningServer, MMServiceError>) -> StatusReport {
+        switch started {
+            case .success(let running):
+                ServerProgramStatus.listening(
+                    on: self.configuration.endpoints,
+                    boundAt: running.localAddresses
+                )
+            case .failure(let error):
+                ServerProgramStatus.failed(error)
+        }
+    }
+
+    /// The record a drain leaves: stopped, or the accept loop's failure.
+    private func status(_ stopped: Result<Void, MMServiceError>) -> StatusReport {
+        switch stopped {
+            case .success:
+                ServerProgramStatus.stopped
+            case .failure(let error):
+                ServerProgramStatus.failed(error)
+        }
+    }
+
+    /// Writes the report to the terminal on the thread pool: a terminal's
+    /// writes can block (flow control), and never on a loop or the
+    /// cooperative pool. Best-effort, like every status report.
+    private func reportStatus(_ report: @autoclosure () -> StatusReport) async {
+        guard let programStatus = self.programStatus else { return }
+        let report = report()
+        _ = try? await self.threadPool.runIfActive {
+            programStatus.report(report)
+        }
     }
 
     /// Starts the accept loops in the task ``RunningServer`` owns: they

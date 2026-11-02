@@ -47,7 +47,11 @@ public struct MMCLIRawCall: AsyncParsableCommand {
             throw ValidationError("--params is not valid JSON: \(error.message)")
         }
         let format = connection.output
-        let tree = try await MMCLIRunner.invoke(connection) { client in
+        let tree = try await MMCLIRunner.invoke(
+            connection,
+            method: methodName,
+            entity: entityArgument
+        ) { client in
             // Root-scoped discovery: the method may target any entity, and
             // the response is filtered to what this peer can reach anyway.
             let schema = try MMCLIFailure.unwrap(

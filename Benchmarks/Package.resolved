@@ -65,6 +65,15 @@
       }
     },
     {
+      "identity" : "programstatus",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/velocityzen/ProgramStatus.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "ad34760b2d0ba6f8d9069720b55c5249a3c46a84"
+      }
+    },
+    {
       "identity" : "swift-argument-parser",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-argument-parser.git",

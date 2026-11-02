@@ -29,7 +29,11 @@ public struct MMCLIDiscover: AsyncParsableCommand {
         let scopeArgument = scope
         let target = try MMCLIFailure.entity(scopeArgument)  // "" parses to .root
         let format = connection.output
-        let response = try await MMCLIRunner.invoke(connection) { client in
+        let response = try await MMCLIRunner.invoke(
+            connection,
+            method: "server.schema",
+            entity: scopeArgument
+        ) { client in
             let hello = client.server
             // The verdict comes from the build-time completeness claim when
             // one is installed — verification is never manual.

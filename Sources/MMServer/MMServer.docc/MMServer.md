@@ -72,6 +72,8 @@ The <doc:IntegrationGuide> shows how to embed all of this in a production daemon
 - ``Log(_:)-((Logger.Level,Logger.Message)->Void)``
 - ``For(_:_:)``
 - ``Types(_:)``
+- ``ProgramStatusReporting(app:)``
+- ``ProgramStatusReporting(_:)``
 
 ### Routing and handlers
 

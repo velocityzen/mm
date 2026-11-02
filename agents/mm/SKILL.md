@@ -275,6 +275,11 @@ A top-level `CLI(.enabled)` entry in the schema block generates one swift-argume
 - Client daemons get the same automation. Set `configuration.schema = .complete([...])` / `.partial([...])`, and the connection verifies itself after connect. `await connection.verify()` returns a `Result`: `.ok` / `.partial` / `.difference` (a soft verdict, never a disconnect), or the errors `.noExpectation`/`.denied`/`.failed`. `connection.verifyContracts([...])` is the manual slice check underneath.
 - Every generated group includes an explicit `verify` command (exit 1 on drift, like diff). There is no manual fingerprint option. The fingerprint comes from the compiled contracts at build time, never from an operator at runtime.
 - List `Journal.Command.self` and the other commands in `Commands([...])` inside `MMCLI { }`. See `Examples/CLI/CLI.swift`.
+- Terminal status (Program Status Protocol, OSC 7501, the `ProgramStatus` package) is opt-in: `ProgramStatusReporting(app: "journal")` in `MMCLI { }`, and the same part in `MMService { }`. `app` is `[A-Za-z0-9_.+-]{1,32}`; anything else, or the part twice, stops the process at startup.
+  - A command reports `working` with `method on entity`, `blocked` (`question`) while reading lines from a terminal stdin, then `done`, `error` (its last stderr line), or `idle` after Ctrl-C. The runner decides the end from what `invoke`'s body returns or throws, so throw a failure's `ExitCode` inside the body, not after `invoke` returns.
+  - `Status(ChangeEvent.self) { event in .done(event.line) }` turns each printed value of that type (stream elements and responses) into a report; nil leaves the record. A response's report comes after the command's own end, so it wins. Needs `import ProgramStatus` for `StatusReport`.
+  - The daemon reports `idle` "Listening on ...", `working` "Draining connections", `idle` "Stopped", or `error` with the bind failure. Writes run on the thread pool.
+  - Reports go to `/dev/tty`, so they arrive when stdout is piped. Without a controlling terminal (launchd, CI) nothing is written.
 
 ## Authorization model (why calls get denied)
 

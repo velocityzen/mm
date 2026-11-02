@@ -100,13 +100,15 @@ public enum MMCLIStreamDriver {
         makeElement: @Sendable @escaping (String) throws -> Element,
         method: String, entity: String
     ) async throws -> Response {
-        try await MMCLISignals.withGracefulSigint(
+        let input = MMCLIInput.standardInput
+        MMCLIStatusSession.current?.awaitLines(from: input)
+        return try await MMCLISignals.withGracefulSigint(
             onFirst: { await handle.finish() },
             onSecond: { await handle.cancel() }
         ) {
             try await Self.outboundStdio(
                 handle,
-                lines: MMCLIInput.standardInput.lines,
+                lines: input.lines,
                 makeElement: makeElement,
                 method: method,
                 entity: entity
@@ -168,7 +170,9 @@ public enum MMCLIStreamDriver {
         method: String,
         entity: String
     ) async throws -> Response {
-        try await MMCLISignals.withGracefulSigint(
+        let input = MMCLIInput.standardInput
+        MMCLIStatusSession.current?.awaitLines(from: input)
+        return try await MMCLISignals.withGracefulSigint(
             onFirst: {
                 await handle.inbound.stop()
                 await handle.outbound.finish()
@@ -177,7 +181,7 @@ public enum MMCLIStreamDriver {
         ) {
             try await Self.bidirectionalStdio(
                 handle,
-                lines: MMCLIInput.standardInput.lines,
+                lines: input.lines,
                 makeElement: makeElement,
                 format: format,
                 method: method,

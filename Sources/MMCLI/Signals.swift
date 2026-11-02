@@ -32,7 +32,10 @@ public enum MMCLISignals {
         onSecond: (@Sendable @concurrent () async -> Void)? = nil,
         _ body: @Sendable @escaping @concurrent () async throws -> T
     ) async throws -> T {
-        try await withThrowingTaskGroup(of: Event<T>.self) { tasks in
+        // The first SIGINT ends the run as the user's choice: the command's
+        // record becomes `idle`, not `done`.
+        let session = MMCLIStatusSession.current
+        return try await withThrowingTaskGroup(of: Event<T>.self) { tasks in
             tasks.addTask {
                 // While this stream lives, SIGINT is caught, so its default
                 // action cannot end the process mid-drain.
@@ -42,6 +45,7 @@ public enum MMCLISignals {
                     sigintCount += 1
                     switch sigintCount {
                         case 1:
+                            session?.interrupt()
                             await onFirst()
                         case 2:
                             await onSecond?()

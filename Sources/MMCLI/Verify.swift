@@ -16,19 +16,22 @@ import MMSchema
 /// difference prints its buckets and exits 1.
 public enum MMCLIVerify {
     public static func run(contract: SchemaDeclaration, options: MMCLIOptions) async throws {
-        let verdict = try await MMCLIRunner.invoke(options) {
-            client -> (inSync: Bool, description: String) in
+        try await MMCLIRunner.invoke(
+            options,
+            method: "server.schema",
+            entity: contract.namespace
+        ) { client in
             let differences = try MMCLIFailure.unwrap(
                 await client.verifyContracts(
                     [contract],
                     sharing: MMCLIServerContract.current()?.sharedTypes ?? []
                 ),
                 method: "server.schema", entity: contract.namespace)
-            guard let difference = differences.first else { return (true, "in sync") }
-            return (false, "\(difference)")
-        }
-        MMCLIOutput.note(verdict.description)
-        if !verdict.inSync {
+            guard let difference = differences.first else {
+                MMCLIOutput.note("in sync")
+                return
+            }
+            MMCLIOutput.note("\(difference)")
             throw ExitCode(1)
         }
     }

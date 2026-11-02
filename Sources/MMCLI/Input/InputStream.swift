@@ -61,6 +61,13 @@ public struct MMCLIInput: AsyncSequence, Sendable {
         MMCLIInput(descriptor: STDIN_FILENO, name: "stdin")
     }
 
+    /// Whether the input is a terminal, where reading waits for the user to
+    /// type.
+    var isTerminal: Bool {
+        guard case .descriptor(let descriptor, _) = self.storage else { return false }
+        return isatty(descriptor) == 1
+    }
+
     /// The input split into text lines, each at most 1 MiB; see
     /// ``lines(maximumLength:)``.
     public var lines: MMCLIInputLines {

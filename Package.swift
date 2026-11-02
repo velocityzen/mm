@@ -28,6 +28,7 @@ let package = Package(
         .package(url: "https://github.com/velocityzen/fp-swift-bracket.git", from: "2.1.0"),
         .package(url: "https://github.com/velocityzen/fp-swift-pipe.git", from: "2.1.0"),
         .package(url: "https://github.com/velocityzen/fp-swift-service.git", branch: "main"),
+        .package(url: "https://github.com/velocityzen/ProgramStatus.git", branch: "main"),
     ],
     targets: [
         .target(
@@ -71,6 +72,7 @@ let package = Package(
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Metrics", package: "swift-metrics"),
+                .product(name: "ProgramStatus", package: "ProgramStatus"),
             ],
             swiftSettings: callerIsolation
         ),
@@ -99,6 +101,7 @@ let package = Package(
                 .product(name: "FPBracket", package: "fp-swift-bracket"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "ProcessSignals", package: "fp-swift-service"),
+                .product(name: "ProgramStatus", package: "ProgramStatus"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -131,6 +134,7 @@ let package = Package(
                 "MMCLI",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "FPPipe", package: "fp-swift-pipe"),
+                .product(name: "ProgramStatus", package: "ProgramStatus"),
             ],
             path: "Examples/CLI",
             plugins: ["MMCLIGeneratorPlugin"]
@@ -206,6 +210,7 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "Metrics", package: "swift-metrics"),
+                .product(name: "ProgramStatus", package: "ProgramStatus"),
             ]
         ),
         .testTarget(
@@ -234,6 +239,7 @@ let package = Package(
                 .product(name: "FPPipe", package: "fp-swift-pipe"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "ProgramStatus", package: "ProgramStatus"),
             ],
             plugins: ["MMCLIGeneratorPlugin"]
         ),

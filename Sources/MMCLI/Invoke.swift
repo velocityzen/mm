@@ -33,10 +33,45 @@ public enum MMCLIRunner {
     ///    may hold call rights without read on the namespace entity.
     ///
     /// `--no-verify` skips layer 2 for one invocation.
+    ///
+    /// ## Program status
+    ///
+    /// With ``ProgramStatusReporting(app:)``, the invocation is a record on
+    /// the terminal: `working` with `method on entity` (the call the command
+    /// makes) while it runs, then `done`, `error` with the line it wrote to
+    /// stderr, or `idle` when Ctrl-C ended it. Throw a failure's `ExitCode`
+    /// from `body`, rather than after `invoke` returns, so the record says
+    /// how the command ended.
     public static func invoke<T: Sendable>(
         _ options: MMCLIOptions,
         verifying contract: SchemaDeclaration? = nil,
         claim: MMCLIServerContract? = nil,
+        method: String? = nil,
+        entity: String = "",
+        _ body: @Sendable @escaping (MMClientConnection) async throws -> T
+    ) async throws -> T {
+        guard let programStatus = MMCLIDefaults.current.programStatus else {
+            return try await Self.connect(options, verifying: contract, claim: claim, body)
+        }
+        let session = MMCLIStatusSession(
+            programStatus,
+            activity: MMCLIStatusSession.activity(method: method, entity: entity)
+        )
+        return try await MMCLIStatusSession.$current.withValue(session) {
+            session.start()
+            let outcome = await Result.fromAsync {
+                try await Self.connect(options, verifying: contract, claim: claim, body)
+            }
+            session.finish(outcome)
+            return try outcome.get()
+        }
+    }
+
+    /// The connection bracket around the command; see ``invoke(_:verifying:claim:method:entity:_:)``.
+    private static func connect<T: Sendable>(
+        _ options: MMCLIOptions,
+        verifying contract: SchemaDeclaration?,
+        claim: MMCLIServerContract?,
         _ body: @Sendable @escaping (MMClientConnection) async throws -> T
     ) async throws -> T {
         let endpoint = options.endpoint

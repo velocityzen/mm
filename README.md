@@ -355,10 +355,37 @@ The target entity is in the open envelope, so no params byte is read until every
 
 Server and client emit [swift-metrics](https://github.com/apple/swift-metrics) instruments with stable `mm_server_*` / `mm_client_*` labels: connection lifecycle, frames, denials, dispatch latency, per-direction stream items, and credit stalls. The library never opens a metrics port. Bootstrap your backend (Prometheus, StatsD, OTel) once in the host process. Otherwise the built-in no-op handler discards everything at almost no cost. The integration guide's Observability section lists all labels, shows the wiring, and covers exposure security.
 
+## Terminal status
+
+A daemon or a CLI can tell the terminal what it is doing with the [Program Status Protocol](https://github.com/velocityzen/ProgramStatus) (OSC 7501), so a terminal that supports it shows each tab's state and can notify when it changes. It is opt-in, one part in the declaration:
+
+```swift
+MMService {
+    Configuration(endpoint: .unix(path: socketPath))
+    ACLProvider(provider)
+    ProgramStatusReporting(app: "journald")
+    For(Journal.self) { JournalHandlers(store: store) }
+}
+
+await MMCLI {
+    Name("journal")
+    Commands([Journal.Command.self])
+    ProgramStatusReporting(app: "journal")
+    // Every event `journal follow` receives becomes a report the terminal can notify on.
+    Status(ChangeEvent.self) { event in .done(event.line, title: event.entity) }
+}
+```
+
+- The daemon reports `idle` "Listening on ..." once its endpoints are bound, `working` while it drains, then `idle` "Stopped". A bind that fails reports `error` with the reason.
+- A command reports `working` with its call (`journal.read on journal.notes`), and `blocked` while it waits for lines typed into a terminal stdin. It ends with `done`, `error` with the line it wrote to stderr, or `idle` after Ctrl-C.
+- A `Status(...)` entry turns each value a command prints, such as each element of a stream, into a report. Return nil to leave the record as it is.
+
+Reports go to the controlling terminal, so they arrive even when stdout is piped. A process without one (launchd, systemd, CI) writes nothing, and terminals ignore sequences they do not know.
+
 ## Requirements
 
 - Swift 6.4+ (strict concurrency). Everything runs on macOS 26+, Linux and Android. The client (`MMClient`, `MMSchema`, `MMWire`) also runs on iOS, iPadOS, tvOS, watchOS and visionOS 26+.
-- Runtime dependencies (complete list): [swift-nio](https://github.com/apple/swift-nio), [swift-log](https://github.com/apple/swift-log), [swift-metrics](https://github.com/apple/swift-metrics), [fp-swift](https://github.com/velocityzen/fp-swift), [fp-swift-bracket](https://github.com/velocityzen/fp-swift-bracket), and [fp-swift-service](https://github.com/velocityzen/fp-swift-service) (`FPService` for the server's shutdown fan-out, `ProcessSignals` for `MMCLI`). The CLI example and tests also use [fp-swift-pipe](https://github.com/velocityzen/fp-swift-pipe). MessagePack is implemented in this repository. [swift-syntax](https://github.com/swiftlang/swift-syntax) is a compile-time-only dependency of the `#schema` macro and the `MMCLIGeneratorPlugin`. It is never linked into products.
+- Runtime dependencies (complete list): [swift-nio](https://github.com/apple/swift-nio), [swift-log](https://github.com/apple/swift-log), [swift-metrics](https://github.com/apple/swift-metrics), [fp-swift](https://github.com/velocityzen/fp-swift), [fp-swift-bracket](https://github.com/velocityzen/fp-swift-bracket), [fp-swift-service](https://github.com/velocityzen/fp-swift-service) (`FPService` for the server's shutdown fan-out, `ProcessSignals` for `MMCLI`), and [ProgramStatus](https://github.com/velocityzen/ProgramStatus) (terminal status for `MMServer` and `MMCLI`). The CLI example and tests also use [fp-swift-pipe](https://github.com/velocityzen/fp-swift-pipe). MessagePack is implemented in this repository. [swift-syntax](https://github.com/swiftlang/swift-syntax) is a compile-time-only dependency of the `#schema` macro and the `MMCLIGeneratorPlugin`. It is never linked into products.
 
 ## Installation
 

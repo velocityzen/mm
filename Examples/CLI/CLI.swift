@@ -2,6 +2,7 @@ import ArgumentParser
 import FPPipe
 import MMCLI
 import MMExampleAPI
+import ProgramStatus
 
 /// The generated command-line face of the example daemon: every subcommand
 /// under `journal` is generated into this target by the `MMCLIGeneratorPlugin`
@@ -30,6 +31,10 @@ import MMExampleAPI
 /// so scripts stay stable). The `Input` entry decides what `journal add`
 /// does with `--input`: the file arrives as a byte stream, and the body's
 /// pipe turns its lines, read with the other arguments, into appends.
+/// `ProgramStatusReporting` tells the terminal what each command is doing
+/// (OSC 7501): working, done, failed, or waiting for typed lines; the
+/// `Status` entry turns every change `journal follow` receives into a `done`
+/// record, so the terminal can notify on each one.
 ///
 /// `journal.notes` is the target **entity** — the noun of the call, and every
 /// command's leading positional. It comes from the daemon's ACL tree
@@ -54,6 +59,10 @@ struct MMExampleCLI {
             ])
             Contract(.complete([journalContract]))
             Endpoint(.unix(path: "/tmp/mm-example.sock"))
+            ProgramStatusReporting(app: "mm-example-cli")
+            // Each change a follow or a sync delivers replaces the record, so
+            // a terminal tab running `journal follow` notifies per change.
+            Status(ChangeEvent.self) { event in .done(event.line, title: event.entity) }
             // Both spellings: explicit metatype, or the type inferred from
             // the closure parameter.
             Format(ChangeEvent.self) { "\($0.count)\t\($0.line)" }

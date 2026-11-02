@@ -28,12 +28,16 @@ public enum MMCLIInputRunner {
     /// body, or the one-call-per-line default. `arguments` is the request the
     /// command's arguments describe, with the input field at `field` empty,
     /// and `options` its CLI options. `call` makes one call with a request.
-    /// An unreadable input exits 66 before anything connects.
+    /// An unreadable input exits 66 before anything connects. `method` and
+    /// `entity` name the call in the command's status record (see
+    /// ``MMCLIRunner/invoke(_:verifying:claim:method:entity:_:)``).
     public static func run<Command: MMCLIInputCommand>(
         _ command: Command.Type,
         source: MMCLIInputSource,
         connection: MMCLIOptions,
         verifying contract: SchemaDeclaration? = nil,
+        method: String? = nil,
+        entity: String = "",
         arguments: Command.Request,
         options: Command.Options,
         input field: WritableKeyPath<Command.Request, String> & Sendable,
@@ -44,15 +48,26 @@ public enum MMCLIInputRunner {
         let withInput = source.open()
         let outcome = await withInput { input in
             let command = await Result.fromAsync {
-                try await MMCLIRunner.invoke(connection, verifying: contract) { client in
+                try await MMCLIRunner.invoke(
+                    connection,
+                    verifying: contract,
+                    method: method,
+                    entity: entity
+                ) { client in
                     let bound = MMCLIInputCall(arguments: arguments, input: field) { request in
                         await call(client, request)
                     }
-                    return try await Self.interruptible(input) {
+                    MMCLIStatusSession.current?.awaitLines(from: input)
+                    let code = try await Self.interruptible(input) {
                         if let entry {
                             return await entry.run(input, bound, options, format)
                         }
                         return await Self.batch(source, input: input, call: bound, format: format)
+                    }
+                    // Thrown inside the runner, so the status record says
+                    // how the run ended.
+                    if let code {
+                        throw code
                     }
                 }
             }
@@ -62,9 +77,7 @@ public enum MMCLIInputRunner {
             case .failure(let error):
                 throw Self.report(error)
             case .success(let command):
-                if let code = try command.get() {
-                    throw code
-                }
+                try command.get()
         }
     }
 

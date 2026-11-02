@@ -98,6 +98,9 @@ struct ExampleDaemon {
                 Entity("server", owner: uid, group: gid, mode: 0o550)
             }
             Log(logger)
+            // The terminal running the daemon shows its state (OSC 7501):
+            // listening, draining, stopped, or why it failed.
+            ProgramStatusReporting(app: "mm-example-daemon")
             For(Journal.self) {
                 JournalHandlers(store: store)
             }

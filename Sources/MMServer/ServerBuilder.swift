@@ -32,8 +32,9 @@ import NIOPosix
 /// declared) — the builder equivalent of the `namespaces:` parameter.
 ///
 /// Exactly one `Configuration` and exactly one `ACLProvider` are required;
-/// `Log` is optional (at most one). Violations are programmer error and fail
-/// at daemon startup, per the router's precondition discipline.
+/// `Log` and ``ProgramStatusReporting(app:)`` are optional (at most one
+/// each). Violations are programmer error and fail at daemon startup, per
+/// the router's precondition discipline.
 public struct ServerPart {
     enum Kind {
         case configuration(MMServerConfiguration)
@@ -42,6 +43,7 @@ public struct ServerPart {
         case group(namespace: any MethodNamespace.Type, routes: [Route])
         case routes([Route])
         case sharedTypes(any TypeNamespace.Type)
+        case programStatus(ServerProgramStatus)
     }
 
     let kind: Kind
@@ -298,6 +300,7 @@ extension ServerRuntime {
         var sharedTypes: [any TypeNamespace.Type] = []
         var seenSharedTypes: Set<ObjectIdentifier> = []
         var routes: [Route] = []
+        var programStatus: ServerProgramStatus?
         for part in content() {
             switch part.kind {
                 case .configuration(let value):
@@ -324,6 +327,12 @@ extension ServerRuntime {
                         "MMService declares Types(\(container)) twice"
                     )
                     sharedTypes.append(container)
+                case .programStatus(let value):
+                    precondition(
+                        programStatus == nil,
+                        "MMService declares ProgramStatusReporting twice"
+                    )
+                    programStatus = value
             }
         }
         guard let configuration else {
@@ -342,6 +351,7 @@ extension ServerRuntime {
             eventLoopGroup: eventLoopGroup,
             threadPool: threadPool,
             logger: logger ?? Logger(label: "mm.server"),
+            programStatus: programStatus,
             routes: { routes }
         )
     }
