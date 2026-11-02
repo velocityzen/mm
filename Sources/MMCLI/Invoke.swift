@@ -36,7 +36,7 @@ public enum MMCLIRunner {
     ///
     /// ## Program status
     ///
-    /// With ``ProgramStatusReporting(app:)``, the invocation is a record on
+    /// With ``ProgramStatusReporting(app:_:)``, the invocation is a record on
     /// the terminal: `working` with `method on entity` (the call the command
     /// makes) while it runs, then `done`, `error` with the line it wrote to
     /// stderr, or `idle` when Ctrl-C ended it. Throw a failure's `ExitCode`

@@ -370,15 +370,16 @@ MMService {
 await MMCLI {
     Name("journal")
     Commands([Journal.Command.self])
-    ProgramStatusReporting(app: "journal")
-    // Every event `journal follow` receives becomes a report the terminal can notify on.
-    Status(ChangeEvent.self) { event in .done(event.line, title: event.entity) }
+    ProgramStatusReporting(app: "journal") {
+        // Every event `journal follow` receives becomes a report the terminal can notify on.
+        On(ChangeEvent.self) { event in .done(event.line, title: event.entity) }
+    }
 }
 ```
 
 - The daemon reports `idle` "Listening on ..." once its endpoints are bound, `working` while it drains, then `idle` "Stopped". A bind that fails reports `error` with the reason.
 - A command reports `working` with its call (`journal.read on journal.notes`), and `blocked` while it waits for lines typed into a terminal stdin. It ends with `done`, `error` with the line it wrote to stderr, or `idle` after Ctrl-C.
-- A `Status(...)` entry turns each value a command prints, such as each element of a stream, into a report. Return nil to leave the record as it is.
+- An `On(...)` entry in the `ProgramStatusReporting { }` block turns each value a command prints, such as each element of a stream, into a report. Return nil to leave the record as it is. It is keyed by the value's type, as `Format` is, and only valid inside that block. The server's `On` takes a method instead.
 
 Reports go to the controlling terminal, so they arrive even when stdout is piped. A process without one (launchd, systemd, CI) writes nothing, and terminals ignore sequences they do not know.
 

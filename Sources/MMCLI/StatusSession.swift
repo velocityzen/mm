@@ -10,7 +10,7 @@ import Synchronization
 /// (the failure's line), and the SIGINT watcher (interrupted).
 final class MMCLIStatusSession: Sendable {
     /// The running invocation's session; nil without
-    /// ``ProgramStatusReporting(app:)``, or outside ``MMCLIRunner``.
+    /// ``ProgramStatusReporting(app:_:)``, or outside ``MMCLIRunner``.
     @TaskLocal static var current: MMCLIStatusSession?
 
     private struct State {

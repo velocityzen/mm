@@ -32,7 +32,7 @@ The generated commands contain little code. All runtime behavior lives in this m
   - `outbound` (client stream) sends stdin lines through the credit-gated writer. Single-string-field elements take plain lines, others JSON lines. EOF sends END.
   - `bidirectional` does both.
 - ``MMCLIInputRunner`` runs a command whose request field is `cli: .input`. The value comes from the positional, or as a byte stream (``MMCLIInput``, with `lines` for text) from `--input <path>` (`-` for stdin). An ``Input(_:_:)`` entry in the `MMCLI { }` block gets the stream, the parsed arguments as the request (input field empty), the call's CLI options (`CLI(...) { Field(...) }`) when its body takes four parameters, and the call (``MMCLIInputCall``, which takes a whole request or just the input value), and returns its results as an `AsyncSequence` of `Result`s, such as an FPPipe `Pipe`. Without one, the command makes one call per non-blank line, with a `==> line <==` heading above each under text output. Failures of one value (exit 1 or 65) are reported and the run continues; other failures end it. The first Ctrl-C ends the input, the work in flight finishes, and the command exits 130.
-- ``ProgramStatusReporting(app:)`` in the `MMCLI { }` block reports each command to the terminal with the Program Status Protocol (OSC 7501): `working` with its call, `blocked` while it waits for lines typed into a terminal stdin, then `done`, `error` with its stderr line, or `idle` after Ctrl-C. A ``Status(_:_:)`` entry turns each value a command prints, such as each element of a stream, into a report, so the terminal can notify on every event a server pushes. Reports go to the controlling terminal, and nothing is written without one. See ``MMCLIProgramStatus``.
+- ``ProgramStatusReporting(app:_:)`` in the `MMCLI { }` block reports each command to the terminal with the Program Status Protocol (OSC 7501): `working` with its call, `blocked` while it waits for lines typed into a terminal stdin, then `done`, `error` with its stderr line, or `idle` after Ctrl-C. An ``On(_:_:)`` entry in its block (the only place one is valid) turns each value a command prints, such as each element of a stream, into a report, so the terminal can notify on every event a server pushes. Reports go to the controlling terminal, and nothing is written without one. See ``MMCLIProgramStatus``.
 - ``MMCLIEnumArgument`` makes generated wire enums typed command arguments. Their `unknown` fallback is hidden from help and rejected as input.
 - ``MMCLIJSON`` decodes JSON-literal options for fields with no flat command-line shape.
 
@@ -90,10 +90,11 @@ A tool with a hand-written root uses the `run:` form: `await MMCLI { Contract(..
 
 ### Terminal status
 
-- ``ProgramStatusReporting(app:)``
-- ``ProgramStatusReporting(_:)``
-- ``Status(_:_:)``
-- ``Status(_:)``
+- ``ProgramStatusReporting(app:_:)``
+- ``ProgramStatusReporting(_:_:)``
+- ``On(_:_:)``
+- ``On(_:)``
+- ``MMCLIStatusBuilder``
 - ``MMCLIStatusEntry``
 - ``MMCLIProgramStatus``
 

@@ -86,7 +86,7 @@ struct ProgramStatusTests {
     @Test("each element a stream delivers reports through its Status entry")
     func streamElements() async throws {
         let log = ReportLog()
-        let entry = Status(CLIStreamItem.self) { item in .done("item \(item.value)", title: "box") }
+        let entry = On(CLIStreamItem.self) { item in .done("item \(item.value)", title: "box") }
         try await withCLIServer { options in
             try await withCLI(log.defaults([entry])) {
                 let summary = try await MMCLIRunner.invoke(
@@ -124,7 +124,7 @@ struct ProgramStatusTests {
     @Test("a Status entry that returns nil leaves the record as it is")
     func skippedElements() async throws {
         let log = ReportLog()
-        let entry = Status { (item: CLIStreamItem) in
+        let entry = On { (item: CLIStreamItem) in
             item.value.isMultiple(of: 2) ? nil : .working("odd \(item.value)")
         }
         try await withCLIServer { options in
@@ -333,26 +333,37 @@ struct ProgramStatusFitTests {
 
 @Suite("Program status: the MMCLI declaration")
 struct ProgramStatusDeclarationTests {
-    @Test("Status entries join ProgramStatusReporting, keyed by type")
+    @Test("the Status entries in the block are keyed by type, the last one winning")
     func assembled() async {
+        let skipped = true
         let defaults = await MMCLI {
-            ProgramStatusReporting(app: "tool")
-            Status(CLIStreamItem.self) { .done("\($0.value)") }
-            Status { (summary: CLIStreamSummary) in .done("\(summary.count)") }
+            ProgramStatusReporting(app: "tool") {
+                On(CLIStreamItem.self) { .done("first \($0.value)") }
+                On { (summary: CLIStreamSummary) in .done("\(summary.count)") }
+                if !skipped {
+                    On(CLIEchoResponse.self) { .done("\($0.value)") }
+                }
+                On(CLIStreamItem.self) { .done("last \($0.value)") }
+            }
         } run: {
             MMCLIDefaults.current
         }
-        #expect(defaults.programStatus?.statuses.count == 2)
+        let statuses = defaults.programStatus?.statuses ?? [:]
+        #expect(statuses.count == 2)
+        #expect(
+            statuses[ObjectIdentifier(CLIStreamItem.self)]?(CLIStreamItem(value: 7))
+                == .done("last 7")
+        )
     }
 
-    @Test("Status entries without ProgramStatusReporting report nothing")
-    func entriesAlone() async {
+    @Test("a block-less ProgramStatusReporting reports the lifecycle only")
+    func withoutEntries() async {
         let defaults = await MMCLI {
-            Status(CLIStreamItem.self) { .done("\($0.value)") }
+            ProgramStatusReporting(app: "tool")
         } run: {
             MMCLIDefaults.current
         }
-        #expect(defaults.programStatus == nil)
+        #expect(defaults.programStatus?.statuses.isEmpty == true)
     }
 
     @Test("an app outside the protocol's charset is programmer error")

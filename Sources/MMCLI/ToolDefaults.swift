@@ -35,8 +35,8 @@ public struct MMCLIDefaults: Sendable {
     /// its input. Commands without one make one call per line.
     public var inputs: MMCLIInputs
     /// The tool's Program Status Protocol reporting, from
-    /// ``ProgramStatusReporting(app:)`` and its ``Status(_:_:)`` entries; nil
-    /// writes nothing to the terminal.
+    /// ``ProgramStatusReporting(app:_:)`` and the ``On(_:_:)`` entries in
+    /// its block; nil writes nothing to the terminal.
     public var programStatus: MMCLIProgramStatus?
 
     /// The binding commands read; empty unless the tool declared one via
@@ -180,8 +180,8 @@ public func Format<T: Encodable & Sendable>(
 /// shape, the claim, the endpoint, the default output, a per-type text
 /// renderer, an input command's body, or status reporting. Constructed by
 /// ``Configuration(_:)``, ``Contract(_:)``, ``Endpoint(_:)``, ``Output(_:)``,
-/// ``Format(_:_:)-(_,(T)->String)``, ``Input(_:_:)``,
-/// ``ProgramStatusReporting(app:)``, and ``Status(_:_:)``.
+/// ``Format(_:_:)-(_,(T)->String)``, ``Input(_:_:)``, and
+/// ``ProgramStatusReporting(app:_:)``.
 public struct MMCLIPart: Sendable {
     enum Kind: Sendable {
         case configuration(CommandConfiguration)
@@ -195,7 +195,6 @@ public struct MMCLIPart: Sendable {
         case format(MMCLIFormatEntry)
         case input(MMCLIInputEntry)
         case programStatus(MMCLIProgramStatus)
-        case status(MMCLIStatusEntry)
     }
 
     let kind: Kind
@@ -270,11 +269,6 @@ public enum MMCLIBuilder: MMListBuilding {
     public static func buildExpression(_ entry: MMCLIInputEntry) -> [MMCLIPart] {
         [MMCLIPart(kind: .input(entry))]
     }
-
-    /// And `Status(_:_:)` entries.
-    public static func buildExpression(_ entry: MMCLIStatusEntry) -> [MMCLIPart] {
-        [MMCLIPart(kind: .status(entry))]
-    }
 }
 
 /// The whole entry point of a companion CLI, declared as data — the CLI twin
@@ -299,10 +293,9 @@ public enum MMCLIBuilder: MMListBuilding {
 /// ```
 ///
 /// Declaring ``Contract(_:)``, ``Endpoint(_:)``, ``Output(_:)``, or
-/// ``ProgramStatusReporting(app:)`` twice is a programmer error caught at
+/// ``ProgramStatusReporting(app:_:)`` twice is a programmer error caught at
 /// startup, and so is a second ``Input(_:_:)`` for one command; a repeated
-/// ``Format(_:_:)-(_,(T)->String)`` or ``Status(_:_:)`` type keeps the last
-/// entry.
+/// ``Format(_:_:)-(_,(T)->String)`` type keeps the last entry.
 /// ``withCLI(_:_:)`` and ``MMCLIDefaults`` remain the value-level spelling
 /// underneath.
 @discardableResult
@@ -365,7 +358,6 @@ func assembleParts(
     var version: String?
     var formatters: [MMCLIFormatEntry] = []
     var inputs: [MMCLIInputEntry] = []
-    var statuses: [MMCLIStatusEntry] = []
     for part in parts {
         switch part.kind {
             case .configuration(let value):
@@ -408,14 +400,10 @@ func assembleParts(
                     "MMCLI declares ProgramStatusReporting(...) twice"
                 )
                 defaults.programStatus = programStatus
-            case .status(let entry):
-                statuses.append(entry)
         }
     }
     defaults.formatters = MMCLIFormatters(entries: formatters)
     defaults.inputs = MMCLIInputs(entries: inputs)
-    // Status entries only take effect with ProgramStatusReporting(...).
-    defaults.programStatus = defaults.programStatus.map { $0.adding(statuses) }
 
     // The sugar parts merge onto Configuration(...) when both appear; the
     // same field declared both ways is a programmer error, not an override.

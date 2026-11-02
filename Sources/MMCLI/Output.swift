@@ -51,7 +51,7 @@ public struct MMCLIOutput: Sendable {
     /// contain no non-finite floats) is reported on stderr instead of
     /// producing partial stdout output.
     ///
-    /// With ``ProgramStatusReporting(app:)``, the value's ``Status(_:_:)``
+    /// With ``ProgramStatusReporting(app:_:)``, the value's ``On(_:_:)``
     /// entry reports it to the terminal too.
     public static func emit<T: Encodable>(_ value: T, format: OutputFormat) {
         do {

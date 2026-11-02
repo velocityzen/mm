@@ -1,11 +1,12 @@
+import MMSchema
 import ProgramStatus
 
 /// The tool's [Program Status Protocol](https://github.com/velocityzen/ProgramStatus)
 /// reporting (OSC 7501): the terminal learns whether a command is working,
 /// done, blocked on the user, or failed, and can show it on the tab or notify.
-/// Declared with ``ProgramStatusReporting(app:)`` and ``Status(_:_:)`` entries
-/// in the ``MMCLI(_:)`` block; a tool without it writes nothing to the
-/// terminal.
+/// Declared with ``ProgramStatusReporting(app:_:)`` in the ``MMCLI(_:)``
+/// block, with its ``On(_:_:)`` entries inside; a tool without it writes
+/// nothing to the terminal.
 ///
 /// Reports go to the controlling terminal (`/dev/tty`), so they reach the user
 /// even when stdout and stderr are redirected, and are skipped when there is
@@ -31,22 +32,12 @@ public struct MMCLIProgramStatus: Sendable {
         )
     }
 
-    /// These with `entries` added; an entry for a type already present
-    /// replaces it.
-    func adding(_ entries: [MMCLIStatusEntry]) -> MMCLIProgramStatus {
-        var added = self
-        for entry in entries {
-            added.statuses[entry.key] = entry.report
-        }
-        return added
-    }
-
     /// Sends one report, fitted to the protocol's limits.
     func report(_ report: StatusReport) {
         self.send(Self.fitted(report))
     }
 
-    /// Sends the report `value`'s ``Status(_:_:)`` entry makes of it, if its
+    /// Sends the report `value`'s ``On(_:_:)`` entry makes of it, if its
     /// type has one and the entry returns a report.
     func report<T>(_ value: T) {
         guard let report = self.statuses[ObjectIdentifier(T.self)]?(value) else { return }
@@ -102,7 +93,8 @@ extension MMCLIProgramStatus {
 
 /// Turns on Program Status Protocol reporting for the tool, as `app`: a stable
 /// identifier of 1 to 32 characters of `[A-Za-z0-9_.+-]`, such as the tool's
-/// name. See ``MMCLIProgramStatus``.
+/// name. Its block holds the ``On(_:_:)`` entries, and only there do they
+/// apply; a repeated type keeps the last entry. See ``MMCLIProgramStatus``.
 ///
 /// While a command runs, its record on the terminal is:
 ///
@@ -112,27 +104,45 @@ extension MMCLIProgramStatus {
 ///   a request stream, or `--input -`, read from a terminal stdin;
 /// - `done` when it succeeds, `error` with the line it wrote to stderr when it
 ///   fails, and `idle` when Ctrl-C ended it;
-/// - whatever a ``Status(_:_:)`` entry makes of each value it prints.
+/// - whatever an ``On(_:_:)`` entry makes of each value it prints.
 ///
 /// ```swift
 /// await MMCLI {
 ///     Name("journal")
 ///     Commands([Journal.Command.self])
-///     ProgramStatusReporting(app: "journal")
-///     Status(ChangeEvent.self) { event in .done(event.line, title: event.entity) }
+///     ProgramStatusReporting(app: "journal") {
+///         On(ChangeEvent.self) { event in .done(event.line, title: event.entity) }
+///     }
 /// }
 /// ```
-public func ProgramStatusReporting(app: String) -> MMCLIPart {
-    ProgramStatusReporting(ProgramStatusReporter(app: app))
+public func ProgramStatusReporting(
+    app: String,
+    @MMCLIStatusBuilder _ statuses: () -> [MMCLIStatusEntry] = { [] }
+) -> MMCLIPart {
+    ProgramStatusReporting(ProgramStatusReporter(app: app), statuses)
 }
 
-/// ``ProgramStatusReporting(app:)`` with a reporter of your own, to write
+/// ``ProgramStatusReporting(app:_:)`` with a reporter of your own, to write
 /// somewhere other than the controlling terminal or to end sequences with BEL.
-public func ProgramStatusReporting(_ reporter: ProgramStatusReporter) -> MMCLIPart {
-    MMCLIPart(kind: .programStatus(MMCLIProgramStatus(reporter: reporter)))
+public func ProgramStatusReporting(
+    _ reporter: ProgramStatusReporter,
+    @MMCLIStatusBuilder _ statuses: () -> [MMCLIStatusEntry] = { [] }
+) -> MMCLIPart {
+    MMCLIPart(kind: .programStatus(MMCLIProgramStatus(reporter: reporter, statuses: statuses())))
 }
 
-/// One per-type status rule; see ``Status(_:_:)``.
+/// The ``ProgramStatusReporting(app:_:)`` block: ``On(_:_:)`` entries,
+/// with `if` and `for` like any block.
+@resultBuilder
+public enum MMCLIStatusBuilder: MMListBuilding {
+    public typealias Element = MMCLIStatusEntry
+
+    public static func buildExpression(_ entry: MMCLIStatusEntry) -> [MMCLIStatusEntry] {
+        [entry]
+    }
+}
+
+/// One per-type status rule; see ``On(_:_:)``.
 public struct MMCLIStatusEntry: Sendable {
     let key: ObjectIdentifier
     let report: @Sendable (Any) -> StatusReport?
@@ -142,17 +152,19 @@ public struct MMCLIStatusEntry: Sendable {
 /// each element of a stream, such as an event a server pushes, and each
 /// response. The report replaces the command's record, so the terminal can
 /// notify on every event a `follow` delivers. Return nil to leave the record
-/// as it is. Takes effect with ``ProgramStatusReporting(app:)``.
+/// as it is. Declared inside ``ProgramStatusReporting(app:_:)``.
 ///
 /// A response's report comes after the command's own `done` or `idle`, so it
 /// is the record the command leaves behind.
 ///
 /// ```swift
-/// Status(ChangeEvent.self) { event in
-///     event.line.isEmpty ? nil : .done(event.line, title: event.entity)
+/// ProgramStatusReporting(app: "journal") {
+///     On(ChangeEvent.self) { event in
+///         event.line.isEmpty ? nil : .done(event.line, title: event.entity)
+///     }
 /// }
 /// ```
-public func Status<T: Encodable & Sendable>(
+public func On<T: Encodable & Sendable>(
     _ type: T.Type,
     _ report: @Sendable @escaping (T) -> StatusReport?
 ) -> MMCLIStatusEntry {
@@ -162,13 +174,13 @@ public func Status<T: Encodable & Sendable>(
     )
 }
 
-/// ``Status(_:_:)`` with the type inferred from the closure's parameter:
+/// ``On(_:_:)`` with the type inferred from the closure's parameter:
 ///
 /// ```swift
-/// Status { (event: ChangeEvent) in .done(event.line) }
+/// On { (event: ChangeEvent) in .done(event.line) }
 /// ```
-public func Status<T: Encodable & Sendable>(
+public func On<T: Encodable & Sendable>(
     _ report: @Sendable @escaping (T) -> StatusReport?
 ) -> MMCLIStatusEntry {
-    Status(T.self, report)
+    On(T.self, report)
 }

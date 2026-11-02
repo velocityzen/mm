@@ -33,7 +33,7 @@ import ProgramStatus
 /// pipe turns its lines, read with the other arguments, into appends.
 /// `ProgramStatusReporting` tells the terminal what each command is doing
 /// (OSC 7501): working, done, failed, or waiting for typed lines; the
-/// `Status` entry turns every change `journal follow` receives into a `done`
+/// `On` entry turns every change `journal follow` receives into a `done`
 /// record, so the terminal can notify on each one.
 ///
 /// `journal.notes` is the target **entity** — the noun of the call, and every
@@ -59,10 +59,11 @@ struct MMExampleCLI {
             ])
             Contract(.complete([journalContract]))
             Endpoint(.unix(path: "/tmp/mm-example.sock"))
-            ProgramStatusReporting(app: "mm-example-cli")
-            // Each change a follow or a sync delivers replaces the record, so
-            // a terminal tab running `journal follow` notifies per change.
-            Status(ChangeEvent.self) { event in .done(event.line, title: event.entity) }
+            ProgramStatusReporting(app: "mm-example-cli") {
+                // Each change a follow or a sync delivers replaces the record,
+                // so a terminal tab running `journal follow` notifies per change.
+                On(ChangeEvent.self) { event in .done(event.line, title: event.entity) }
+            }
             // Both spellings: explicit metatype, or the type inferred from
             // the closure parameter.
             Format(ChangeEvent.self) { "\($0.count)\t\($0.line)" }
