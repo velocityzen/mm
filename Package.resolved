@@ -1,5 +1,5 @@
 {
-  "originHash" : "d2fdd813f89bc3f39a46bb43622bba2868d949941624ccba105acc2a673c30fb",
+  "originHash" : "a4e088d7e8af90ac62c51f9e052982159e9e298d4c6aa5cd9ab4da32a6e85260",
   "pins" : [
     {
       "identity" : "fp-swift",
@@ -42,8 +42,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/velocityzen/ProgramStatus.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "ad34760b2d0ba6f8d9069720b55c5249a3c46a84"
+        "revision" : "7c2b321ff5e4a5e6042267c0486e76845a7df125",
+        "version" : "0.4.0"
       }
     },
     {

@@ -28,7 +28,7 @@ let package = Package(
         .package(url: "https://github.com/velocityzen/fp-swift-bracket.git", from: "2.1.0"),
         .package(url: "https://github.com/velocityzen/fp-swift-pipe.git", from: "2.1.0"),
         .package(url: "https://github.com/velocityzen/fp-swift-service.git", branch: "main"),
-        .package(url: "https://github.com/velocityzen/ProgramStatus.git", branch: "main"),
+        .package(url: "https://github.com/velocityzen/ProgramStatus.git", from: "0.4.0"),
     ],
     targets: [
         .target(
