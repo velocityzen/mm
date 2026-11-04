@@ -38,12 +38,7 @@ private let whoAmI = Method<WhoAmIRequest, WhoAmIResponse>(name: "adopt.whoami",
 
 private func makeSocketPair() throws -> (server: CInt, client: CInt) {
     var descriptors: [CInt] = [-1, -1]
-    #if canImport(Darwin)
-    let kind = SOCK_STREAM
-    #else
-    let kind = CInt(SOCK_STREAM.rawValue)
-    #endif
-    guard socketpair(AF_UNIX, kind, 0, &descriptors) == 0 else {
+    guard socketpair(AF_UNIX, streamSocketType, 0, &descriptors) == 0 else {
         throw POSIXFailure(code: errno)
     }
     return (descriptors[0], descriptors[1])

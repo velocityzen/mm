@@ -106,18 +106,24 @@ final class Signal<Value: Sendable>: Sendable {
     }
 }
 
+// MARK: - Sockets
+
+/// `SOCK_STREAM` as a `CInt`. Glibc imports it as the `__socket_type` enum;
+/// Darwin, Musl and Android's Bionic import it as a `CInt` already.
+var streamSocketType: CInt {
+    #if canImport(Glibc)
+    return CInt(bitPattern: SOCK_STREAM.rawValue)
+    #else
+    return SOCK_STREAM
+    #endif
+}
+
 // MARK: - Dead socket files
 
 /// Creates a *dead* socket file: bound once by a socket that is closed without
 /// unlinking, exactly what a crashed server leaves behind.
 func createDeadSocketFile(path: String) throws {
-    #if canImport(Glibc)
-    // Glibc imports SOCK_STREAM as the __socket_type enum, not CInt.
-    let socketType = CInt(bitPattern: SOCK_STREAM.rawValue)
-    #else
-    let socketType = SOCK_STREAM
-    #endif
-    let descriptor = socket(AF_UNIX, socketType, 0)
+    let descriptor = socket(AF_UNIX, streamSocketType, 0)
     guard descriptor >= 0 else {
         throw MMServiceError.io(description: "socket failed, errno \(errno)")
     }
