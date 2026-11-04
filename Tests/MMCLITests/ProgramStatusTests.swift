@@ -366,6 +366,9 @@ struct ProgramStatusDeclarationTests {
         #expect(defaults.programStatus?.statuses.isEmpty == true)
     }
 
+    // Exit tests run their body in a child process; Swift Testing has them
+    // on macOS, Linux and Windows only.
+    #if os(macOS) || os(Linux) || os(Windows)
     @Test("an app outside the protocol's charset is programmer error")
     func invalidApp() async {
         await #expect(processExitsWith: .failure) {
@@ -383,4 +386,5 @@ struct ProgramStatusDeclarationTests {
             }
         }
     }
+    #endif
 }
