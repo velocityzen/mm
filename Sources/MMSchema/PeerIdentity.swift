@@ -26,12 +26,26 @@ public struct PeerIdentity: Sendable, Hashable {
     /// Process id of the peer, for logging and diagnostics only — never an
     /// authorization input.
     public let pid: pid_t
+    /// The host's name for a connection it handed the server itself through
+    /// `MMServiceHandle.adopt` — the child process it spawned on the other end
+    /// of a socketpair, say. The host attests it, so handlers may use it to tell
+    /// adopted peers apart; it never decides ACL checks, which still go by
+    /// uid and gid. `nil` for accepted connections, where the kernel attests
+    /// nothing beyond uid, gid and pid.
+    public let label: String?
 
-    public init(uid: uid_t, gid: gid_t, supplementaryGroups: [gid_t], pid: pid_t) {
+    public init(
+        uid: uid_t,
+        gid: gid_t,
+        supplementaryGroups: [gid_t],
+        pid: pid_t,
+        label: String? = nil
+    ) {
         self.uid = uid
         self.gid = gid
         self.supplementaryGroups = supplementaryGroups
         self.pid = pid
+        self.label = label
     }
 
     /// The identity assigned to peers with no kernel credentials (raw TCP in

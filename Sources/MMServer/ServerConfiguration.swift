@@ -6,8 +6,9 @@ import NIOCore
 /// capped so no peer can grow server memory without limit.
 public struct MMServerConfiguration: Sendable {
     /// Where to listen: one listener per endpoint, all of them one server
-    /// with one router, one connection cap, and one graceful drain. Never
-    /// empty.
+    /// with one router, one connection cap, and one graceful drain. Empty
+    /// only for a service that declares a ``SocketInbox()`` and serves
+    /// adopted sockets alone.
     public var endpoints: [MMEndpoint]
 
     /// Maximum accepted frame payload length in bytes, enforced by
@@ -41,7 +42,15 @@ public struct MMServerConfiguration: Sendable {
     /// complete the hello exchange. Outbound activity counts as liveness on
     /// purpose: a consumer of a server→client stream legitimately sends nothing
     /// while the server pushes items to it, and must not be reaped mid-stream.
-    public var idleTimeout: TimeAmount
+    /// `nil` disables idle reaping: a quiet stream may then stay open for as
+    /// long as the peer holds it, so pair it with ``helloTimeout``.
+    public var idleTimeout: TimeAmount?
+
+    /// How long a connection may take to complete the hello exchange,
+    /// monotonic. A peer that connects and never sends its hello is closed
+    /// when it runs out, whatever ``idleTimeout`` is. `nil` (the default)
+    /// leaves pre-hello reaping to ``idleTimeout``.
+    public var helloTimeout: TimeAmount?
 
     /// File mode `chmod(2)`ed onto each unix socket **between `bind(2)` and
     /// `listen(2)`**, so no connection can ever be accepted under a more
@@ -70,18 +79,19 @@ public struct MMServerConfiguration: Sendable {
     public static let defaultIdleTimeout = TimeAmount.seconds(120)
     public static let defaultUnixSocketMode: UInt16 = 0o660
 
-    /// Listens on every endpoint in `endpoints`, which must not be empty.
+    /// Listens on every endpoint in `endpoints`. The service checks at
+    /// startup that it has endpoints, a ``SocketInbox()``, or both.
     public init(
         endpoints: [MMEndpoint],
         maxFrameLength: UInt32 = MMWireInfo.defaultMaxFrameLength,
         maxConnections: Int = Self.defaultMaxConnections,
         maxInFlightRequestsPerConnection: Int = Self.defaultMaxInFlightRequestsPerConnection,
         maxConcurrentStreamsPerConnection: Int = Self.defaultMaxConcurrentStreamsPerConnection,
-        idleTimeout: TimeAmount = Self.defaultIdleTimeout,
+        idleTimeout: TimeAmount? = Self.defaultIdleTimeout,
+        helloTimeout: TimeAmount? = nil,
         unixSocketMode: UInt16 = Self.defaultUnixSocketMode,
         capabilities: UInt32 = 0
     ) {
-        precondition(!endpoints.isEmpty, "MMServerConfiguration declares no endpoint")
         precondition(maxConnections > 0, "maxConnections must be positive")
         precondition(
             maxInFlightRequestsPerConnection > 0,
@@ -97,6 +107,7 @@ public struct MMServerConfiguration: Sendable {
         self.maxInFlightRequestsPerConnection = maxInFlightRequestsPerConnection
         self.maxConcurrentStreamsPerConnection = maxConcurrentStreamsPerConnection
         self.idleTimeout = idleTimeout
+        self.helloTimeout = helloTimeout
         self.unixSocketMode = unixSocketMode
         self.capabilities = capabilities
     }
@@ -108,7 +119,8 @@ public struct MMServerConfiguration: Sendable {
         maxConnections: Int = Self.defaultMaxConnections,
         maxInFlightRequestsPerConnection: Int = Self.defaultMaxInFlightRequestsPerConnection,
         maxConcurrentStreamsPerConnection: Int = Self.defaultMaxConcurrentStreamsPerConnection,
-        idleTimeout: TimeAmount = Self.defaultIdleTimeout,
+        idleTimeout: TimeAmount? = Self.defaultIdleTimeout,
+        helloTimeout: TimeAmount? = nil,
         unixSocketMode: UInt16 = Self.defaultUnixSocketMode,
         capabilities: UInt32 = 0
     ) {
@@ -119,6 +131,7 @@ public struct MMServerConfiguration: Sendable {
             maxInFlightRequestsPerConnection: maxInFlightRequestsPerConnection,
             maxConcurrentStreamsPerConnection: maxConcurrentStreamsPerConnection,
             idleTimeout: idleTimeout,
+            helloTimeout: helloTimeout,
             unixSocketMode: unixSocketMode,
             capabilities: capabilities
         )

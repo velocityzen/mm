@@ -98,6 +98,25 @@ enum Finder: MethodNamespace {
     }
 }
 
+/// A union field takes a JSON literal; a bytes field takes base64.
+enum Uploads: MethodNamespace {
+    #schema("uploads") {
+        CLI(.enabled)
+        Union("Target") {
+            Case("inbox")
+            Case("folder") { Field("path", .string) }
+        }
+        Call("put") {
+            Access { .write }
+            Request {
+                Field("destination", "Target")
+                Field("data", .bytes)
+                Field("checksum", .optional(.bytes))
+            }
+        }
+    }
+}
+
 /// A description-less namespace: the group abstract falls back to the
 /// template and `namespaceDescription` stays the protocol default.
 enum Petty: MethodNamespace {
@@ -293,6 +312,23 @@ struct GeneratedCommandTests {
         #expect(command.tag == "urgent")
         #expect(command.meta == nil)
         #expect(command.connection.output == .json)
+    }
+
+    @Test("a union field is a JSON option and a bytes field a base64 option")
+    func unionAndBytesOptions() throws {
+        let command = try Uploads.PutCommand.parse([
+            "--socket", "/tmp/uploads.sock",
+            "--destination", #"{"case":"folder","fields":{"path":"/in"}}"#,
+            "--data", "AQI=",
+        ])
+        #expect(command.data == [1, 2])
+        #expect(command.checksum == nil)
+        #expect(command.destination == #"{"case":"folder","fields":{"path":"/in"}}"#)
+        #expect(throws: (any Error).self) {
+            try Uploads.PutCommand.parse([
+                "--socket", "/tmp/uploads.sock", "--destination", "{}", "--data", "not base64!",
+            ])
+        }
     }
 
     @Test("Field default: bare flag means the default, a value overrides, absent is nil")

@@ -21,12 +21,13 @@ The `#schema` macro (see ``schema(_:description:_:)``) takes the same declaratio
 
 - integer-keyed request, response, and element structs
 - string-valued wire enums with an `unknown` fallback
+- tagged unions (`Union`, whose `Case`s carry their own fields), also with an `unknown` fallback
 - the typed descriptors, `all`, and `types`
 - the re-emitted contract
 
 Shared named types live in `#schemaTypes` containers (``schemaTypes(_:_:)``) or in hand-written ``SchemaDescribable`` types.
 
-``TypeSchema`` models wire shapes: structures with integer-keyed fields, string-valued enumerations, and nominal ``TypeDefinition`` references. `TypeSchema.of(_:)` reads the schema of a Swift type with a memoized decoder probe. If the probe cannot handle a type, conform it to ``SchemaDescribable`` instead.
+``TypeSchema`` models wire shapes: structures with integer-keyed fields, string-valued enumerations, tagged unions, raw bytes (``MMBytes``), and nominal ``TypeDefinition`` references. `TypeSchema.of(_:)` reads the schema of a Swift type with a memoized decoder probe. If the probe cannot handle a type, conform it to ``SchemaDescribable`` instead.
 
 Descriptions are documentation only. Discovery serves them, but the fingerprint never includes them. The same applies to the namespace description (`Schema("journal", description: "...")` / `#schema(description:)`). Discovery returns it in the ``NamespaceSignature`` list, and the generated CLI group uses it as its abstract.
 
@@ -90,8 +91,10 @@ Every server also serves the ``Builtins``:
 - ``Types(_:_:)``
 - ``Call(_:description:_:)``
 - ``Enum(_:description:_:)``
+- ``Union(_:description:_:)``
 - ``Type(_:description:_:)``
 - ``Case(_:description:)``
+- ``Case(_:description:_:)``
 - ``Field``
 - ``Fields(_:)``
 - ``StreamOptions``
@@ -150,6 +153,10 @@ Every server also serves the ``Builtins``:
 - ``NamespaceSignature``
 - ``StatRequest``
 - ``StatResponse``
+
+### Bytes
+
+- ``MMBytes``
 
 ### Time
 

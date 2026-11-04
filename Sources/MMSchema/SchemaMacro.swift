@@ -54,8 +54,8 @@
 ///   by discovery and used as the generated command group's abstract.
 ///
 /// The macro consumes the DSL's **static subset**: literal names and keys, no
-/// runtime conditionals, and no `payload:`/`.bytes` shapes (those need
-/// hand-written types with the runtime DSL). Expansion happens at member
+/// runtime conditionals, and no `payload:` shapes (those need hand-written
+/// types with the runtime DSL). `.bytes` fields become ``MMBytes``. Expansion happens at member
 /// scope; `#schema` cannot be used at file scope.
 /// A top-level `CLI(.enabled)` entry marks the schema for CLI generation: one
 /// swift-argument-parser command per non-omitted call plus a namespace
@@ -92,7 +92,9 @@ public macro schema(
 /// Generated members:
 /// - One Swift type per declaration — `Enum` becomes a `String`-raw enum with
 ///   a generated `unknown` case (unrecognized wire values decode to it; the
-///   house wire-enum rule), `Type` becomes a struct like `#schema`'s — both
+///   house wire-enum rule), `Type` becomes a struct like `#schema`'s, and
+///   `Union` becomes an enum with one case per declared `Case`, its fields as
+///   labeled associated values, plus `unknown` — all
 ///   `SchemaDescribable` as `.reference("<namespace>.<Name>")`, which is how
 ///   other schemas' fields carry the reference
 ///   (`Field("meta", CommonTypes.LineMeta.self)`).

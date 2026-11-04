@@ -48,8 +48,9 @@ extension SchemaValue {
     /// Schema-directed canonicalization — validation and interpretation in
     /// one pass. The schema, not the input syntax, decides every kind: a
     /// JSON `3` satisfies `.double` as `3.0` and `.int` as `3`, a `3.5`
-    /// never satisfies `.int`, `.bytes` takes a base64 string, and an
-    /// `.unknown` slot passes through untouched. Missing non-optional
+    /// never satisfies `.int`, `.bytes` takes a base64 string, a union takes
+    /// `{"case": ..., "fields": {...}}`, and an `.unknown` slot passes
+    /// through untouched. Missing non-optional
     /// structure fields, unknown member names, duplicate members, and
     /// out-of-range values all fail with the offending path.
     public func validated(
@@ -158,45 +159,7 @@ extension SchemaValue {
                     }
                     .map { .object($0) }
             case .structure(let fields):
-                guard case .object(let members) = self else {
-                    return self.mismatch(path, expected: "object")
-                }
-                if let duplicate = firstDuplicate(members.map(\.name)) {
-                    return .failure(
-                        SchemaValueError(
-                            path: Self.appending(duplicate, to: path), problem: "duplicate member")
-                    )
-                }
-                if let unknown = members.first(where: { member in
-                    !fields.contains(where: { $0.name == member.name })
-                }) {
-                    return .failure(
-                        SchemaValueError(
-                            path: Self.appending(unknown.name, to: path),
-                            problem: "unknown member (schema declares no such field)"
-                        )
-                    )
-                }
-                let byName = Dictionary(
-                    members.map { ($0.name, $0.value) },
-                    uniquingKeysWith: { first, _ in first }
-                )
-                // Canonical order is schema field order; an absent optional
-                // field simply drops out of the canonical object.
-                return fields
-                    .traverse { field -> Result<Member?, SchemaValueError> in
-                        let fieldPath = Self.appending(field.name, to: path)
-                        guard let provided = byName[field.name] else {
-                            if case .optional = field.type { return .success(nil) }
-                            return .failure(
-                                SchemaValueError(path: fieldPath, problem: "missing required field")
-                            )
-                        }
-                        return provided
-                            .validated(against: field.type, resolver: resolver, path: fieldPath)
-                            .map { canonical in Member(field.name, canonical) }
-                    }
-                    .map { .object($0.compactMap { $0 }) }
+                return self.validatedStructure(fields, resolver: resolver, path: path)
             case .enumeration(let cases):
                 guard case .string(let raw) = self else {
                     return self.mismatch(path, expected: "enum case (string)")
@@ -211,6 +174,8 @@ extension SchemaValue {
                     )
                 }
                 return .success(self)
+            case .union(let cases):
+                return self.validatedUnion(cases, resolver: resolver, path: path)
             case .reference:
                 // Unreachable: resolve(_:) above never returns a reference.
                 return .failure(
@@ -219,6 +184,114 @@ extension SchemaValue {
             case .unknown:
                 return .success(self)
         }
+    }
+
+    /// Validates an object against a structure's fields: no duplicate or
+    /// unknown members, every required field present, members in field order.
+    private func validatedStructure(
+        _ fields: [TypeSchema.Field],
+        resolver: TypeResolver,
+        path: String
+    ) -> Result<SchemaValue, SchemaValueError> {
+        guard case .object(let members) = self else {
+            return self.mismatch(path, expected: "object")
+        }
+        if let duplicate = firstDuplicate(members.map(\.name)) {
+            return .failure(
+                SchemaValueError(
+                    path: Self.appending(duplicate, to: path), problem: "duplicate member")
+            )
+        }
+        if let unknown = members.first(where: { member in
+            !fields.contains(where: { $0.name == member.name })
+        }) {
+            return .failure(
+                SchemaValueError(
+                    path: Self.appending(unknown.name, to: path),
+                    problem: "unknown member (schema declares no such field)"
+                )
+            )
+        }
+        let byName = Dictionary(
+            members.map { ($0.name, $0.value) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        // Canonical order is schema field order; an absent optional
+        // field simply drops out of the canonical object.
+        return fields
+            .traverse { field -> Result<Member?, SchemaValueError> in
+                let fieldPath = Self.appending(field.name, to: path)
+                guard let provided = byName[field.name] else {
+                    if case .optional = field.type { return .success(nil) }
+                    return .failure(
+                        SchemaValueError(path: fieldPath, problem: "missing required field")
+                    )
+                }
+                return provided
+                    .validated(against: field.type, resolver: resolver, path: fieldPath)
+                    .map { canonical in Member(field.name, canonical) }
+            }
+            .map { .object($0.compactMap { $0 }) }
+    }
+
+    /// A union value mirrors its wire map, as a structure's members mirror
+    /// its keys: `case` names the case (key 0), `fields` holds the case's
+    /// fields (key 1) — `{"case": "seq", "fields": {"seq": 5}}`. `fields` may
+    /// be left out when none of the case's fields is required, and is left
+    /// out of the canonical form when the case declares none.
+    private func validatedUnion(
+        _ cases: [TypeSchema.UnionCase],
+        resolver: TypeResolver,
+        path: String
+    ) -> Result<SchemaValue, SchemaValueError> {
+        guard case .object(let members) = self else {
+            return self.mismatch(path, expected: "object with a 'case' member")
+        }
+        if let duplicate = firstDuplicate(members.map(\.name)) {
+            return .failure(
+                SchemaValueError(
+                    path: Self.appending(duplicate, to: path), problem: "duplicate member")
+            )
+        }
+        if let unknown = members.first(where: { $0.name != "case" && $0.name != "fields" }) {
+            return .failure(
+                SchemaValueError(
+                    path: Self.appending(unknown.name, to: path),
+                    problem: "unknown member (a union value has only 'case' and 'fields')"
+                )
+            )
+        }
+        guard let tag = members.first(where: { $0.name == "case" })?.value else {
+            return .failure(
+                SchemaValueError(
+                    path: Self.appending("case", to: path), problem: "missing required field")
+            )
+        }
+        guard case .string(let name) = tag else {
+            return tag.mismatch(Self.appending("case", to: path), expected: "union case (string)")
+        }
+        guard let unionCase = cases.first(where: { $0.name == name }) else {
+            let known = cases.map(\.name).joined(separator: ", ")
+            return .failure(
+                SchemaValueError(
+                    path: Self.appending("case", to: path),
+                    problem: "'\(name)' is not one of: \(known)"
+                )
+            )
+        }
+        let canonicalTag = Member("case", .string(name))
+        let fields = members.first(where: { $0.name == "fields" })?.value ?? .object([])
+        return fields
+            .validatedStructure(
+                unionCase.fields,
+                resolver: resolver,
+                path: Self.appending("fields", to: path)
+            )
+            .map { canonical in
+                unionCase.fields.isEmpty
+                    ? .object([canonicalTag])
+                    : .object([canonicalTag, Member("fields", canonical)])
+            }
     }
 
     private func mismatch(

@@ -21,7 +21,7 @@ let server = MMService {
     }
 }
 
-// BracketAsync<[SocketAddress], MMServiceError>: acquire binds and starts
+// BracketAsync<MMServiceHandle, MMServiceError>: acquire binds and starts
 // accepting, dispose drains and joins. Compose it with your own resources,
 // run it with your lifecycle (here fp-swift-service, SIGTERM/SIGINT to drain).
 let withService = Service(server, shutdownSignals: [SIGTERM, SIGINT])
@@ -56,6 +56,7 @@ The <doc:IntegrationGuide> shows how to embed all of this in a production daemon
 ### The service
 
 - ``MMService``
+- ``MMServiceHandle``
 - ``MMServerConfiguration``
 - ``MMEndpoint``
 - ``MMServiceError``
@@ -72,6 +73,7 @@ The <doc:IntegrationGuide> shows how to embed all of this in a production daemon
 - ``Log(_:)-((Logger.Level,Logger.Message)->Void)``
 - ``For(_:_:)``
 - ``Types(_:)``
+- ``SocketInbox()``
 - ``ProgramStatusReporting(app:)``
 - ``ProgramStatusReporting(_:)``
 

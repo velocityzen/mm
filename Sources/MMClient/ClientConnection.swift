@@ -158,6 +158,12 @@ public actor MMClientConnection {
                     try await bootstrap
                         .channelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
                         .connect(host: host, port: port, channelInitializer: initializer)
+                case .fd(let descriptor):
+                    // No connect: NIO adopts the descriptor as it is.
+                    try await bootstrap.withConnectedSocket(
+                        descriptor,
+                        channelInitializer: initializer
+                    )
             }
         }
         .mapError { MMClientError.transport(description: String(describing: $0)) }

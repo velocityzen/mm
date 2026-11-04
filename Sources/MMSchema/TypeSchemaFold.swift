@@ -10,6 +10,8 @@ extension TypeSchema {
         case map(key: Result, value: Result)
         case structure([(field: Field, value: Result)])
         case enumeration([EnumCase])
+        /// Each case with its fields' folded results.
+        case union([(unionCase: UnionCase, fields: [(field: Field, value: Result)])])
         /// A `.reference` that could not be followed — missing definition, a
         /// definition chain that loops, or a structure recursing into itself.
         /// The transform decides whether that degrades or fails.
@@ -66,17 +68,21 @@ extension TypeSchema {
                 )
             case .structure(let fields):
                 return try transform(
-                    .structure(
-                        try fields.map { field in
+                    .structure(try Self.foldFields(fields, resolver, inFlight, transform))
+                )
+            case .enumeration(let cases):
+                return try transform(.enumeration(cases))
+            case .union(let cases):
+                return try transform(
+                    .union(
+                        try cases.map { unionCase in
                             (
-                                field,
-                                try field.type.foldImplementation(resolver, inFlight, transform)
+                                unionCase,
+                                try Self.foldFields(unionCase.fields, resolver, inFlight, transform)
                             )
                         }
                     )
                 )
-            case .enumeration(let cases):
-                return try transform(.enumeration(cases))
             case .reference(let name):
                 guard !inFlight.contains(name) else {
                     return try transform(.unresolvedReference(.cycle(name)))
@@ -91,6 +97,17 @@ extension TypeSchema {
                 )
             case .unknown:
                 return try transform(.unknown)
+        }
+    }
+
+    private static func foldFields<Result>(
+        _ fields: [Field],
+        _ resolver: TypeResolver,
+        _ inFlight: Set<String>,
+        _ transform: (FoldStep<Result>) throws -> Result
+    ) rethrows -> [(field: Field, value: Result)] {
+        try fields.map { field in
+            (field, try field.type.foldImplementation(resolver, inFlight, transform))
         }
     }
 }

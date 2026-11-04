@@ -55,7 +55,8 @@ struct MMCLIDynamicCodingKey: CodingKey {
 /// offending field path. `encode(to:)` is then a value-directed walk over the
 /// canonical value zipped with the schema: kinds are already exact, so every
 /// case is a plain pattern match — nil/absent optionals skipped, enums as
-/// their case-name string, bytes as a MessagePack `bin` via the codec's
+/// their case-name string, unions as their case tag plus the case's fields,
+/// bytes as a MessagePack `bin` via the codec's
 /// `ByteBuffer` fast path, integer-keyed containers via
 /// `MMCLIDynamicCodingKey`.
 public struct MMCLIDynamicRequest: Codable, Sendable {
@@ -64,7 +65,9 @@ public struct MMCLIDynamicRequest: Codable, Sendable {
     let resolver: TypeResolver
 
     public init(
-        schema: TypeSchema, definitions: [TypeDefinition], json: MMCLIDynamicTree
+        schema: TypeSchema,
+        definitions: [TypeDefinition],
+        json: MMCLIDynamicTree
     ) throws {
         let resolver = TypeResolver(definitions)
         let resolved = try resolver.resolve(schema).mapError(Self.validationError(for:)).get()
@@ -116,29 +119,44 @@ public struct MMCLIDynamicRequest: Codable, Sendable {
     /// cases silently return: `validated` already guaranteed the zip lines
     /// up, so they are unreachable.
     private static func rejectUnknownSlots(
-        _ value: SchemaValue, schema: TypeSchema, resolver: TypeResolver, path: String
+        _ value: SchemaValue,
+        schema: TypeSchema,
+        resolver: TypeResolver,
+        path: String
     ) throws {
         guard case .success(let resolved) = resolver.resolve(schema) else { return }
         switch resolved {
             case .unknown:
                 throw ValidationError(
-                    "\(path): the server's schema for this field is unknown; cannot encode it")
+                    "\(path): the server's schema for this field is unknown; cannot encode it"
+                )
+
             case .optional(let wrapped):
                 if case .null = value { return }
                 try Self.rejectUnknownSlots(value, schema: wrapped, resolver: resolver, path: path)
+
             case .array(let element):
                 guard case .array(let items) = value else { return }
                 for (index, item) in items.enumerated() {
                     try Self.rejectUnknownSlots(
-                        item, schema: element, resolver: resolver, path: "\(path)[\(index)]")
+                        item,
+                        schema: element,
+                        resolver: resolver,
+                        path: "\(path)[\(index)]"
+                    )
                 }
+
             case .map(_, let valueSchema):
                 guard case .object(let members) = value else { return }
                 for member in members {
                     try Self.rejectUnknownSlots(
-                        member.value, schema: valueSchema, resolver: resolver,
-                        path: "\(path).\(member.name)")
+                        member.value,
+                        schema: valueSchema,
+                        resolver: resolver,
+                        path: "\(path).\(member.name)"
+                    )
                 }
+
             case .structure(let fields):
                 guard case .object(let members) = value else { return }
                 for member in members {
@@ -146,9 +164,29 @@ public struct MMCLIDynamicRequest: Codable, Sendable {
                         continue
                     }
                     try Self.rejectUnknownSlots(
-                        member.value, schema: field.type, resolver: resolver,
-                        path: "\(path).\(member.name)")
+                        member.value,
+                        schema: field.type,
+                        resolver: resolver,
+                        path: "\(path).\(member.name)"
+                    )
                 }
+
+            case .union(let cases):
+                guard case .object(let members) = value,
+                    case .string(let name)? = members.first(where: { $0.name == "case" })?.value,
+                    let unionCase = cases.first(where: { $0.name == name }),
+                    let fields = members.first(where: { $0.name == "fields" })?.value
+                else {
+                    return
+                }
+
+                try Self.rejectUnknownSlots(
+                    fields,
+                    schema: .structure(fields: unionCase.fields),
+                    resolver: resolver,
+                    path: "\(path).fields"
+                )
+
             default:
                 return
         }
@@ -168,6 +206,7 @@ public struct MMCLIDynamicRequest: Codable, Sendable {
             case .map: return "map"
             case .structure: return "structure"
             case .enumeration: return "enumeration"
+            case .union: return "union"
             case .date: return "date"
             case .datetime: return "datetime"
             case .timestamp: return "timestamp"
@@ -199,7 +238,9 @@ private struct DynamicRequestNode: Encodable {
                     return
                 }
                 try DynamicRequestNode(
-                    schema: wrapped, value: self.value, resolver: self.resolver
+                    schema: wrapped,
+                    value: self.value,
+                    resolver: self.resolver
                 ).encode(to: encoder)
             case .bool:
                 guard case .bool(let flag) = self.value else {
@@ -288,7 +329,10 @@ private struct DynamicRequestNode: Encodable {
                     }
                     try container.encode(
                         DynamicRequestNode(
-                            schema: field.type, value: member.value, resolver: self.resolver),
+                            schema: field.type,
+                            value: member.value,
+                            resolver: self.resolver
+                        ),
                         forKey: MMCLIDynamicCodingKey(field: field.key, name: field.name)
                     )
                 }
@@ -299,7 +343,8 @@ private struct DynamicRequestNode: Encodable {
                 var container = encoder.unkeyedContainer()
                 for item in items {
                     try container.encode(
-                        DynamicRequestNode(schema: element, value: item, resolver: self.resolver))
+                        DynamicRequestNode(schema: element, value: item, resolver: self.resolver)
+                    )
                 }
             case .map(let keySchema, let valueSchema):
                 guard case .object(let members) = self.value else {
@@ -328,8 +373,31 @@ private struct DynamicRequestNode: Encodable {
                     }
                     try container.encode(
                         DynamicRequestNode(
-                            schema: valueSchema, value: member.value, resolver: self.resolver),
+                            schema: valueSchema,
+                            value: member.value,
+                            resolver: self.resolver
+                        ),
                         forKey: key
+                    )
+                }
+            case .union(let cases):
+                // Canonical: `case`, then `fields` exactly when the case has some.
+                guard case .object(let members) = self.value,
+                    case .string(let name)? = members.first(where: { $0.name == "case" })?.value,
+                    let unionCase = cases.first(where: { $0.name == name })
+                else {
+                    throw self.invalid(encoder, expected: "a union case")
+                }
+                var container = encoder.container(keyedBy: MMCLIDynamicCodingKey.self)
+                try container.encode(name, forKey: MMCLIDynamicCodingKey(field: 0, name: "case"))
+                if let fields = members.first(where: { $0.name == "fields" })?.value {
+                    try container.encode(
+                        DynamicRequestNode(
+                            schema: .structure(fields: unionCase.fields),
+                            value: fields,
+                            resolver: self.resolver
+                        ),
+                        forKey: MMCLIDynamicCodingKey(field: 1, name: "fields")
                     )
                 }
             case .unknown, .reference:

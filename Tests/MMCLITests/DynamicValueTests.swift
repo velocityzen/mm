@@ -578,3 +578,89 @@ struct DynamicJSONRenderTests {
                 == normalized(tree))
     }
 }
+
+// MARK: - Unions
+
+/// A generated union beside the dynamic coders: the dynamic side must write
+/// the bytes the generated type writes, and read what it writes.
+private enum Feed: MethodNamespace {
+    #schema("feed") {
+        Union("Cursor") {
+            Case("live")
+            Case("seq") {
+                Field("seq", .uint)
+                Field("note", .optional(.string))
+            }
+        }
+        Call("tail") {
+            Access { .read }
+            Request {
+                Field("from", "Cursor")
+                Field("token", .bytes)
+            }
+        }
+    }
+}
+
+@Suite("Dynamic coders: unions")
+struct DynamicUnionTests {
+    private func request(_ jsonText: String) throws -> MMCLIDynamicRequest {
+        try MMCLIDynamicRequest(
+            schema: try Feed.tail.signature().get().request,
+            definitions: Feed.types,
+            json: MMCLIDynamicTree.parse(jsonText: jsonText)
+        )
+    }
+
+    @Test("a union request writes the generated type's bytes")
+    func encoding() throws {
+        let cases: [(String, Feed.TailRequest)] = [
+            (#"{"from":{"case":"live"},"token":"AQI="}"#, .init(from: .live, token: [1, 2])),
+            (
+                #"{"from":{"case":"seq","fields":{"seq":9}},"token":""}"#,
+                .init(from: .seq(seq: 9, note: nil), token: [])
+            ),
+            (
+                #"{"from":{"case":"seq","fields":{"seq":9,"note":"n"}},"token":""}"#,
+                .init(from: .seq(seq: 9, note: "n"), token: [])
+            ),
+        ]
+        for (json, expected) in cases {
+            let dynamic = try MMPackEncoder().encode(try request(json)).get()
+            #expect(dynamic == (try MMPackEncoder().encode(expected).get()), "\(json)")
+        }
+    }
+
+    @Test("a union value with a bad case or missing fields is a usage error")
+    func validation() {
+        for json in [
+            #"{"from":{"case":"rewind"},"token":""}"#,
+            #"{"from":{"case":"seq"},"token":""}"#,
+            #"{"from":"live","token":""}"#,
+        ] {
+            #expect(throws: ValidationError.self, "\(json)") { try request(json) }
+        }
+    }
+
+    @Test("a union response decodes into case and fields, and renders as JSON")
+    func decoding() throws {
+        let schema = try Feed.tail.signature().get().request
+        for (value, expected) in [
+            (
+                Feed.TailRequest(from: .seq(seq: 3, note: "n"), token: [255]),
+                #"{"from":{"case":"seq","fields":{"seq":3,"note":"n"}},"token":"/w=="}"#
+            ),
+            (Feed.TailRequest(from: .live, token: []), #"{"from":{"case":"live"},"token":""}"#),
+            (
+                Feed.TailRequest(from: .unknown, token: []),
+                #"{"from":{"case":"unknown"},"token":""}"#
+            ),
+        ] {
+            let bytes = try MMPackEncoder().encode(value).get()
+            let response = try MMCLIDynamicResponse.$schema.withValue((schema, Feed.types)) {
+                try MMPackDecoder().decode(MMCLIDynamicResponse.self, from: bytes).get()
+            }
+            #expect(MMCLIDynamicJSONText(response.tree, pretty: false) == expected)
+        }
+    }
+}

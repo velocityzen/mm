@@ -87,6 +87,22 @@ private enum Catalog: MethodNamespace {
                 Field("name", .string)
                 Field("since", .optional(.date))
             }
+            Field("photo", .bytes)
+            Field("thumbnail", .optional(.bytes))
+        }
+        Union("Shipment") {
+            Case("pending")
+            Case("shipped") {
+                Field("carrier", .string)
+                Field(3, "tracking", .optional(.bytes))
+                Field("condition", "Condition")
+            }
+            Case("split") {
+                Field("parts", .array(.reference("Shipment")))
+                Field("box") {
+                    Field("label", .string)
+                }
+            }
         }
         Call("put") {
             Access { .write }
@@ -94,6 +110,7 @@ private enum Catalog: MethodNamespace {
                 Field("items", .array(.reference("Item")))
                 Field("conditions", .array(.optional(.reference("Condition"))))
                 Field("flag", .optional(.optional(.bool)))
+                Field("shipments", .optional(.array(.reference("Shipment"))))
             }
         }
         Call("relay") {
@@ -226,8 +243,34 @@ private struct Samples {
             owner: Catalog.Item.Owner(
                 name: self.string(),
                 since: self.optional { _ in released[0] }
-            )
+            ),
+            photo: self.bytes(),
+            thumbnail: self.optional { $0.bytes() }
         )
+    }
+
+    mutating func bytes() -> MMBytes {
+        let lengths = [0, 1, 31, 255, 256]
+        let length = lengths.randomElement(using: &self.random)!
+        return MMBytes((0..<length).map { _ in UInt8.random(in: 0...255, using: &self.random) })
+    }
+
+    mutating func shipment(depth: Int = 0) -> Catalog.Shipment {
+        switch Int.random(in: 0..<(depth < 2 ? 3 : 2), using: &self.random) {
+            case 0:
+                return .pending
+            case 1:
+                return .shipped(
+                    carrier: self.string(),
+                    tracking: self.optional { $0.bytes() },
+                    condition: self.chance() ? .new : .used
+                )
+            default:
+                return .split(
+                    parts: self.array(upTo: 3) { $0.shipment(depth: depth + 1) },
+                    box: .init(label: self.string())
+                )
+        }
     }
 
     mutating func putRequest() -> Catalog.PutRequest {
@@ -236,7 +279,8 @@ private struct Samples {
             conditions: self.array(upTo: 17) { samples in
                 samples.optional { $0.chance() ? .new : .used }
             },
-            flag: self.optional { samples in samples.optional { $0.chance() } }
+            flag: self.optional { samples in samples.optional { $0.chance() } },
+            shipments: self.optional { samples in samples.array(upTo: 17) { $0.shipment() } }
         )
     }
 }
@@ -422,6 +466,80 @@ struct GeneratedCodingTests {
             decodedThroughGeneratedCode(Catalog.PutRequest.self, from: payloads[1]).mpSuccess?.flag
                 == .some(.some(true))
         )
+    }
+
+    @Test("unions: tag before fields, keys by integer or name, unknown cases decode to unknown")
+    func unionRules() {
+        #expect(
+            encodedThroughGeneratedCode(Catalog.Shipment.pending)
+                == .success(mpBytes("8100a770656e64696e67"))
+        )
+        #expect(
+            encodedThroughGeneratedCode(Catalog.Shipment.unknown)
+                == .success(mpBytes("8100a7756e6b6e6f776e"))
+        )
+        #expect(
+            encodedThroughGeneratedCode(Catalog.Shipment.split(parts: [], box: .init(label: "")))
+                == .success(mpBytes("8200a573706c6974018200900181" + "00a0"))
+        )
+        let payloads = [
+            // {0: "pending"}, and by name: {"case": "pending"}.
+            "8100a770656e64696e67",
+            "81a463617365a770656e64696e67",
+            // A field-less case ignores a fields map.
+            "8200a770656e64696e670180",
+            // {0: "returned"}: an unrecognized case decodes to unknown.
+            "8100a872657475726e6564",
+            // {0: "shipped", 1: {0: "ups", 1: "new"}}, then by name, then with
+            // the optional present, then the first occurrence of the tag wins.
+            "8200a77368697070656401820" + "0a3757073" + "01a36e6577",
+            "82a463617365a773686970706564a66669656c647382" + "00a3757073" + "01a36e6577",
+            "8200a77368697070656401830" + "0a3757073" + "01a36e6577" + "03c40101",
+            "8300a77368697070656400a770656e64696e670182" + "00a3757073" + "01a36e6577",
+            // A case with fields and no fields map; a fields map of the wrong
+            // type; a field of the wrong type; a missing tag; a non-string tag.
+            "8100a773686970706564",
+            "8200a77368697070656401c3",
+            "8200a77368697070656401820005" + "01a36e6577",
+            "8101" + "80",
+            "810005",
+            "c3",
+        ].map(mpBytes)
+        for payload in payloads {
+            #expect(
+                decodedThroughGeneratedCode(Catalog.Shipment.self, from: payload)
+                    == decodedThroughCodable(Catalog.Shipment.self, from: payload),
+                "\(mpHex(payload))"
+            )
+        }
+        #expect(
+            decodedThroughGeneratedCode(Catalog.Shipment.self, from: payloads[1])
+                == .success(.pending)
+        )
+        #expect(
+            decodedThroughGeneratedCode(Catalog.Shipment.self, from: payloads[3])
+                == .success(.unknown)
+        )
+        #expect(
+            decodedThroughGeneratedCode(Catalog.Shipment.self, from: payloads[6])
+                == .success(.shipped(carrier: "ups", tracking: [1], condition: .new))
+        )
+        #expect(
+            decodedThroughGeneratedCode(Catalog.Shipment.self, from: payloads[8])
+                == .failure(.keyNotFound(key: "1"))
+        )
+    }
+
+    @Test("bytes: a bin on the wire; a str reads as its UTF-8 bytes")
+    func bytesWire() {
+        #expect(MMPackEncoder().encode(MMBytes([1, 2])) == .success(mpBytes("c4020102")))
+        #expect(
+            MMPackDecoder().decode(MMBytes.self, from: mpBytes("c4020102")) == .success([1, 2])
+        )
+        #expect(
+            MMPackDecoder().decode(MMBytes.self, from: mpBytes("a26869")) == .success([0x68, 0x69])
+        )
+        #expect(MMPackDecoder().decode(MMBytes.self, from: mpBytes("05")).mpFailure != nil)
     }
 
     @Test("a struct with no fields steps over one value")

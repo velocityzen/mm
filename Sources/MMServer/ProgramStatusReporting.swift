@@ -88,7 +88,13 @@ extension ServerProgramStatus {
                 // An ephemeral port (0) is reported as the one bound.
                 case .tcp(let host, let port):
                     "\(host):\(address.port ?? port)"
+                // Refused at bind; never reaches a started server.
+                case .fd(let descriptor):
+                    "fd \(descriptor)"
             }
+        }
+        guard !described.isEmpty else {
+            return .idle("Serving adopted sockets")
         }
         return .idle("Listening on \(described.joined(separator: ", "))")
     }

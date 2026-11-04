@@ -32,8 +32,8 @@ import NIOPosix
 /// declared) — the builder equivalent of the `namespaces:` parameter.
 ///
 /// Exactly one `Configuration` and exactly one `ACLProvider` are required;
-/// `Log` and ``ProgramStatusReporting(app:)`` are optional (at most one
-/// each). Violations are programmer error and fail at daemon startup, per
+/// `Log`, ``SocketInbox()`` and ``ProgramStatusReporting(app:)`` are
+/// optional (at most one each). Violations are programmer error and fail at daemon startup, per
 /// the router's precondition discipline.
 public struct ServerPart {
     enum Kind {
@@ -44,6 +44,7 @@ public struct ServerPart {
         case routes([Route])
         case sharedTypes(any TypeNamespace.Type)
         case programStatus(ServerProgramStatus)
+        case socketInbox
     }
 
     let kind: Kind
@@ -57,7 +58,7 @@ public func Configuration(_ configuration: MMServerConfiguration) -> ServerPart 
     ServerPart(kind: .configuration(configuration))
 }
 
-/// Mirrors ``MMServerConfiguration/init(endpoints:maxFrameLength:maxConnections:maxInFlightRequestsPerConnection:maxConcurrentStreamsPerConnection:idleTimeout:unixSocketMode:capabilities:)``.
+/// Mirrors ``MMServerConfiguration/init(endpoints:maxFrameLength:maxConnections:maxInFlightRequestsPerConnection:maxConcurrentStreamsPerConnection:idleTimeout:helloTimeout:unixSocketMode:capabilities:)``.
 public func Configuration(
     endpoints: [MMEndpoint],
     maxFrameLength: UInt32 = MMWireInfo.defaultMaxFrameLength,
@@ -66,7 +67,8 @@ public func Configuration(
         MMServerConfiguration.defaultMaxInFlightRequestsPerConnection,
     maxConcurrentStreamsPerConnection: Int =
         MMServerConfiguration.defaultMaxConcurrentStreamsPerConnection,
-    idleTimeout: TimeAmount = MMServerConfiguration.defaultIdleTimeout,
+    idleTimeout: TimeAmount? = MMServerConfiguration.defaultIdleTimeout,
+    helloTimeout: TimeAmount? = nil,
     unixSocketMode: UInt16 = MMServerConfiguration.defaultUnixSocketMode,
     capabilities: UInt32 = 0
 ) -> ServerPart {
@@ -79,12 +81,13 @@ public func Configuration(
                 maxInFlightRequestsPerConnection: maxInFlightRequestsPerConnection,
                 maxConcurrentStreamsPerConnection: maxConcurrentStreamsPerConnection,
                 idleTimeout: idleTimeout,
+                helloTimeout: helloTimeout,
                 unixSocketMode: unixSocketMode,
                 capabilities: capabilities
             )))
 }
 
-/// Mirrors ``MMServerConfiguration/init(endpoint:maxFrameLength:maxConnections:maxInFlightRequestsPerConnection:maxConcurrentStreamsPerConnection:idleTimeout:unixSocketMode:capabilities:)``.
+/// Mirrors ``MMServerConfiguration/init(endpoint:maxFrameLength:maxConnections:maxInFlightRequestsPerConnection:maxConcurrentStreamsPerConnection:idleTimeout:helloTimeout:unixSocketMode:capabilities:)``.
 public func Configuration(
     endpoint: MMEndpoint,
     maxFrameLength: UInt32 = MMWireInfo.defaultMaxFrameLength,
@@ -93,7 +96,8 @@ public func Configuration(
         MMServerConfiguration.defaultMaxInFlightRequestsPerConnection,
     maxConcurrentStreamsPerConnection: Int =
         MMServerConfiguration.defaultMaxConcurrentStreamsPerConnection,
-    idleTimeout: TimeAmount = MMServerConfiguration.defaultIdleTimeout,
+    idleTimeout: TimeAmount? = MMServerConfiguration.defaultIdleTimeout,
+    helloTimeout: TimeAmount? = nil,
     unixSocketMode: UInt16 = MMServerConfiguration.defaultUnixSocketMode,
     capabilities: UInt32 = 0
 ) -> ServerPart {
@@ -104,6 +108,7 @@ public func Configuration(
         maxInFlightRequestsPerConnection: maxInFlightRequestsPerConnection,
         maxConcurrentStreamsPerConnection: maxConcurrentStreamsPerConnection,
         idleTimeout: idleTimeout,
+        helloTimeout: helloTimeout,
         unixSocketMode: unixSocketMode,
         capabilities: capabilities
     )
@@ -114,6 +119,15 @@ public func Configuration(
 /// security decision, never something a library should assume.
 public func ACLProvider(_ provider: any EntityACLProvider) -> ServerPart {
     ServerPart(kind: .aclProvider(provider))
+}
+
+/// Lets the running service serve connected sockets the host made itself,
+/// handed over with ``MMServiceHandle/adopt(descriptor:peer:)`` —
+/// alongside the configured endpoints, or instead of them with
+/// `Configuration(endpoints: [])`. Optional, at most once. Adopted
+/// connections share the endpoints' router, connection cap and drain.
+public func SocketInbox() -> ServerPart {
+    ServerPart(kind: .socketInbox)
 }
 
 /// The server's logger. Optional; defaults to `Logger(label: "mm.server")`.
@@ -272,7 +286,7 @@ public enum ServerBuilder: MMListBuilding {
     }
 }
 
-extension BracketAsync where R == [SocketAddress], E == MMServiceError {
+extension BracketAsync where R == MMServiceHandle, E == MMServiceError {
     /// Declares a server from declarative parts. See ``ServerPart`` for the
     /// element inventory and the exactly-once rules.
     public init(
@@ -301,6 +315,7 @@ extension ServerRuntime {
         var seenSharedTypes: Set<ObjectIdentifier> = []
         var routes: [Route] = []
         var programStatus: ServerProgramStatus?
+        var adoptsSockets = false
         for part in content() {
             switch part.kind {
                 case .configuration(let value):
@@ -333,6 +348,9 @@ extension ServerRuntime {
                         "MMService declares ProgramStatusReporting twice"
                     )
                     programStatus = value
+                case .socketInbox:
+                    precondition(!adoptsSockets, "MMService declares SocketInbox twice")
+                    adoptsSockets = true
             }
         }
         guard let configuration else {
@@ -352,6 +370,7 @@ extension ServerRuntime {
             threadPool: threadPool,
             logger: logger ?? Logger(label: "mm.server"),
             programStatus: programStatus,
+            adoptsSockets: adoptsSockets,
             routes: { routes }
         )
     }

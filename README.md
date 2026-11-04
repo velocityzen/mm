@@ -122,7 +122,7 @@ let server = MMService {
     }
 }
 
-// server is a BracketAsync<[SocketAddress], MMServiceError>: acquire binds and
+// server is a BracketAsync<MMServiceHandle, MMServiceError>: acquire binds and
 // starts accepting, dispose drains in-flight calls and removes the socket.
 // fp-swift-service runs it: the first SIGTERM or SIGINT drains, a second
 // cancels the drain.
@@ -135,7 +135,31 @@ let daemon = Service(
 let result = await daemon()
 ```
 
-Because the server is a bracket, it composes with the rest of your daemon. With `BracketAsyncDo`, resources start in order and stop in reverse. A resource bound after the server starts only once the socket accepts connections, and stops before the server drains. The bracket's resource is the bound addresses, one per endpoint, such as the port of a `.tcp(host:port: 0)` endpoint. One server can listen on several endpoints at once: `Configuration(endpoints: [.unix(path: socketPath), .tcp(host: "127.0.0.1", port: 7000)])` serves both with one router, one connection cap and one drain.
+Because the server is a bracket, it composes with the rest of your daemon. With `BracketAsyncDo`, resources start in order and stop in reverse. A resource bound after the server starts only once the socket accepts connections, and stops before the server drains. The bracket's resource is the running server, an `MMServiceHandle`: its `addresses` are the bound addresses, one per endpoint, such as the port of a `.tcp(host:port: 0)` endpoint. One server can listen on several endpoints at once: `Configuration(endpoints: [.unix(path: socketPath), .tcp(host: "127.0.0.1", port: 7000)])` serves both with one router, one connection cap and one drain.
+
+#### Connections you already hold
+
+A server can also serve sockets it never accepted — the parent end of a `socketpair` handed to a child process, say. Declare `SocketInbox()` (with or without endpoints), then, while the server runs, hand each connected descriptor to the running server with the identity *you* attest for it. The server owns the descriptor from then on, and closes it if the adoption fails:
+
+```swift
+let server = MMService {
+    Configuration(endpoints: [], idleTimeout: nil, helloTimeout: .seconds(5))
+    ACLProvider(provider)
+    SocketInbox()
+    // For { ... } as above
+}
+
+await server { running in
+    // per spawned child, any time while serving:
+    let identity = PeerIdentity(uid: getuid(), gid: getgid(), supplementaryGroups: [], pid: childPID, label: "worker#\(childPID)")
+    let adopted = await running.adopt(descriptor: parentEnd, peer: identity)
+    ...
+}
+```
+
+Handlers see the attested identity on `context.peer`, including its free-form `label`. On the other side, the child connects over the inherited descriptor with `MMClient(endpoint: .fd(3))`.
+
+`helloTimeout` reaps a connection that never completes the hello, independently of `idleTimeout`; set `idleTimeout: nil` for peers that may legitimately sit quiet on a long stream.
 
 You can also put handlers in reusable `RouteGroup` types (with their own files and dependencies) and add them to the `For` block. Every server registers two builtins: `server.schema` (discovery, filtered by the caller's traversal rights) and `server.entity` (an entity's ACL record).
 

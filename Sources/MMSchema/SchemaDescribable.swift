@@ -21,3 +21,19 @@ public protocol SchemaDescribable {
     /// The wire shape this type encodes as.
     static var schema: TypeSchema { get }
 }
+
+/// A ``SchemaDescribable`` type that also hands the probe a placeholder value.
+///
+/// The probe builds every field of a *containing* struct by decoding zero
+/// values. A self-described type whose decoder validates (a parsed identifier,
+/// a tagged union) rejects those, which fails the containing type with
+/// ``SchemaError/unconstructibleType(_:)``. Conforming types supply a valid
+/// instance instead; the probe uses it only to keep walking, never on the wire.
+public protocol SchemaPlaceholderProviding: SchemaDescribable {
+    /// Any valid instance.
+    static var schemaPlaceholder: Self { get }
+}
+
+extension SchemaPlaceholderProviding {
+    static var _schemaPlaceholderAny: Any { schemaPlaceholder }
+}

@@ -842,8 +842,8 @@ func withRunningServer<T: Sendable>(
 func runServerUntilDrained(_ server: TestServer, drain: Signal<Void>) async throws {
     let result = try await withDeadline(seconds: 60) {
         let withServer = server.service.start()
-        return await withServer { addresses in
-            server.bound.fire(addresses)
+        return await withServer { running in
+            server.bound.fire(running.addresses)
             // Signal.wait observes cancellation: a failing test that never
             // fires `drain` cancels this, and dispose then tears down.
             _ = try? await drain.wait()
@@ -862,8 +862,8 @@ func runServerUntilCancelled(_ server: TestServer, stop: Signal<Void>) async {
         await withThrowingTaskGroup(of: Void.self) { serverGroup in
             serverGroup.addTask {
                 let withServer = server.service.start()
-                _ = await withServer { addresses in
-                    server.bound.fire(addresses)
+                _ = await withServer { running in
+                    server.bound.fire(running.addresses)
                     // Parks until the group cancels it (Signal.wait observes
                     // cancellation), so dispose runs cancelled.
                     _ = try? await Signal<Void>().wait()

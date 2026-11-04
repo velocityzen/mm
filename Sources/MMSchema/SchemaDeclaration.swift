@@ -63,8 +63,8 @@ public struct SchemaDeclaration: Sendable, Hashable {
     /// in declaration order.
     public let signatures: [MethodSignature]
     /// The named types the block declares (``Enum(_:description:_:)`` /
-    /// ``Type(_:description:_:)``), qualified names included, in declaration
-    /// order.
+    /// ``Union(_:description:_:)`` / ``Type(_:description:_:)``), qualified
+    /// names included, in declaration order.
     public let types: [TypeDefinition]
 
     public init(
@@ -240,8 +240,14 @@ public struct SchemaDeclaration: Sendable, Hashable {
         if behavior == declared { return true }
         guard case .reference(let name) = declared else { return false }
         guard let definition = definitions[name] else { return true }
-        if case .enumeration = definition { return behavior == .string }
-        return behavior == definition
+        switch definition {
+            case .enumeration: return behavior == .string
+            // A union's decoder reads the case's fields only for the case it
+            // finds, so its behavior is unknowable; the described check
+            // carries it.
+            case .union: return true
+            default: return behavior == definition
+        }
     }
 
     /// Compares one payload slot: decoder behavior against the contract first
@@ -366,6 +372,9 @@ private func probeMismatch(
         case .failure:
             return ["\(declared.name): type probe failed"]
         case .success(let probed):
+            // A union's decoder is data-dependent: the probe sees only the
+            // tag, never a case's fields.
+            if case .union = declared.schema { return [] }
             let expected: TypeSchema =
                 if case .enumeration = declared.schema { .string } else { declared.schema }
             // .unknown = unknowable behavior (empty structs); the
@@ -402,13 +411,15 @@ public struct MethodDeclaration: Sendable, Hashable {
     public let cli: CLIOverlay?
 }
 
-/// One declared named type, produced by ``Enum(_:description:_:)`` or
-/// ``Type(_:description:_:)`` inside a ``Schema(_:_:)`` or ``Types(_:_:)``
-/// block. The enclosing block qualifies the name with its namespace.
+/// One declared named type, produced by ``Enum(_:description:_:)``,
+/// ``Union(_:description:_:)`` or ``Type(_:description:_:)`` inside a
+/// ``Schema(_:_:)`` or ``Types(_:_:)`` block. The enclosing block qualifies
+/// the name with its namespace.
 public struct TypeDeclaration: Sendable, Hashable {
     enum Payload: Sendable, Hashable {
         case structure([Field])
         case enumeration([EnumCaseDeclaration])
+        case union([UnionCaseDeclaration])
     }
 
     let name: String
@@ -464,6 +475,76 @@ public func Enum(
         name: validTypeName(name),
         description: description,
         payload: .enumeration(caseList)
+    )
+}
+
+/// One declared case of a ``Union(_:description:_:)``: its name (the wire
+/// tag) and its own fields, keyed from 0 independently of the other cases.
+public struct UnionCaseDeclaration: Sendable, Hashable {
+    let name: String
+    let description: String?
+    let fields: [Field]
+}
+
+/// Declares a union case carrying fields:
+/// `Case("seq") { Field("seq", .uint) }`. A field-less case is a plain
+/// `Case("live")`.
+public func Case(
+    _ name: String,
+    description: String? = nil,
+    @SchemaFieldsBuilder _ fields: () -> [Field]
+) -> UnionCaseDeclaration {
+    precondition(!name.isEmpty, "union case names cannot be empty")
+    return UnionCaseDeclaration(name: name, description: description, fields: fields())
+}
+
+@resultBuilder
+public enum UnionCasesBuilder: MMListBuilding {
+    public typealias Element = UnionCaseDeclaration
+
+    public static func buildExpression(
+        _ unionCase: UnionCaseDeclaration
+    ) -> [UnionCaseDeclaration] {
+        [unionCase]
+    }
+
+    /// A field-less case, written as a plain enum case.
+    public static func buildExpression(
+        _ enumCase: EnumCaseDeclaration
+    ) -> [UnionCaseDeclaration] {
+        [UnionCaseDeclaration(name: enumCase.name, description: enumCase.description, fields: [])]
+    }
+}
+
+/// Declares a named tagged union — exactly one of its cases, each with its
+/// own fields:
+///
+/// ```swift
+/// Union("Cursor", description: "Where a subscription starts") {
+///     Case("beginning")
+///     Case("seq") { Field("seq", .uint) }
+///     Case("live")
+/// }
+/// ```
+///
+/// On the wire a value is `{0: "<case>", 1: {<the case's fields>}}`, key 1
+/// left out for a field-less case. Renaming a case is a wire break,
+/// reordering is not (though it changes the fingerprint, like field order).
+/// Decoders map unrecognized case names to their local `unknown` case.
+public func Union(
+    _ name: String,
+    description: String? = nil,
+    @UnionCasesBuilder _ cases: () -> [UnionCaseDeclaration]
+) -> TypeDeclaration {
+    let caseList = cases()
+    precondition(!caseList.isEmpty, "Union(\"\(name)\") declares no cases")
+    if let duplicate = firstDuplicate(caseList.map(\.name)) {
+        preconditionFailure("Union(\"\(name)\") declares case \"\(duplicate)\" twice")
+    }
+    return TypeDeclaration(
+        name: validTypeName(name),
+        description: description,
+        payload: .union(caseList)
     )
 }
 
@@ -966,7 +1047,8 @@ public func Call(
 }
 
 /// One entry of a ``Schema(_:_:)`` block: a ``Call(_:description:_:)`` method
-/// or an ``Enum(_:description:_:)`` / ``Type(_:description:_:)`` named type.
+/// or an ``Enum(_:description:_:)`` / ``Union(_:description:_:)`` /
+/// ``Type(_:description:_:)`` named type.
 public struct SchemaEntry: Sendable {
     enum Kind {
         case method(MethodDeclaration)
@@ -1191,6 +1273,20 @@ private func assembleTypes(
                     cases: cases.map {
                         TypeSchema.EnumCase(name: $0.name, description: $0.description)
                     }
+                )
+            case .union(let cases):
+                schema = qualifyReferences(
+                    in: .union(
+                        cases: cases.map {
+                            TypeSchema.UnionCase(
+                                name: $0.name,
+                                fields: assignKeys($0.fields),
+                                description: $0.description
+                            )
+                        }
+                    ),
+                    namespace: namespace,
+                    localTypes: localNames
                 )
         }
         return TypeDefinition(

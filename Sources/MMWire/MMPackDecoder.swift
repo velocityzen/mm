@@ -24,6 +24,12 @@ func vptsValue<T>(
     return nil
 }
 
+/// Reads an ``MMBytes``: a `bin`, or a `str` as its UTF-8 bytes — what a
+/// `ByteBuffer` target accepts.
+func mpReadBytes(from buffer: inout ByteBuffer) throws -> MMBytes {
+    MMBytes(try buffer.readMessagePackBinary().get().readableBytesView)
+}
+
 /// Reads a `bin` holding a VPTS encoding that is not the null timestamp.
 private func mpReadVPTS(from buffer: inout ByteBuffer) throws -> MMVPTS {
     let bin = try buffer.readMessagePackBinary().get()
@@ -223,7 +229,8 @@ final class MPDecodingState {
     }
 
     /// Values whose bytes the coder reads itself: `ByteBuffer` (a zero-copy
-    /// `bin`/`str` slice), the wire time kinds, and the standard scalars.
+    /// `bin`/`str` slice), ``MMBytes``, the wire time kinds, and the standard
+    /// scalars.
     /// Returns nil for every other type.
     static func readDirectly<T>(_ type: T.Type, from buffer: inout ByteBuffer) throws -> T? {
         if type == ByteBuffer.self {
@@ -231,6 +238,9 @@ final class MPDecodingState {
             // the type system cannot carry a metatype comparison into the
             // generic (the standard Codable short-circuit idiom).
             return (try buffer.readMessagePackBinary().get() as! T)
+        }
+        if type == MMBytes.self {
+            return (try mpReadBytes(from: &buffer) as! T)
         }
         if let value = try vptsValue(type, from: &buffer) {
             return value

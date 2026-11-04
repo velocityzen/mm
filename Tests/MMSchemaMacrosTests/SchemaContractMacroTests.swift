@@ -148,7 +148,7 @@ struct SchemaContractMacroTests {
             #schema("box") {
                 Call("put") {
                     Access(.write)
-                    Request { Field("data", .bytes) }
+                    Request { Field("data", .unknown) }
                 }
             }
             """
@@ -158,7 +158,7 @@ struct SchemaContractMacroTests {
             diagnostics: [
                 DiagnosticSpec(
                     message:
-                        "put.Request.data: .bytes has no generated Codable counterpart — declare this method with the runtime DSL and hand-written types",
+                        "put.Request.data: .unknown has no generated Codable counterpart — declare this method with the runtime DSL and hand-written types",
                     line: 1, column: 1)
             ],
             macros: macros
@@ -181,7 +181,7 @@ struct SchemaContractMacroTests {
             diagnostics: [
                 DiagnosticSpec(
                     message:
-                        "#schema supports only Call, Enum, Type, and CLI declarations at the top level (the macro form is the DSL's static subset — no conditionals)",
+                        "#schema supports only Call, Enum, Union, Type, and CLI declarations at the top level (the macro form is the DSL's static subset — no conditionals)",
                     line: 1, column: 1)
             ],
             macros: macros

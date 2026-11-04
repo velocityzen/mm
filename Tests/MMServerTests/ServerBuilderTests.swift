@@ -162,12 +162,24 @@ struct ServerBuilderTests {
         }
     }
 
-    @Test("an empty endpoint list is programmer error")
+    @Test("an empty endpoint list without a SocketInbox is programmer error")
     func emptyEndpoints() async throws {
         await #expect(processExitsWith: .failure) {
             _ = MMService {
                 Configuration(endpoints: [])
                 ACLProvider(grantingProvider())
+            }
+        }
+    }
+
+    @Test("declaring SocketInbox twice is programmer error")
+    func duplicateSocketInbox() async throws {
+        await #expect(processExitsWith: .failure) {
+            _ = MMService {
+                Configuration(endpoints: [])
+                ACLProvider(grantingProvider())
+                SocketInbox()
+                SocketInbox()
             }
         }
     }

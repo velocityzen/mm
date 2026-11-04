@@ -80,6 +80,9 @@ public enum MMServiceError: Error, Sendable, Hashable {
 /// declaration mistakes stop the daemon before anything binds. The value is
 /// a reusable recipe: each run binds afresh.
 ///
+/// - The resource is the ``MMServiceHandle``: the bound addresses, and
+///   ``MMServiceHandle/adopt(descriptor:peer:)`` for a service that declares
+///   a ``SocketInbox()``.
 /// - Acquire returns once every endpoint is bound and listening, so a
 ///   resource composed after this one (`flatMap`, `BracketAsyncDo`) starts
 ///   only once the server can take connections, and stops before it. It
@@ -106,9 +109,9 @@ public enum MMServiceError: Error, Sendable, Hashable {
 /// runs dispose instead tears connections down immediately via
 /// `executeThenClose` and task-group cancellation — no descriptors leak on
 /// either path.
-public typealias MMService = BracketAsync<[SocketAddress], MMServiceError>
+public typealias MMService = BracketAsync<MMServiceHandle, MMServiceError>
 
-extension BracketAsync where R == [SocketAddress], E == MMServiceError {
+extension BracketAsync where R == MMServiceHandle, E == MMServiceError {
     /// Declares a server from explicit parameters; the builder form
     /// (``ServerPart``) declares the same server.
     ///
@@ -127,6 +130,8 @@ extension BracketAsync where R == [SocketAddress], E == MMServiceError {
     ///   - logger: Base logger; per-connection ids ride in metadata.
     ///   - programStatus: Reports the server's lifecycle to the terminal;
     ///     see ``ProgramStatusReporting(app:)``. `nil` reports nothing.
+    ///   - adoptsSockets: Serve connected sockets the host adopts through
+    ///     ``MMServiceHandle/adopt(descriptor:peer:)``; see ``SocketInbox()``.
     ///   - routes: The application's routes, built with `Handle`.
     public init(
         configuration: MMServerConfiguration,
@@ -137,6 +142,7 @@ extension BracketAsync where R == [SocketAddress], E == MMServiceError {
         threadPool: NIOThreadPool = .singleton,
         logger: Logger = Logger(label: "mm.server"),
         programStatus: ProgramStatusReporter? = nil,
+        adoptsSockets: Bool = false,
         @RouterBuilder routes: sending () -> [Route]
     ) {
         self = ServerRuntime(
@@ -148,6 +154,7 @@ extension BracketAsync where R == [SocketAddress], E == MMServiceError {
             threadPool: threadPool,
             logger: logger,
             programStatus: programStatus.map(ServerProgramStatus.init(reporter:)),
+            adoptsSockets: adoptsSockets,
             routes: routes
         )
         .start()
@@ -169,6 +176,9 @@ package struct ServerRuntime: Sendable {
     private let logger: Logger
     private let serverHello: MMHello
     private let programStatus: ServerProgramStatus?
+    /// Whether the service serves connected sockets the host adopts,
+    /// beside the endpoints (``SocketInbox()``).
+    private let adoptsSockets: Bool
 
     private let metrics: ServiceMetrics
     /// Stream frames dropped for an unknown/retired msgid, or an advisory frame
@@ -177,6 +187,10 @@ package struct ServerRuntime: Sendable {
     private enum TransportKind: Sendable {
         case unix
         case tcp
+        /// A connected socket the host adopted through
+        /// ``MMServiceHandle/adopt(descriptor:peer:)``, with the identity
+        /// the host attested for it.
+        case adopted(PeerIdentity)
     }
 
     /// An accepted connection, with the peer identity captured for it at
@@ -217,6 +231,8 @@ package struct ServerRuntime: Sendable {
     /// scope returns, so the task can neither leak nor outlive the resource.
     private struct RunningServer: Sendable {
         let localAddresses: [SocketAddress]
+        /// This run's adoption queue, when the service adopts sockets.
+        let adoptions: SocketAdoptions?
         /// Requesting it starts the drain: every listener stops accepting and
         /// every open connection stops taking requests. Idempotent.
         let shutdown: Shutdown
@@ -236,8 +252,13 @@ package struct ServerRuntime: Sendable {
         threadPool: NIOThreadPool = .singleton,
         logger: Logger = Logger(label: "mm.server"),
         programStatus: ServerProgramStatus? = nil,
+        adoptsSockets: Bool = false,
         @RouterBuilder routes: () -> [Route]
     ) {
+        precondition(
+            !configuration.endpoints.isEmpty || adoptsSockets,
+            "MMService declares no endpoint and no SocketInbox"
+        )
         var serviceLogger = logger
         serviceLogger[metadataKey: "service"] = "mm.server"
         self.configuration = configuration
@@ -245,6 +266,7 @@ package struct ServerRuntime: Sendable {
         self.threadPool = threadPool
         self.logger = serviceLogger
         self.programStatus = programStatus
+        self.adoptsSockets = adoptsSockets
         self.router = Router(
             namespaces: namespaces,
             sharedTypes: sharedTypes,
@@ -286,7 +308,9 @@ package struct ServerRuntime: Sendable {
                 return stopped
             }
         )
-        .map(\.localAddresses)
+        .map { running in
+            MMServiceHandle(addresses: running.localAddresses, adoptions: running.adoptions)
+        }
     }
 
     // MARK: - Program status
@@ -330,8 +354,14 @@ package struct ServerRuntime: Sendable {
     /// files go last.
     private func startAccepting(_ bound: [BoundServer]) -> RunningServer {
         let shutdown = Shutdown()
+        let adoptions = self.adoptsSockets ? SocketAdoptions() : nil
         let loop = Task {
-            let stopped = await self.acceptLoop(servers: bound.map(\.channel), shutdown: shutdown)
+            let stopped = await self.acceptLoop(
+                servers: bound.map(\.channel),
+                adoptions: adoptions,
+                shutdown: shutdown
+            )
+            adoptions?.finish()
             for server in bound {
                 server.removeFiles()
             }
@@ -339,6 +369,7 @@ package struct ServerRuntime: Sendable {
         }
         return RunningServer(
             localAddresses: bound.map(\.localAddress),
+            adoptions: adoptions,
             shutdown: shutdown,
             loop: loop
         )
@@ -372,6 +403,10 @@ package struct ServerRuntime: Sendable {
                     try await self.bindUnixDomainSocket(path: path)
                 case .tcp(let host, let port):
                     try await self.bindTCP(host: host, port: port)
+                case .fd:
+                    throw MMServiceError.io(
+                        description: "a server adopts connected sockets through MMServiceHandle.adopt, not an endpoint"
+                    )
             }
         }
         .mapError(MMServiceError.from)
@@ -489,6 +524,7 @@ package struct ServerRuntime: Sendable {
     ) -> EventLoopFuture<AcceptedConnection> {
         let maxFrameLength = self.configuration.maxFrameLength
         let idleTimeout = self.configuration.idleTimeout
+        let helloTimeout = self.configuration.helloTimeout
         let serverHello = self.serverHello
         let violations = self.metrics.protocolViolations
         return self.capturePeer(of: channel, transport: transport)
@@ -497,6 +533,7 @@ package struct ServerRuntime: Sendable {
                     channel: channel,
                     maxFrameLength: maxFrameLength,
                     idleTimeout: idleTimeout,
+                    helloTimeout: helloTimeout,
                     serverHello: serverHello,
                     protocolViolations: violations
                 )
@@ -529,6 +566,8 @@ package struct ServerRuntime: Sendable {
         switch transport {
             case .tcp:
                 return channel.eventLoop.makeSucceededFuture(.anonymous)
+            case .adopted(let peer):
+                return channel.eventLoop.makeSucceededFuture(peer)
             case .unix:
                 let logger = self.logger
                 return PeerCredentials.captureUnixPeer(channel: channel)
@@ -556,18 +595,25 @@ package struct ServerRuntime: Sendable {
     static func configureChildPipeline(
         channel: any Channel,
         maxFrameLength: UInt32,
-        idleTimeout: TimeAmount,
+        idleTimeout: TimeAmount?,
+        helloTimeout: TimeAmount? = nil,
         serverHello: MMHello,
         protocolViolations: Counter
     ) throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
         let sync = channel.pipeline.syncOperations
-        try sync.addHandler(IdleStateHandler(allTimeout: idleTimeout))
-        try sync.addHandler(MMIdleCloseHandler())
+        if let idleTimeout {
+            try sync.addHandler(IdleStateHandler(allTimeout: idleTimeout))
+            try sync.addHandler(MMIdleCloseHandler())
+        }
         try sync.addHandler(ConnectionDrainHandler())
         try sync.addHandler(ByteToMessageHandler(MMFrameDecoder(maxFrameLength: maxFrameLength)))
         try sync.addHandler(MessageToByteHandler(MMFrameEncoder(maxFrameLength: maxFrameLength)))
         try sync.addHandler(
-            ServerHelloHandler(serverHello: serverHello, protocolViolations: protocolViolations)
+            ServerHelloHandler(
+                serverHello: serverHello,
+                helloTimeout: helloTimeout,
+                protocolViolations: protocolViolations
+            )
         )
         return try NIOAsyncChannel<ByteBuffer, ByteBuffer>(wrappingChannelSynchronously: channel)
     }
@@ -583,6 +629,7 @@ package struct ServerRuntime: Sendable {
     ///   cancellation); `.io` when accepting itself failed.
     private func acceptLoop(
         servers: [Listener],
+        adoptions: SocketAdoptions?,
         shutdown: Shutdown
     ) async -> Result<Void, MMServiceError> {
         // Shared with every listener and connection child task, hence a
@@ -593,6 +640,11 @@ package struct ServerRuntime: Sendable {
                 for server in servers {
                     listeners.addTask {
                         try await self.accept(server: server, counts: counts, shutdown: shutdown)
+                    }
+                }
+                if let adoptions {
+                    listeners.addTask {
+                        await self.serve(adoptions, counts: counts, shutdown: shutdown)
                     }
                 }
             }
@@ -619,61 +671,19 @@ package struct ServerRuntime: Sendable {
                 try await withShutdownHandler(on: shutdown, { server.channel.close(promise: nil) }) {
                     await Result.fromAsync {
                         for try await accepted in acceptStream {
-                            let connection = accepted.connection
-                            // Cap enforced AT accept, before any child task exists.
-                            let admittedID = counts.withLockedValue { state -> UInt64? in
-                                guard state.open < self.configuration.maxConnections else {
-                                    return nil
-                                }
-                                state.open += 1
-                                state.lastID &+= 1
-                                return state.lastID
-                            }
-                            guard let connectionID = admittedID else {
-                                // Busy-rejection choice: close immediately, no busy
-                                // frame. Pre-hello there is no msgid to correlate an
-                                // error response to, and inventing a hello-level busy
-                                // code is a capability for a future version. The
-                                // pipeline may already have flushed the server hello
-                                // at activation; a rejected peer can observe it
-                                // before the close. Its identity was captured at
-                                // accept, but nothing is dispatched for it.
-                                self.metrics.connectionsRejected.increment()
-                                self.logger.debug(
-                                    "connection rejected",
-                                    metadata: ["reason": "connection_cap"]
-                                )
+                            guard let connectionID = self.admit(accepted.connection, counts: counts) else {
                                 connections.addTask {
-                                    // Empty executeThenClose is the sanctioned
-                                    // teardown: it finishes the outbound writer and
-                                    // closes the channel (a bare close would trip
-                                    // NIOAsyncWriter's finish precondition).
-                                    try? await connection.executeThenClose { _, _ in }
+                                    await Self.reject(accepted.connection)
                                 }
                                 continue
                             }
-                            self.metrics.connectionsAccepted.increment()
-                            self.metrics.activeConnections.record(
-                                counts.withLockedValue { $0.open }
-                            )
                             connections.addTask {
-                                // Task-local binding: hosts that bootstrap
-                                // swift-log with MMLogContext.metadataProvider get
-                                // the connection id on every log line in this task
-                                // tree, including application handler bodies.
-                                await MMLogContext.$connectionID.withValue(connectionID) {
-                                    await self.handleConnection(
-                                        connection,
-                                        peer: accepted.peer,
-                                        connectionID: connectionID,
-                                        shutdown: shutdown
-                                    )
-                                }
-                                let remaining = counts.withLockedValue { state in
-                                    state.open -= 1
-                                    return state.open
-                                }
-                                self.metrics.activeConnections.record(remaining)
+                                await self.run(
+                                    accepted,
+                                    connectionID: connectionID,
+                                    counts: counts,
+                                    shutdown: shutdown
+                                )
                             }
                         }
                     }
@@ -681,6 +691,117 @@ package struct ServerRuntime: Sendable {
                 .get()
             }
         }
+    }
+
+    /// Serves the connections the host adopts through `adoptions` until the
+    /// graceful drain or cancellation, then waits for them to close. Each one
+    /// goes through the same admission and per-connection path as an
+    /// accepted connection.
+    private func serve(
+        _ adoptions: SocketAdoptions,
+        counts: NIOLockedValueBox<ConnectionCounts>,
+        shutdown: Shutdown
+    ) async {
+        await withDiscardingTaskGroup { connections in
+            await withShutdownHandler(on: shutdown, { adoptions.finish() }) {
+                while let adoption = await adoptions.next() {
+                    let accepted: AcceptedConnection
+                    do {
+                        accepted = try await ClientBootstrap(group: self.group)
+                            // Same rationale as the listening bootstraps: a
+                            // peer's read-EOF must not close before responses
+                            // flush.
+                            .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+                            .withConnectedSocket(adoption.descriptor) { channel in
+                                self.initializeChildChannel(channel, transport: .adopted(adoption.peer))
+                            }
+                    } catch {
+                        // NIO owns the descriptor once it tried to adopt it,
+                        // and closes it on its failure paths; closing here
+                        // could hit a reused descriptor (see the unix bind).
+                        self.logger.warning("socket adoption failed", metadata: ["error": "\(error)"])
+                        adoption.reply.resume(returning: .failure(.from(error)))
+                        continue
+                    }
+                    adoption.reply.resume(returning: .success(()))
+                    guard let connectionID = self.admit(accepted.connection, counts: counts) else {
+                        connections.addTask {
+                            await Self.reject(accepted.connection)
+                        }
+                        continue
+                    }
+                    connections.addTask {
+                        await self.run(accepted, connectionID: connectionID, counts: counts, shutdown: shutdown)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Admits a connection under the cap, enforced before any child task
+    /// exists: its connection id, or `nil` when the server is full.
+    private func admit(
+        _ connection: NIOAsyncChannel<ByteBuffer, ByteBuffer>,
+        counts: NIOLockedValueBox<ConnectionCounts>
+    ) -> UInt64? {
+        let admittedID = counts.withLockedValue { state -> UInt64? in
+            guard state.open < self.configuration.maxConnections else {
+                return nil
+            }
+            state.open += 1
+            state.lastID &+= 1
+            return state.lastID
+        }
+        guard let connectionID = admittedID else {
+            // Busy-rejection choice: close immediately, no busy frame.
+            // Pre-hello there is no msgid to correlate an error response to,
+            // and inventing a hello-level busy code is a capability for a
+            // future version. The pipeline may already have flushed the
+            // server hello at activation; a rejected peer can observe it
+            // before the close. Its identity was captured at accept, but
+            // nothing is dispatched for it.
+            self.metrics.connectionsRejected.increment()
+            self.logger.debug(
+                "connection rejected",
+                metadata: ["reason": "connection_cap"]
+            )
+            return nil
+        }
+        self.metrics.connectionsAccepted.increment()
+        self.metrics.activeConnections.record(counts.withLockedValue { $0.open })
+        return connectionID
+    }
+
+    /// Closes a connection the cap rejected. Empty `executeThenClose` is the
+    /// sanctioned teardown: it finishes the outbound writer and closes the
+    /// channel (a bare close would trip NIOAsyncWriter's finish precondition).
+    private static func reject(_ connection: NIOAsyncChannel<ByteBuffer, ByteBuffer>) async {
+        try? await connection.executeThenClose { _, _ in }
+    }
+
+    /// Serves one admitted connection, then releases its slot.
+    private func run(
+        _ accepted: AcceptedConnection,
+        connectionID: UInt64,
+        counts: NIOLockedValueBox<ConnectionCounts>,
+        shutdown: Shutdown
+    ) async {
+        // Task-local binding: hosts that bootstrap swift-log with
+        // MMLogContext.metadataProvider get the connection id on every log
+        // line in this task tree, including application handler bodies.
+        await MMLogContext.$connectionID.withValue(connectionID) {
+            await self.handleConnection(
+                accepted.connection,
+                peer: accepted.peer,
+                connectionID: connectionID,
+                shutdown: shutdown
+            )
+        }
+        let remaining = counts.withLockedValue { state in
+            state.open -= 1
+            return state.open
+        }
+        self.metrics.activeConnections.record(remaining)
     }
 
     // MARK: - Per-connection

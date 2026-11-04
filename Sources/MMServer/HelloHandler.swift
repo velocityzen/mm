@@ -40,10 +40,14 @@ final class ServerHelloHandler: ChannelInboundHandler {
     private var state: State = .awaitingHello
     private var helloSent = false
     private let serverHello: MMHello
+    private let helloTimeout: TimeAmount?
+    /// Closes a peer still in `awaitingHello` when the hello deadline passes.
+    private var helloDeadline: Scheduled<Void>?
     private let protocolViolations: Counter
 
-    init(serverHello: MMHello, protocolViolations: Counter) {
+    init(serverHello: MMHello, helloTimeout: TimeAmount? = nil, protocolViolations: Counter) {
         self.serverHello = serverHello
+        self.helloTimeout = helloTimeout
         self.protocolViolations = protocolViolations
     }
 
@@ -53,9 +57,20 @@ final class ServerHelloHandler: ChannelInboundHandler {
         }
     }
 
+    func handlerRemoved(context: ChannelHandlerContext) {
+        self.helloDeadline?.cancel()
+        self.helloDeadline = nil
+    }
+
     func channelActive(context: ChannelHandlerContext) {
         self.sendServerHello(context: context)
         context.fireChannelActive()
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        self.helloDeadline?.cancel()
+        self.helloDeadline = nil
+        context.fireChannelInactive()
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -69,6 +84,8 @@ final class ServerHelloHandler: ChannelInboundHandler {
                 switch MMHello.decode(from: frame) {
                     case .success:
                         self.state = .established
+                        self.helloDeadline?.cancel()
+                        self.helloDeadline = nil
                         context.fireChannelRead(data)
                     case .failure:
                         self.state = .violated
@@ -81,6 +98,14 @@ final class ServerHelloHandler: ChannelInboundHandler {
     private func sendServerHello(context: ChannelHandlerContext) {
         guard !self.helloSent else { return }
         self.helloSent = true
+        if let helloTimeout = self.helloTimeout {
+            let channel = context.channel
+            let loopBound = NIOLoopBound(self, eventLoop: context.eventLoop)
+            self.helloDeadline = context.eventLoop.scheduleTask(in: helloTimeout) {
+                guard case .awaitingHello = loopBound.value.state else { return }
+                channel.close(promise: nil)
+            }
+        }
         var buffer = context.channel.allocator.buffer(capacity: MMHello.encodedByteCount)
         self.serverHello.encode(into: &buffer)
         context.writeAndFlush(self.wrapOutboundOut(buffer), promise: nil)

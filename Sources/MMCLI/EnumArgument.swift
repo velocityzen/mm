@@ -30,6 +30,15 @@ extension MMTimestamp: ExpressibleByArgument {
     }
 }
 
+/// Raw bytes as a typed command argument: base64 text, so a generated
+/// `Field("blob", .bytes)` becomes a `--blob AAEC` option.
+extension MMBytes: ExpressibleByArgument {
+    public init?(argument: String) {
+        guard let bytes = SchemaValue.decodeBase64(argument) else { return nil }
+        self.init(bytes)
+    }
+}
+
 public protocol MMCLIEnumArgument: ExpressibleByArgument, RawRepresentable, CaseIterable
 where RawValue == String {}
 

@@ -36,8 +36,8 @@ package func withListeningServer<T: Sendable>(
 ) async throws -> T {
     let result = try await withDeadline(seconds: seconds) {
         let withServer = service.start().mapError(ServerRunFailure.server)
-        return await withServer { addresses in
-            await Result.fromAsync { try await body(addresses) }
+        return await withServer { running in
+            await Result.fromAsync { try await body(running.addresses) }
                 .mapError(ServerRunFailure.body)
                 .tapErrorAsync { _ in await onBodyError() }
         }

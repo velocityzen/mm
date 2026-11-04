@@ -190,6 +190,8 @@ private enum Desk: MethodNamespace {
             Access { .write }
             Request {
                 Field("stamp", HandTypes.Stamp.self)
+                Field("cosigner", .optional(HandTypes.Stamp.self))
+                Field("history", .array(HandTypes.Stamp.self))
             }
             Response {
                 Field("ok", .bool)
@@ -325,10 +327,12 @@ struct SchemaMacroTypesTests {
             return
         }
         #expect(fields[0].type == .reference("hand.Stamp"))
+        #expect(fields[1].type == .optional(.reference("hand.Stamp")))
+        #expect(fields[2].type == .array(.reference("hand.Stamp")))
         // The generated property is the real Swift type.
-        let request = Desk.FileRequest(
-            stamp: HandTypes.Stamp(author: "ada", priority: .high)
-        )
+        let stamp = HandTypes.Stamp(author: "ada", priority: .high)
+        let request = Desk.FileRequest(stamp: stamp, cosigner: nil, history: [stamp])
         #expect(request.stamp.priority == .high)
+        #expect(request.history == [stamp])
     }
 }

@@ -132,6 +132,8 @@ Type("ChangeEvent", description: "One appended line, as delivered to followers")
 Rules for named types:
 
 - Enums are **string-valued** on the wire: the case name is the value. Renaming a case breaks the wire; reordering does not. The generated `unknown` case is the house rule for wire enums.
+- Unions are **tagged**: `Union("Cursor") { Case("live"); Case("seq") { Field("seq", .uint) } }`. Each case's fields are keyed from 0 on their own, pins honored. The wire value is a map `{0: case name, 1: {fields}}`, with key 1 omitted for a field-less case. JSON (the CLI, `Codable`) mirrors it as `{"case": "seq", "fields": {"seq": 7}}`. The generated Swift enum has labeled associated values (`.seq(seq: 7)`) and an `unknown` case for unrecognized tags. A plain `Case("x")` inside `Union` is a field-less case.
+- `.bytes` is raw bytes: MessagePack bin on the wire, ``MMBytes`` in generated code, base64 in JSON.
 - Names are **nominal**: `journal.Priority` is part of the contract and the fingerprint. Discovery serves a `TypeDefinition` table beside the method list, filtered to the types each peer's visible methods reach.
 - An undotted reference (`"Priority"`) must resolve within the block and is qualified automatically. A dotted one (`"common.LineMeta"`) is cross-schema and validated at server startup.
 - Shared types outside any method namespace go in a `#schemaTypes("common") { Enum/Type... }` container on a `TypeNamespace` enum (or a runtime `Types("common") { ... }` block). Register the container on the server with the `Types(Container.self)` builder element.
@@ -140,7 +142,7 @@ Cross-schema references in a `#schema` block use the Swift type (`Field("x", Oth
 
 ### What `#schema` generates, written by hand
 
-The macro accepts only the DSL's **static subset**: literal names and keys, no runtime conditionals, no `payload:`/`.bytes` shapes, and no wire type mapped from `.string` other than `String` (for example, an `EntityName`-typed field needs a hand-written type). For anything else (feature-flagged methods, hand-tuned Codable, `.bytes`), write the types and descriptors yourself; both forms can share one namespace. Hand-written, the example's `append` and `read` are what the macro generates:
+The macro accepts only the DSL's **static subset**: literal names and keys, no runtime conditionals, no `payload:` shapes, and no wire type mapped from `.string` other than `String` (for example, an `EntityName`-typed field needs a hand-written type). For anything else (feature-flagged methods, hand-tuned Codable), write the types and descriptors yourself; both forms can share one namespace. Hand-written, the example's `append` and `read` are what the macro generates:
 
 ```swift
 public struct AppendRequest: Codable, Hashable, Sendable {
@@ -408,7 +410,7 @@ When `Accepts` names **exactly one** concrete entity (one pattern, no wildcards,
 
 ## 3. Declaring the server as a resource
 
-`MMService { ... }` declares the server, and the value it builds *is* the server as a `BracketAsync<[SocketAddress], MMServiceError>`: the resource is the bound addresses, one per endpoint. So a daemon composes the server into the bracket it already runs, instead of adopting a new lifecycle mechanism. One builder holds configuration, authorization, logging, and handlers. Building it (before anything listens) builds the `Router` (with `registerBuiltins: true`, so `server.schema` and `server.entity` exist without user code), computes the hello fingerprint from every registered signature, and prepares metrics. The example daemon's:
+`MMService { ... }` declares the server, and the value it builds *is* the server as a `BracketAsync<MMServiceHandle, MMServiceError>`: the resource is the running server — its bound addresses, one per endpoint, and `adopt(descriptor:peer:)` for a service that declares `SocketInbox()`. So a daemon composes the server into the bracket it already runs, instead of adopting a new lifecycle mechanism. One builder holds configuration, authorization, logging, and handlers. Building it (before anything listens) builds the `Router` (with `registerBuiltins: true`, so `server.schema` and `server.entity` exist without user code), computes the hello fingerprint from every registered signature, and prepares metrics. The example daemon's:
 
 ```swift
 import Logging

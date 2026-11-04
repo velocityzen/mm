@@ -461,7 +461,7 @@ An unset optional slot is absent (its key is omitted). Readers skip unknown keys
 | Key | Field | Type |
 |---|---|---|
 | 0 | name | string, qualified (`<namespace>.<TypeName>`) |
-| 1 | schema | TypeSchema: a `structure` or `enumeration` |
+| 1 | schema | TypeSchema: a `structure`, `enumeration`, or `union` |
 | 2 | description | string, **optional**; documentation only |
 
 ### 8.2 `server.entity`
@@ -513,6 +513,7 @@ Tag table:
 | 13 | date | — (VPTS binary, calendar-date precision; rules below) |
 | 14 | datetime | — (VPTS binary, wall-clock precision, no offset; rules below) |
 | 15 | timestamp | — (VPTS binary with offset, an absolute instant; rules below) |
+| 16 | union | key 1: array of UnionCase |
 | 255 | unknown | — |
 
 **Calendar and clock values (tags 13 to 15).** All three encode as a MessagePack **bin** that holds one VPTS encoding (the variable-precision timestamp codec, specified in <doc:VPTS>). They are separate schema kinds, not bytes, because their meanings differ: a `date` has no time zone, a `datetime` is a floating wall-clock reading, and a `timestamp` is an absolute instant. Per-kind constraints on the VPTS component mask (normative):
@@ -535,6 +536,8 @@ In **JSON projections** of wire values (discovery tooling, the CLI's parameter a
 A `structure` lists its fields in **declaration order** (the order in which the type's decoder requests them). `Field` is an int-keyed struct: key 0 = `key` (the field's integer wire key, or nil/absent for string-keyed fields), key 1 = `name` (string), key 2 = `type` (TypeSchema), key 3 = `description` (string, **optional**, documentation only).
 
 An `enumeration` is a closed set of **string-valued** cases. The wire value of an enum-typed field is the case name as a MessagePack string (fixed decision). Renaming a case breaks the wire. Reordering does not, but it changes the fingerprint, like field order. Decoders MUST map an unrecognized value to a local fallback case instead of failing (the wire-enum rule of section 6.1). `EnumCase` is an int-keyed struct: key 0 = `name` (string, the wire value), key 1 = `description` (string, **optional**). Cases appear in declaration order.
+
+A `union` is a closed set of **tagged** cases, each with its own fields. The wire value of a union-typed field is a MessagePack map: key 0 = the case name (string), key 1 = the case's fields as a structure value (integer-keyed like any structure). Key 1 is omitted when the case declares no fields. Renaming a case breaks the wire, as does any change to a case's fields that would break a structure. Decoders MUST map an unrecognized case name to a local fallback case instead of failing (the wire-enum rule of section 6.1), skipping its fields. `UnionCase` is an int-keyed struct: key 0 = `name` (string), key 1 = `fields` (array of Field, as in `structure`; empty for none), key 2 = `description` (string, **optional**). Cases appear in declaration order.
 
 A `reference` names a `TypeDefinition` (section 8.1) served with the method list. Discovery responses are self-contained (every reference resolves within the response).
 
@@ -567,13 +570,14 @@ A simple tagged, length-prefixed byte encoding, intentionally **not** MessagePac
 
 **signature** := name (string) ‖ access (`u8`, the raw rwx bits) ‖ request schema ‖ response schema ‖ *stream entries, emitted only when present*: `u8` tag `1` then the request-stream element schema; `u8` tag `2` then the response-stream element schema. A method with no streams emits neither entry, so a set of only unary methods hashes to the same value as before streaming was added (the pinned value of 9.4 is unchanged). The two different tags keep the request and response stream slots distinguishable.
 
-**schema** := `u8` case tag (the same values as the wire tag table in 8.3: 0 bool, 1 int, 2 uint, 3 float, 4 double, 5 string, 6 bytes, 7 optional, 8 array, 9 map, 10 structure, 11 enumeration, 12 reference, 13 date, 14 datetime, 15 timestamp, 255 unknown), then payload:
+**schema** := `u8` case tag (the same values as the wire tag table in 8.3: 0 bool, 1 int, 2 uint, 3 float, 4 double, 5 string, 6 bytes, 7 optional, 8 array, 9 map, 10 structure, 11 enumeration, 12 reference, 13 date, 14 datetime, 15 timestamp, 16 union, 255 unknown), then payload:
 
 - `optional` (7), `array` (8): the child schema.
 - `map` (9): the key schema, then the value schema.
 - `structure` (10): `u32 LE` field count, then for each field, in declaration order: `u8` key-presence flag (1 if the field has an integer key, else 0), `i64 LE` key when present, the field name (string), the field schema.
 - `enumeration` (11): `u32 LE` case count, then for each case, in declaration order: the case name (string).
 - `reference` (12): the qualified type name (string).
+- `union` (16): `u32 LE` case count, then for each case, in declaration order: the case name (string), then its fields encoded exactly as a `structure`'s payload (count, then each field).
 - all other tags: no payload.
 
 **type definition** := `u8` tag `3` ‖ the qualified name (string) ‖ the definition's schema. Type-definition entries follow the signature stream (see 9.2). An empty type table emits nothing, so a fingerprint without types keeps its value from before types were added.

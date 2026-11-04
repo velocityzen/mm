@@ -152,6 +152,11 @@ extension TypeSchema {
         {
             return instance
         }
+        if let providing = type as? any SchemaPlaceholderProviding.Type,
+            let instance = providing._schemaPlaceholderAny as? T
+        {
+            return instance
+        }
         let id = ObjectIdentifier(type)
         guard !context.inFlightInstance.contains(id) else {
             // A value type cannot recursively contain itself non-optionally;

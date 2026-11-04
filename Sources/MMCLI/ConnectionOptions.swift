@@ -170,6 +170,8 @@ extension MMEndpoint {
                 return path
             case .tcp(let host, let port):
                 return "\(host):\(port)"
+            case .fd(let descriptor):
+                return "fd \(descriptor)"
         }
     }
 }

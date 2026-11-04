@@ -185,6 +185,10 @@ struct MPGeneratedWriter: MMPackWriter {
         self.buffer.writeMessagePackString(value)
     }
 
+    mutating func writeBytes(_ value: MMBytes) {
+        self.buffer.writeMessagePackBinary(bytes: value.bytes)
+    }
+
     mutating func writeDate(_ value: MMDate) {
         self.buffer.writeMessagePackBinary(bytes: MMVPTS(value).encoded())
     }
@@ -255,6 +259,10 @@ struct MPGeneratedReader: MMPackReader {
 
     mutating func readString() throws -> String {
         try self.buffer.readMessagePackString().get()
+    }
+
+    mutating func readBytes() throws -> MMBytes {
+        try mpReadBytes(from: &self.buffer)
     }
 
     mutating func readDate() throws -> MMDate {

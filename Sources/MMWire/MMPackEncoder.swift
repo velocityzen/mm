@@ -4,11 +4,11 @@ import NIOCore
 /// Whether values of `type` take ``mpWriteBinaryShortcut(_:into:)`` instead of
 /// their own `Encodable` conformance.
 func mpHasBinaryShortcut<T>(_ type: T.Type) -> Bool {
-    type == ByteBuffer.self || type == MMDate.self || type == MMDateTime.self
-        || type == MMTimestamp.self
+    type == ByteBuffer.self || type == MMBytes.self || type == MMDate.self
+        || type == MMDateTime.self || type == MMTimestamp.self
 }
 
-/// `ByteBuffer` values encode as MessagePack `bin`, and the wire time kinds ride
+/// `ByteBuffer` and ``MMBytes`` values encode as MessagePack `bin`, and the wire time kinds ride
 /// as `bin` holding a VPTS encoding (the VPTS article in this catalog) — a
 /// coder-level short-circuit, so the time types' own `Codable` (canonical ISO
 /// strings) keeps serving JSON coders, display, and tests, while the wire gets
@@ -19,6 +19,8 @@ func mpWriteBinaryShortcut<T: Encodable>(_ value: T, into buffer: inout ByteBuff
     // short-circuit idiom, mirrored by the decoder).
     if T.self == ByteBuffer.self {
         buffer.writeMessagePackBinary(value as! ByteBuffer)
+    } else if T.self == MMBytes.self {
+        buffer.writeMessagePackBinary(bytes: (value as! MMBytes).bytes)
     } else if T.self == MMDate.self {
         buffer.writeMessagePackBinary(bytes: MMVPTS(value as! MMDate).encoded())
     } else if T.self == MMDateTime.self {

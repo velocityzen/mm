@@ -98,11 +98,11 @@ package enum SchemaCodeGenerator {
         for item in closure.statements {
             guard let call = item.item.as(FunctionCallExprSyntax.self),
                 let callee = calleeName(call),
-                callee == "Enum" || callee == "Type"
+                ["Enum", "Union", "Type"].contains(callee)
             else {
                 throw SchemaMacroError(
                     description:
-                        "#schemaTypes supports only Enum(...) and Type(...) declarations (static subset)"
+                        "#schemaTypes supports only Enum(...), Union(...) and Type(...) declarations (static subset)"
                 )
             }
             types.append(try parseTypeDecl(call, kind: callee))
@@ -333,6 +333,7 @@ private struct ParsedTypeDecl {
     enum Payload {
         case structure([ParsedField])
         case enumeration([ParsedCase])
+        case union([ParsedUnionCase])
     }
 
     var name: String
@@ -343,6 +344,17 @@ private struct ParsedTypeDecl {
 private struct ParsedCase {
     var name: String
     var description: String?
+}
+
+/// One `Union` case: its wire tag, which is also the generated Swift case,
+/// and its own fields, keyed from 0 independently of the other cases.
+private struct ParsedUnionCase {
+    var name: String
+    var description: String?
+    var fields: [ParsedField]
+
+    /// The generated `CodingKey` enum for the case's fields.
+    var codingKeysName: String { "\(capitalizedFirst(name))CodingKeys" }
 }
 
 private struct ParsedCall {
@@ -457,6 +469,8 @@ private func kebabCased(_ name: String) -> String {
 
 private indirect enum ParsedType {
     case bool, int, uint, float, double, string
+    /// Raw bytes: generated properties use `MMBytes`.
+    case bytes
     /// The calendar/clock kinds: generated properties use the MMSchema
     /// value types (`MMDate`, `MMDateTime`, `MMTimestamp`).
     case date, datetime, timestamp
@@ -492,7 +506,7 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
         else {
             throw SchemaMacroError(
                 description:
-                    "#schema supports only Call, Enum, Type, and CLI declarations at the top level (the macro form is the DSL's static subset — no conditionals)"
+                    "#schema supports only Call, Enum, Union, Type, and CLI declarations at the top level (the macro form is the DSL's static subset — no conditionals)"
             )
         }
         switch callee {
@@ -503,7 +517,7 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
                         description: "#schema declares Call(\"\(parsed.name)\") twice")
                 }
                 calls.append(parsed)
-            case "Enum", "Type":
+            case "Enum", "Type", "Union":
                 types.append(try parseTypeDecl(call, kind: callee))
             case "CLI":
                 guard cliMode == nil else {
@@ -513,7 +527,7 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
             default:
                 throw SchemaMacroError(
                     description:
-                        "#schema supports only Call, Enum, Type, and CLI declarations at the top level (got \(callee))"
+                        "#schema supports only Call, Enum, Union, Type, and CLI declarations at the top level (got \(callee))"
                 )
         }
     }
@@ -774,7 +788,7 @@ private func validateFieldDefault(
             guard case .string = flagDefault else {
                 throw mismatch("a string literal (the option takes JSON text)")
             }
-        case .optional, .array:
+        case .optional, .array, .bytes:
             throw SchemaMacroError(
                 description:
                     "Call(\"\(call.name)\"): field \"\(field.name)\" default: is not supported for this field type"
@@ -829,7 +843,7 @@ private func validate(types: [ParsedTypeDecl], calls: [ParsedCall]) throws {
     }
     func check(_ type: ParsedType, context: String) throws {
         switch type {
-            case .bool, .int, .uint, .float, .double, .string,
+            case .bool, .int, .uint, .float, .double, .string, .bytes,
                 .date, .datetime, .timestamp, .external:
                 break
             case .optional(let wrapped):
@@ -851,8 +865,27 @@ private func validate(types: [ParsedTypeDecl], calls: [ParsedCall]) throws {
         }
     }
     for type in types {
-        if case .structure(let fields) = type.payload {
-            try check(fields, context: type.name)
+        switch type.payload {
+            case .structure(let fields):
+                try check(fields, context: type.name)
+            case .union(let cases):
+                // A case's nested `Field("x") { }` structs are generated
+                // inside the union, so their names share one scope.
+                var nestedNames: Set<String> = []
+                for unionCase in cases {
+                    try check(unionCase.fields, context: "\(type.name).\(unionCase.name)")
+                    _ = try assignKeys(unionCase.fields, startingAt: 0, reserving: [])
+                    for (nested, _) in nestedStructures(in: unionCase.fields) {
+                        guard nestedNames.insert(nested).inserted else {
+                            throw SchemaMacroError(
+                                description:
+                                    "Union(\"\(type.name)\"): nested struct \"\(nested)\" is declared by two cases — rename one field"
+                            )
+                        }
+                    }
+                }
+            case .enumeration:
+                break
         }
     }
     for call in calls {
@@ -909,49 +942,75 @@ private func parseTypeDecl(_ call: FunctionCallExprSyntax, kind: String) throws 
         return ParsedTypeDecl(
             name: name, description: description, payload: .structure(fields))
     }
-    var cases: [ParsedCase] = []
+    var cases: [(parsed: ParsedCase, fields: [ParsedField]?)] = []
     var seen: Set<String> = []
     for item in body.statements {
         guard let caseCall = item.item.as(FunctionCallExprSyntax.self),
             calleeName(caseCall) == "Case"
         else {
             throw SchemaMacroError(
-                description: "Enum(\"\(name)\"): only Case(...) declarations are supported")
+                description: "\(kind)(\"\(name)\"): only Case(...) declarations are supported")
         }
-        let parsed = try parseCase(caseCall, enumName: name)
+        let parsed = try parseCase(caseCall, kind: kind, typeName: name)
         guard seen.insert(parsed.name).inserted else {
             throw SchemaMacroError(
-                description: "Enum(\"\(name)\") declares case \"\(parsed.name)\" twice")
+                description: "\(kind)(\"\(name)\") declares case \"\(parsed.name)\" twice")
         }
-        cases.append(parsed)
+        let fields = try caseCall.trailingClosure.map { closure in
+            try parseFields(closure, context: "\(kind)(\"\(name)\").Case(\"\(parsed.name)\")")
+        }
+        if fields != nil, kind == "Enum" {
+            throw SchemaMacroError(
+                description:
+                    "Enum(\"\(name)\").Case(\"\(parsed.name)\"): an Enum case carries no fields — declare a Union for cases with fields"
+            )
+        }
+        cases.append((parsed, fields))
     }
     guard !cases.isEmpty else {
-        throw SchemaMacroError(description: "Enum(\"\(name)\") declares no cases")
+        throw SchemaMacroError(description: "\(kind)(\"\(name)\") declares no cases")
     }
-    return ParsedTypeDecl(name: name, description: description, payload: .enumeration(cases))
+    guard kind == "Union" else {
+        return ParsedTypeDecl(
+            name: name, description: description, payload: .enumeration(cases.map(\.parsed)))
+    }
+    return ParsedTypeDecl(
+        name: name, description: description,
+        payload: .union(
+            cases.map { parsed, fields in
+                ParsedUnionCase(
+                    name: parsed.name, description: parsed.description, fields: fields ?? [])
+            }))
 }
 
-private func parseCase(_ call: FunctionCallExprSyntax, enumName: String) throws -> ParsedCase {
+private func parseCase(
+    _ call: FunctionCallExprSyntax, kind: String, typeName: String
+) throws -> ParsedCase {
     guard let nameExpr = call.arguments.first?.expression,
         let name = stringLiteral(nameExpr)
     else {
         throw SchemaMacroError(
-            description: "Enum(\"\(enumName)\"): Case requires a literal name string")
+            description: "\(kind)(\"\(typeName)\"): Case requires a literal name string")
     }
     guard isValidSwiftIdentifierish(name) else {
         throw SchemaMacroError(
             description:
-                "Enum(\"\(enumName)\"): case name \"\(name)\" must be a Swift identifier — it is both the wire value and the generated case"
+                "\(kind)(\"\(typeName)\"): case name \"\(name)\" must be a Swift identifier — it is both the wire value and the generated case"
         )
     }
     guard name != "unknown" else {
         throw SchemaMacroError(
             description:
-                "Enum(\"\(enumName)\"): \"unknown\" is reserved — the macro generates it as the unrecognized-value fallback (house wire-enum rule)"
+                "\(kind)(\"\(typeName)\"): \"unknown\" is reserved — the macro generates it as the unrecognized-value fallback (house wire-enum rule)"
         )
     }
-    let description = try labeledDescription(
-        call.arguments, context: "Enum(\"\(enumName)\").Case(\"\(name)\")")
+    let context = "\(kind)(\"\(typeName)\").Case(\"\(name)\")"
+    let description = try labeledDescription(call.arguments, context: context)
+    for argument in call.arguments.dropFirst() where argument.label?.text != "description" {
+        throw SchemaMacroError(
+            description: "\(context): unsupported argument \(argument.expression.trimmedDescription)"
+        )
+    }
     return ParsedCase(name: name, description: description)
 }
 
@@ -1481,7 +1540,8 @@ private func parseType(_ expr: ExprSyntax, context: String) throws -> ParsedType
             case "date": return .date
             case "datetime": return .datetime
             case "timestamp": return .timestamp
-            case "bytes", "unknown":
+            case "bytes": return .bytes
+            case "unknown":
                 throw SchemaMacroError(
                     description:
                         "\(context): .\(member.declName.baseName.text) has no generated Codable counterpart — declare this method with the runtime DSL and hand-written types"
@@ -1567,6 +1627,7 @@ private func swiftType(_ type: ParsedType) -> String {
         case .float: return "Float"
         case .double: return "Double"
         case .string: return "String"
+        case .bytes: return "MMBytes"
         case .date: return "MMDate"
         case .datetime: return "MMDateTime"
         case .timestamp: return "MMTimestamp"
@@ -1590,6 +1651,7 @@ private func schemaLiteral(_ type: ParsedType, namespace: String) throws -> Stri
         case .float: return ".float"
         case .double: return ".double"
         case .string: return ".string"
+        case .bytes: return ".bytes"
         case .date: return ".date"
         case .datetime: return ".datetime"
         case .timestamp: return ".timestamp"
@@ -1726,29 +1788,9 @@ private func nestedStructures(in fields: [ParsedField]) -> [(name: String, field
 private func mmPackStructMembers(_ keyed: [(field: ParsedField, key: Int)]) -> [String] {
     var lines: [String] = []
     lines.append("public func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {")
-    let optionalFields = keyed.filter { field, _ in
-        if case .optional = field.type { true } else { false }
-    }
-    if optionalFields.isEmpty {
-        lines.append("    writer.writeMapHeader(count: \(keyed.count))")
-    } else {
-        lines.append("    var count = \(keyed.count - optionalFields.count)")
-        for (field, _) in optionalFields {
-            lines.append("    if self.\(field.name) != nil { count += 1 }")
-        }
-        lines.append("    writer.writeMapHeader(count: count)")
-    }
-    for (field, key) in keyed {
-        if case .optional(let wrapped) = field.type {
-            lines.append("    if let value = self.\(field.name) {")
-            lines.append("        writer.writeInt(\(key))")
-            lines.append("        \(mmPackWrite(wrapped, value: "value"))")
-            lines.append("    }")
-        } else {
-            lines.append("    writer.writeInt(\(key))")
-            lines.append("    \(mmPackWrite(field.type, value: "self.\(field.name)"))")
-        }
-    }
+    lines.append(
+        contentsOf: mmPackEncodeFieldMap(keyed) { _, field in "self.\(field.name)" }
+            .map { "    \($0)" })
     lines.append("}")
     lines.append(
         "public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {"
@@ -1760,44 +1802,91 @@ private func mmPackStructMembers(_ keyed: [(field: ParsedField, key: Int)]) -> [
         lines.append("}")
         return lines
     }
-    for (field, _) in keyed {
-        lines.append("    var \(field.name)AtKey: Int?")
-        lines.append("    var \(field.name)AtName: Int?")
+    lines.append(
+        contentsOf: mmPackDecodeFieldMap(keyed) { _, field in "self.\(field.name)" }
+            .map { "    \($0)" })
+    lines.append("}")
+    return lines
+}
+
+/// Writes a map of the fields that are present, each under its integer key;
+/// `value` spells field `index`'s value.
+private func mmPackEncodeFieldMap(
+    _ keyed: [(field: ParsedField, key: Int)],
+    value: (Int, ParsedField) -> String
+) -> [String] {
+    var lines: [String] = []
+    let optionalFields = keyed.enumerated().filter { _, entry in
+        if case .optional = entry.field.type { true } else { false }
     }
-    lines.append("    let count = try reader.readMapHeader(depth: depth)")
-    lines.append("    for _ in 0..<count {")
-    lines.append("        switch try reader.readMapKey(depth: depth + 1) {")
-    for (field, key) in keyed {
-        lines.append(
-            "            case .int(\(key)) where \(field.name)AtKey == nil: \(field.name)AtKey = reader.position"
-        )
+    if optionalFields.isEmpty {
+        lines.append("writer.writeMapHeader(count: \(keyed.count))")
+    } else {
+        lines.append("var count = \(keyed.count - optionalFields.count)")
+        for (index, entry) in optionalFields {
+            lines.append("if \(value(index, entry.field)) != nil { count += 1 }")
+        }
+        lines.append("writer.writeMapHeader(count: count)")
     }
-    for (field, _) in keyed {
-        lines.append(
-            "            case .string(\(quoted(field.name))) where \(field.name)AtName == nil: \(field.name)AtName = reader.position"
-        )
-    }
-    lines.append("            default: break")
-    lines.append("        }")
-    lines.append("        try reader.skipValue(depth: depth + 1)")
-    lines.append("    }")
-    lines.append("    let end = reader.position")
-    for (field, key) in keyed {
-        let position = "\(field.name)AtKey ?? \(field.name)AtName"
-        if case .optional = field.type {
-            lines.append("    if let position = \(position) {")
-            lines.append("        reader.seek(to: position)")
-            lines.append("        self.\(field.name) = \(mmPackRead(field.type, level: 1))")
-            lines.append("    } else {")
-            lines.append("        self.\(field.name) = nil")
-            lines.append("    }")
+    for (index, (field, key)) in keyed.enumerated() {
+        if case .optional(let wrapped) = field.type {
+            lines.append("if let value = \(value(index, field)) {")
+            lines.append("    writer.writeInt(\(key))")
+            lines.append("    \(mmPackWrite(wrapped, value: "value"))")
+            lines.append("}")
         } else {
-            lines.append("    try reader.seek(toRequiredField: \(position), key: \(key))")
-            lines.append("    self.\(field.name) = \(mmPackRead(field.type, level: 1))")
+            lines.append("writer.writeInt(\(key))")
+            lines.append(mmPackWrite(field.type, value: value(index, field)))
         }
     }
-    lines.append("    reader.seek(to: end)")
+    return lines
+}
+
+/// Reads the field map sitting at `depth` and leaves the reader just past
+/// it; `target` spells where field `index`'s value is stored. `keyed` is
+/// never empty.
+private func mmPackDecodeFieldMap(
+    _ keyed: [(field: ParsedField, key: Int)],
+    target: (Int, ParsedField) -> String
+) -> [String] {
+    var lines: [String] = []
+    for (field, _) in keyed {
+        lines.append("var \(field.name)AtKey: Int?")
+        lines.append("var \(field.name)AtName: Int?")
+    }
+    lines.append("let count = try reader.readMapHeader(depth: depth)")
+    lines.append("for _ in 0..<count {")
+    lines.append("    switch try reader.readMapKey(depth: depth + 1) {")
+    for (field, key) in keyed {
+        lines.append(
+            "        case .int(\(key)) where \(field.name)AtKey == nil: \(field.name)AtKey = reader.position"
+        )
+    }
+    for (field, _) in keyed {
+        lines.append(
+            "        case .string(\(quoted(field.name))) where \(field.name)AtName == nil: \(field.name)AtName = reader.position"
+        )
+    }
+    lines.append("        default: break")
+    lines.append("    }")
+    lines.append("    try reader.skipValue(depth: depth + 1)")
     lines.append("}")
+    lines.append("let end = reader.position")
+    for (index, (field, key)) in keyed.enumerated() {
+        let position = "\(field.name)AtKey ?? \(field.name)AtName"
+        if case .optional = field.type {
+            lines.append("if let position = \(position) {")
+            lines.append("    reader.seek(to: position)")
+            lines.append("    \(target(index, field)) = \(mmPackRead(field.type, level: 1))")
+            lines.append("} else {")
+            lines.append("    \(target(index, field)) = nil")
+            lines.append("}")
+        } else {
+            lines.append("try reader.seek(toRequiredField: \(position), key: \(key))")
+            lines.append("\(target(index, field)) = \(mmPackRead(field.type, level: 1))")
+        }
+    }
+    lines.append("reader.seek(to: end)")
     return lines
 }
 
@@ -1819,7 +1908,7 @@ private func mmPackEnumMembers(_ name: String) -> [String] {
 /// their own generated code or through `Encodable` can.
 private func mmPackWriteThrows(_ type: ParsedType) -> Bool {
     switch type {
-        case .bool, .int, .uint, .float, .double, .string, .date, .datetime, .timestamp:
+        case .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp:
             return false
         case .optional(let wrapped), .array(let wrapped):
             return mmPackWriteThrows(wrapped)
@@ -1840,6 +1929,7 @@ private func mmPackWrite(_ type: ParsedType, value: String) -> String {
         case .float: return "writer.writeFloat(\(value))"
         case .double: return "writer.writeDouble(\(value))"
         case .string: return "writer.writeString(\(value))"
+        case .bytes: return "writer.writeBytes(\(value))"
         case .date: return "writer.writeDate(\(value))"
         case .datetime: return "writer.writeDateTime(\(value))"
         case .timestamp: return "writer.writeTimestamp(\(value))"
@@ -1868,6 +1958,7 @@ private func mmPackRead(_ type: ParsedType, level: Int) -> String {
         case .float: return "try reader.readFloat()"
         case .double: return "try reader.readDouble()"
         case .string: return "try reader.readString()"
+        case .bytes: return "try reader.readBytes()"
         case .date: return "try reader.readDate()"
         case .datetime: return "try reader.readDateTime()"
         case .timestamp: return "try reader.readTimestamp()"
@@ -1915,7 +2006,197 @@ private func generateNamedType(
             lines.append("    }")
             lines.append("}")
             return lines.joined(separator: "\n")
+        case .union(let cases):
+            return try generateUnion(
+                type.name, cases: cases, qualified: qualified, namespace: namespace)
     }
+}
+
+/// A `Union` as a Swift enum with one case per declared case — its fields as
+/// labeled associated values — plus the `unknown` fallback. Its `Codable`
+/// writes the wire map (key 0 the case name, key 1 the case's fields, left
+/// out for a case with none) and its MessagePack code writes the same bytes.
+private func generateUnion(
+    _ name: String,
+    cases: [ParsedUnionCase],
+    qualified: String,
+    namespace: String
+) throws -> String {
+    let keyedCases = try cases.map { unionCase in
+        (unionCase, try assignKeys(unionCase.fields, startingAt: 0, reserving: []))
+    }
+    var lines: [String] = []
+    lines.append(
+        "public enum \(name): Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable {")
+    for (unionCase, keyed) in keyedCases {
+        if let description = unionCase.description {
+            lines.append("    /// \(docCommentText(description))")
+        }
+        let values = keyed.map { field, _ in "\(field.name): \(swiftType(field.type))" }
+        let payload = values.isEmpty ? "" : "(\(values.joined(separator: ", ")))"
+        lines.append("    case `\(unionCase.name)`\(payload)")
+    }
+    lines.append("    /// Unrecognized wire case names decode here (house wire-enum rule).")
+    lines.append("    case unknown")
+    lines.append("    public static var schema: TypeSchema {")
+    lines.append("        .reference(\(quoted(qualified)))")
+    lines.append("    }")
+    for (unionCase, _) in keyedCases {
+        for (nestedName, nestedFields) in nestedStructures(in: unionCase.fields) {
+            let nested = try generateStruct(
+                name: nestedName, fields: nestedFields, namespace: namespace, describedAs: nil)
+            lines.append(nested.split(separator: "\n").map { "    \($0)" }.joined(separator: "\n"))
+        }
+    }
+    lines.append("    enum CodingKeys: Int, CodingKey {")
+    lines.append("        case `case` = 0")
+    lines.append("        case fields = 1")
+    lines.append("    }")
+    for (unionCase, keyed) in keyedCases where !keyed.isEmpty {
+        lines.append("    enum \(unionCase.codingKeysName): Int, CodingKey {")
+        for (field, key) in keyed {
+            lines.append("        case \(field.name) = \(key)")
+        }
+        lines.append("    }")
+    }
+    // Codable
+    lines.append("    public init(from decoder: any Decoder) throws {")
+    lines.append("        let container = try decoder.container(keyedBy: CodingKeys.self)")
+    lines.append("        switch try container.decode(String.self, forKey: .`case`) {")
+    for (unionCase, keyed) in keyedCases {
+        lines.append("            case \(quoted(unionCase.name)):")
+        guard !keyed.isEmpty else {
+            lines.append("                self = .`\(unionCase.name)`")
+            continue
+        }
+        lines.append(
+            "                let fields = try container.nestedContainer(keyedBy: \(unionCase.codingKeysName).self, forKey: .fields)"
+        )
+        let values = keyed.map { field, _ in
+            if case .optional(let wrapped) = field.type {
+                return
+                    "\(field.name): try fields.decodeIfPresent(\(swiftType(wrapped)).self, forKey: .\(field.name))"
+            }
+            return "\(field.name): try fields.decode(\(swiftType(field.type)).self, forKey: .\(field.name))"
+        }
+        lines.append("                self = .`\(unionCase.name)`(")
+        lines.append(values.map { "                    \($0)" }.joined(separator: ",\n"))
+        lines.append("                )")
+    }
+    lines.append("            default:")
+    lines.append("                self = .unknown")
+    lines.append("        }")
+    lines.append("    }")
+    lines.append("    public func encode(to encoder: any Encoder) throws {")
+    lines.append("        var container = encoder.container(keyedBy: CodingKeys.self)")
+    lines.append("        switch self {")
+    for (unionCase, keyed) in keyedCases {
+        lines.append("            case .`\(unionCase.name)`\(unionBindings(keyed)):")
+        lines.append("                try container.encode(\(quoted(unionCase.name)), forKey: .`case`)")
+        guard !keyed.isEmpty else { continue }
+        lines.append(
+            "                var fields = container.nestedContainer(keyedBy: \(unionCase.codingKeysName).self, forKey: .fields)"
+        )
+        for (index, (field, _)) in keyed.enumerated() {
+            let method = if case .optional = field.type { "encodeIfPresent" } else { "encode" }
+            lines.append("                try fields.\(method)(field\(index), forKey: .\(field.name))")
+        }
+    }
+    lines.append("            case .unknown:")
+    lines.append("                try container.encode(\"unknown\", forKey: .`case`)")
+    lines.append("        }")
+    lines.append("    }")
+    lines.append(contentsOf: mmPackUnionMembers(keyedCases).map { "    \($0)" })
+    lines.append("}")
+    return lines.joined(separator: "\n")
+}
+
+/// The pattern binding a union case's associated values as `field0`, ...,
+/// so generated locals never collide with field names.
+private func unionBindings(_ keyed: [(field: ParsedField, key: Int)]) -> String {
+    guard !keyed.isEmpty else { return "" }
+    return "(" + keyed.indices.map { "let field\($0)" }.joined(separator: ", ") + ")"
+}
+
+/// A union's MessagePack code: the bytes its `Codable` writes through
+/// `MMPackEncoder`, and what it accepts through `MMPackDecoder` — the map is
+/// walked first, the first occurrence of a key wins, and each slot is found
+/// under its integer key, else under its name (`case`, `fields`).
+private func mmPackUnionMembers(
+    _ keyedCases: [(ParsedUnionCase, [(field: ParsedField, key: Int)])]
+) -> [String] {
+    var lines: [String] = []
+    lines.append("public func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {")
+    lines.append("    switch self {")
+    for (unionCase, keyed) in keyedCases {
+        lines.append("        case .`\(unionCase.name)`\(unionBindings(keyed)):")
+        lines.append("            writer.writeMapHeader(count: \(keyed.isEmpty ? 1 : 2))")
+        lines.append("            writer.writeInt(0)")
+        lines.append("            writer.writeString(\(quoted(unionCase.name)))")
+        guard !keyed.isEmpty else { continue }
+        lines.append("            writer.writeInt(1)")
+        lines.append(
+            contentsOf: mmPackEncodeFieldMap(keyed) { index, _ in "field\(index)" }
+                .map { "            \($0)" })
+    }
+    lines.append("        case .unknown:")
+    lines.append("            writer.writeMapHeader(count: 1)")
+    lines.append("            writer.writeInt(0)")
+    lines.append("            writer.writeString(\"unknown\")")
+    lines.append("    }")
+    lines.append("}")
+    lines.append(
+        "public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {")
+    lines.append("    var caseAtKey: Int?")
+    lines.append("    var caseAtName: Int?")
+    lines.append("    var fieldsAtKey: Int?")
+    lines.append("    var fieldsAtName: Int?")
+    lines.append("    let count = try reader.readMapHeader(depth: depth)")
+    lines.append("    for _ in 0..<count {")
+    lines.append("        switch try reader.readMapKey(depth: depth + 1) {")
+    lines.append("            case .int(0) where caseAtKey == nil: caseAtKey = reader.position")
+    lines.append("            case .int(1) where fieldsAtKey == nil: fieldsAtKey = reader.position")
+    lines.append(
+        "            case .string(\"case\") where caseAtName == nil: caseAtName = reader.position")
+    lines.append(
+        "            case .string(\"fields\") where fieldsAtName == nil: fieldsAtName = reader.position"
+    )
+    lines.append("            default: break")
+    lines.append("        }")
+    lines.append("        try reader.skipValue(depth: depth + 1)")
+    lines.append("    }")
+    lines.append("    let end = reader.position")
+    lines.append("    try reader.seek(toRequiredField: caseAtKey ?? caseAtName, key: 0)")
+    lines.append("    switch try reader.readString() {")
+    for (unionCase, keyed) in keyedCases {
+        lines.append("        case \(quoted(unionCase.name)):")
+        guard !keyed.isEmpty else {
+            lines.append("            self = .`\(unionCase.name)`")
+            continue
+        }
+        lines.append("            try reader.seek(toRequiredField: fieldsAtKey ?? fieldsAtName, key: 1)")
+        lines.append("            self = try Self.mmPack\(capitalizedFirst(unionCase.name))(&reader, depth: depth + 1)")
+    }
+    lines.append("        default:")
+    lines.append("            self = .unknown")
+    lines.append("    }")
+    lines.append("    reader.seek(to: end)")
+    lines.append("}")
+    for (unionCase, keyed) in keyedCases where !keyed.isEmpty {
+        lines.append(
+            "private static func mmPack\(capitalizedFirst(unionCase.name))<Reader: MMPackReader>(_ reader: inout Reader, depth: Int) throws -> Self {"
+        )
+        for (index, (field, _)) in keyed.enumerated() {
+            lines.append("    let field\(index): \(swiftType(field.type))")
+        }
+        lines.append(
+            contentsOf: mmPackDecodeFieldMap(keyed) { index, _ in "field\(index)" }
+                .map { "    \($0)" })
+        let values = keyed.enumerated().map { index, entry in "\(entry.field.name): field\(index)" }
+        lines.append("    return .`\(unionCase.name)`(\(values.joined(separator: ", ")))")
+        lines.append("}")
+    }
+    return lines
 }
 
 /// The definition a named type serves through `types` — full shape with
@@ -1937,6 +2218,19 @@ private func definitionLiteral(_ type: ParsedTypeDecl, namespace: String) throws
                 return literal + ")"
             }.joined(separator: ", ")
             schema = ".enumeration(cases: [\(caseLiterals)])"
+        case .union(let cases):
+            let caseLiterals = try cases.map { unionCase in
+                let keyed = try assignKeys(unionCase.fields, startingAt: 0, reserving: [])
+                var literal = "TypeSchema.UnionCase(name: \(quoted(unionCase.name))"
+                if !keyed.isEmpty {
+                    literal += ", fields: [\(try fieldLiterals(keyed, namespace: namespace))]"
+                }
+                if let description = unionCase.description {
+                    literal += ", description: \(quoted(description))"
+                }
+                return literal + ")"
+            }.joined(separator: ", ")
+            schema = ".union(cases: [\(caseLiterals)])"
     }
     var literal = "TypeDefinition(name: \(quoted("\(namespace).\(type.name)")), schema: \(schema)"
     if let description = type.description {
@@ -1958,12 +2252,17 @@ private func generateTypesTable(_ types: [ParsedTypeDecl], namespace: String) th
 }
 
 private func generateProbedTypes(_ types: [ParsedTypeDecl], namespace: String) -> String {
-    let entries = types.map { type in
+    // A union's decoder is data-dependent: a probe sees its tag, never a
+    // case's fields, so the definition carries the contract alone.
+    let probed = types.filter { type in
+        if case .union = type.payload { false } else { true }
+    }
+    let entries = probed.map { type in
         "\(quoted("\(namespace).\(type.name)")): TypeSchema.probed(\(type.name).self)"
     }.joined(separator: ", ")
     return """
         public static var probedTypes: [String: Result<TypeSchema, SchemaError>] {
-            [\(entries)]
+            [\(entries.isEmpty ? ":" : entries)]
         }
         """
 }
@@ -2146,7 +2445,7 @@ private func commandFieldForm(
     if case .omitted = field.cliHint { return .omitted }
     func isDirect(_ type: ParsedType) -> Bool {
         switch type {
-            case .bool, .int, .uint, .float, .double, .string,
+            case .bool, .int, .uint, .float, .double, .string, .bytes,
                 .date, .datetime, .timestamp:
                 return true
             case .reference(let name):

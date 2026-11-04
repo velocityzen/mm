@@ -21,7 +21,7 @@ private enum HostFailure: Error {
 private func withServerAndClient(
     _ server: TestServer,
     path: String
-) -> BracketAsync<([SocketAddress], MMClientConnection), HostFailure> {
+) -> BracketAsync<(MMServiceHandle, MMClientConnection), HostFailure> {
     BracketAsyncDo<HostFailure>()
         .bind { server.service.start().mapError(HostFailure.server) }
         .bind { _ in
@@ -37,12 +37,12 @@ private func withServerAndClient(
 /// endpoint comes from the address the server's bracket yields.
 private func withTCPServerAndClient(
     _ server: TestServer
-) -> BracketAsync<([SocketAddress], MMClientConnection), HostFailure> {
+) -> BracketAsync<(MMServiceHandle, MMClientConnection), HostFailure> {
     BracketAsyncDo<HostFailure>()
         .bind { server.service.start().mapError(HostFailure.server) }
-        .bind { addresses in
+        .bind { running in
             MMClient(
-                endpoint: .tcp(host: "127.0.0.1", port: addresses.first?.port ?? 0),
+                endpoint: .tcp(host: "127.0.0.1", port: running.addresses.first?.port ?? 0),
                 logger: quietClientLogger()
             )
             .mapError(HostFailure.client)

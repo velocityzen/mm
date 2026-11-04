@@ -9,11 +9,11 @@
 ///   0 `bool`, 1 `int`, 2 `uint`, 3 `float`, 4 `double`, 5 `string`,
 ///   6 `bytes`, 7 `optional`, 8 `array`, 9 `map`, 10 `structure`,
 ///   11 `enumeration`, 12 `reference`, 13 `date`, 14 `datetime`,
-///   15 `timestamp`, 255 `unknown`.
+///   15 `timestamp`, 16 `union`, 255 `unknown`.
 /// - key **1**: first payload — the wrapped schema for `optional`, the element
 ///   schema for `array`, the key schema for `map`, the field list for
-///   `structure`, the case list for `enumeration`, the qualified type name
-///   (string) for `reference`.
+///   `structure`, the case list for `enumeration` and `union`, the qualified
+///   type name (string) for `reference`.
 /// - key **2**: second payload — the value schema for `map`.
 ///
 /// ## Decoding never fails
@@ -32,8 +32,7 @@ public indirect enum TypeSchema: Sendable, Hashable {
     case float
     case double
     case string
-    /// Raw binary (MessagePack `bin`). Never produced by the probe — types
-    /// carrying raw bytes declare it via ``SchemaDescribable``.
+    /// Raw binary (MessagePack `bin`) — ``MMBytes`` in generated code.
     case bytes
     /// A calendar date — ``MMDate``, an ISO `YYYY-MM-DD` string on the wire.
     case date
@@ -54,6 +53,13 @@ public indirect enum TypeSchema: Sendable, Hashable {
     /// reordering is not. Decoders map unrecognized values to their local
     /// `unknown` case per the house wire-enum rule.
     case enumeration(cases: [EnumCase])
+    /// A tagged union: exactly one of the cases, each carrying its own fields.
+    /// The wire value is a map — key **0** the case name (a string, fixed
+    /// decision), key **1** the case's fields as a structure keyed from 0,
+    /// left out when the case declares none. Like ``enumeration(cases:)``,
+    /// renaming a case is a wire break and reordering is not, and decoders
+    /// map unrecognized case names to their local `unknown` case.
+    case union(cases: [UnionCase])
     /// A reference to a named type by its qualified name
     /// (`journal.Priority`, `common.LineMeta`). Names are **nominal** — part
     /// of the wire contract, hashed into the fingerprint — and resolve through
@@ -90,6 +96,29 @@ public indirect enum TypeSchema: Sendable, Hashable {
         }
     }
 
+    /// One case of a ``TypeSchema/union(cases:)``. The name is the wire tag;
+    /// the fields are the case's own structure, keyed independently of every
+    /// other case.
+    public struct UnionCase: Sendable, Hashable, Codable {
+        public var name: String
+        public var fields: [Field]
+        /// Human-readable documentation, served by discovery. Never part of
+        /// the fingerprint or of compatibility comparisons.
+        public var description: String?
+
+        public init(name: String, fields: [Field] = [], description: String? = nil) {
+            self.name = name
+            self.fields = fields
+            self.description = description
+        }
+
+        enum CodingKeys: Int, CodingKey {
+            case name = 0
+            case fields = 1
+            case description = 2
+        }
+    }
+
     /// One case of a ``TypeSchema/enumeration(cases:)``. The name is the wire value.
     public struct EnumCase: Sendable, Hashable, Codable {
         public var name: String
@@ -116,54 +145,77 @@ extension TypeSchema {
     public var strippingDescriptions: TypeSchema {
         self.rewritten(
             field: { Field(key: $0.key, name: $0.name, type: $0.type) },
-            enumCase: { EnumCase(name: $0.name) }
+            enumCase: { EnumCase(name: $0.name) },
+            unionCase: { UnionCase(name: $0.name, fields: $0.fields) }
         )
     }
 
     /// The one structure-preserving rebuild behind every rewriting walker
     /// (description stripping, reference qualification): children rebuild
-    /// first, `field`/`enumCase` reshape structure members (each field's
+    /// first, `field`/`enumCase`/`unionCase` reshape members (each field's
     /// `type` already rewritten), then `node` rewrites the assembled node.
     func rewritten(
         node: (TypeSchema) -> TypeSchema = { $0 },
         field: (Field) -> Field = { $0 },
-        enumCase: (EnumCase) -> EnumCase = { $0 }
+        enumCase: (EnumCase) -> EnumCase = { $0 },
+        unionCase: (UnionCase) -> UnionCase = { $0 }
     ) -> TypeSchema {
+        func child(_ schema: TypeSchema) -> TypeSchema {
+            schema.rewritten(node: node, field: field, enumCase: enumCase, unionCase: unionCase)
+        }
+        func member(_ original: Field) -> Field {
+            field(
+                Field(
+                    key: original.key,
+                    name: original.name,
+                    type: child(original.type),
+                    description: original.description
+                )
+            )
+        }
         let rebuilt: TypeSchema
         switch self {
             case .bool, .int, .uint, .float, .double, .string, .bytes,
                 .date, .datetime, .timestamp, .reference, .unknown:
                 rebuilt = self
             case .optional(let wrapped):
-                rebuilt = .optional(wrapped.rewritten(node: node, field: field, enumCase: enumCase))
+                rebuilt = .optional(child(wrapped))
             case .array(let element):
-                rebuilt = .array(element.rewritten(node: node, field: field, enumCase: enumCase))
+                rebuilt = .array(child(element))
             case .map(let key, let value):
-                rebuilt = .map(
-                    key: key.rewritten(node: node, field: field, enumCase: enumCase),
-                    value: value.rewritten(node: node, field: field, enumCase: enumCase)
-                )
+                rebuilt = .map(key: child(key), value: child(value))
             case .structure(let fields):
-                rebuilt = .structure(
-                    fields: fields.map { original in
-                        field(
-                            Field(
-                                key: original.key,
+                rebuilt = .structure(fields: fields.map(member))
+            case .enumeration(let cases):
+                rebuilt = .enumeration(cases: cases.map(enumCase))
+            case .union(let cases):
+                rebuilt = .union(
+                    cases: cases.map { original in
+                        unionCase(
+                            UnionCase(
                                 name: original.name,
-                                type: original.type.rewritten(
-                                    node: node,
-                                    field: field,
-                                    enumCase: enumCase
-                                ),
+                                fields: original.fields.map(member),
                                 description: original.description
                             )
                         )
                     }
                 )
-            case .enumeration(let cases):
-                rebuilt = .enumeration(cases: cases.map(enumCase))
         }
         return node(rebuilt)
+    }
+}
+
+extension TypeSchema {
+    /// An optional Swift type: its described schema, wrapped. The
+    /// cross-schema form inside a type expression
+    /// (`Field("meta", .optional(Other.Name.self))`).
+    public static func optional(_ type: (some SchemaDescribable).Type) -> TypeSchema {
+        .optional(type.schema)
+    }
+
+    /// An array of a Swift type (`Field("tags", .array(Other.Name.self))`).
+    public static func array(_ type: (some SchemaDescribable).Type) -> TypeSchema {
+        .array(type.schema)
     }
 }
 
@@ -208,6 +260,7 @@ extension TypeSchema: Codable {
             case .date: return 13
             case .datetime: return 14
             case .timestamp: return 15
+            case .union: return 16
             case .unknown: return 255
         }
     }
@@ -229,6 +282,8 @@ extension TypeSchema: Codable {
             case .structure(let fields):
                 try container.encode(fields, forKey: .first)
             case .enumeration(let cases):
+                try container.encode(cases, forKey: .first)
+            case .union(let cases):
                 try container.encode(cases, forKey: .first)
             case .reference(let name):
                 try container.encode(name, forKey: .first)
@@ -286,6 +341,11 @@ extension TypeSchema: Codable {
             case 13: self = .date
             case 14: self = .datetime
             case 15: self = .timestamp
+            case 16:
+                self =
+                    (try? container.decode([UnionCase].self, forKey: .first)).map {
+                        .union(cases: $0)
+                    } ?? .unknown
             default:
                 self = .unknown
         }

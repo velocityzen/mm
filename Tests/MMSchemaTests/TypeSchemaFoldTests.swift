@@ -27,6 +27,13 @@ struct TypeSchemaFoldTests {
                     return "{\(body)}"
                 case .enumeration(let cases):
                     return "enum(\(cases.map(\.name).joined(separator: "|")))"
+                case .union(let cases):
+                    let body = cases.map { unionCase, fields in
+                        let members = fields.map { "\($0.field.name): \($0.value)" }
+                            .joined(separator: ", ")
+                        return "\(unionCase.name){\(members)}"
+                    }
+                    return "union(\(body.joined(separator: "|")))"
                 case .unresolvedReference(.unresolved(let name)): return "?\(name)"
                 case .unresolvedReference(.cycle(let name)): return "cycle(\(name))"
                 case .unknown: return "unknown"
@@ -49,6 +56,24 @@ struct TypeSchemaFoldTests {
         #expect(
             describe(schema, resolver: resolver)
                 == "{lines: [string], priority: enum(low|high)?, weights: [string: double]}")
+    }
+
+    @Test("a union folds each case's fields, references resolved")
+    func unionFold() {
+        let resolver = TypeResolver([
+            TypeDefinition(name: "box.Tag", schema: .enumeration(cases: [.init(name: "a")]))
+        ])
+        let schema = TypeSchema.union(cases: [
+            .init(name: "live"),
+            .init(
+                name: "seq",
+                fields: [
+                    .init(key: 0, name: "seq", type: .uint),
+                    .init(key: 1, name: "tag", type: .optional(.reference("box.Tag"))),
+                ]),
+        ])
+        #expect(
+            describe(schema, resolver: resolver) == "union(live{}|seq{seq: uint, tag: enum(a)?})")
     }
 
     @Test("a self-recursive structure surfaces as a cycle step, not a hang")

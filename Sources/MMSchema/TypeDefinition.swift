@@ -12,7 +12,8 @@
 ///
 /// A map with integer keys: **0** the qualified name (string), **1** the
 /// underlying ``TypeSchema`` (a `structure` for `Type` declarations, an
-/// `enumeration` for `Enum` declarations), **2** the optional description.
+/// `enumeration` for `Enum` declarations, a `union` for `Union`
+/// declarations), **2** the optional description.
 /// The description is documentation only — served by discovery, never hashed
 /// or compared.
 public struct TypeDefinition: Sendable, Hashable, Codable {
@@ -65,6 +66,10 @@ extension TypeSchema {
                     return key.union(value)
                 case .structure(let fields):
                     return fields.reduce(into: Set<String>()) { $0.formUnion($1.value) }
+                case .union(let cases):
+                    return cases.reduce(into: Set<String>()) { names, unionCase in
+                        for field in unionCase.fields { names.formUnion(field.value) }
+                    }
                 case .bool, .int, .uint, .float, .double, .string, .bytes,
                     .date, .datetime, .timestamp, .enumeration, .unknown:
                     return []

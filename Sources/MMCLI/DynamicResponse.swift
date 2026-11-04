@@ -162,6 +162,8 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                         ))
                 }
                 return .object(members)
+            case .union(let cases):
+                return try Self.decodeUnion(cases, resolver: resolver, from: decoder)
             case .unknown:
                 return Self.decodeUnknown(from: decoder)
             case .reference:
@@ -217,7 +219,7 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                 // One ordered-tries implementation for all container shapes:
                 // probe the slot through its child decoder.
                 return Self.decodeUnknown(from: try container.superDecoder(forKey: key))
-            case .structure, .array, .map:
+            case .structure, .array, .map, .union:
                 return try Self.decodeValue(
                     resolved, resolver: resolver,
                     from: container.superDecoder(forKey: key))
@@ -271,7 +273,7 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                 // superDecoder() consumes exactly one element; the shared
                 // ordered tries then probe within it.
                 return Self.decodeUnknown(from: try container.superDecoder())
-            case .structure, .array, .map:
+            case .structure, .array, .map, .union:
                 return try Self.decodeValue(
                     resolved, resolver: resolver, from: container.superDecoder())
             case .reference:
@@ -282,6 +284,30 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                     )
                 )
         }
+    }
+
+    /// A union value: its tag (key 0), then the case's fields (key 1), as
+    /// `{"case": ..., "fields": {...}}` — `fields` only for a case that has
+    /// some. A case this schema does not know renders as its tag alone.
+    private static func decodeUnion(
+        _ cases: [TypeSchema.UnionCase],
+        resolver: TypeResolver,
+        from decoder: any Decoder
+    ) throws -> MMCLIDynamicTree {
+        let container = try decoder.container(keyedBy: MMCLIDynamicCodingKey.self)
+        let tag = MMCLIDynamicCodingKey(field: 0, name: "case")
+        let fieldsKey = MMCLIDynamicCodingKey(field: 1, name: "fields")
+        let name = try container.decode(String.self, forKey: tag)
+        let tagMember = SchemaValue.Member("case", .string(name))
+        guard let unionCase = cases.first(where: { $0.name == name }),
+            !unionCase.fields.isEmpty
+        else {
+            return .object([tagMember])
+        }
+        let fields = try Self.decodeField(
+            .structure(fields: unionCase.fields), resolver: resolver,
+            in: container, forKey: fieldsKey)
+        return .object([tagMember, SchemaValue.Member("fields", fields)])
     }
 
     private static func resolveOrRephrase(

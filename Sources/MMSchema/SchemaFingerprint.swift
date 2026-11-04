@@ -33,11 +33,13 @@
 ///   property, pinned by the golden test); the distinct tags keep the two
 ///   slots asymmetric.
 /// - schema: `u8` case tag (the same tag values as the Codable wire encoding:
-///   0 bool … 12 reference, 255 unknown), then payload —
+///   0 bool … 16 union, 255 unknown), then payload —
 ///   `optional`/`array`: child schema; `map`: key then value schema;
 ///   `structure`: `u32 LE` field count, then per field: `u8` key-presence flag
 ///   (1/0), `i64 LE` key when present, name string, field schema;
 ///   `enumeration`: `u32 LE` case count, then per case: name string;
+///   `union`: `u32 LE` case count, then per case: name string and its field
+///   list encoded as `structure`'s is;
 ///   `reference`: the qualified name string.
 /// - type definitions: after the signature stream, definitions sorted by name
 ///   (byte-wise, tie-break full encoding), each as `u8` tag **3** + name
@@ -145,24 +147,34 @@ public enum SchemaFingerprint {
                 append(key, into: &bytes)
                 append(value, into: &bytes)
             case .structure(let fields):
-                appendUInt32(UInt32(fields.count), into: &bytes)
-                for field in fields {
-                    if let key = field.key {
-                        bytes.append(1)
-                        appendInt64(Int64(key), into: &bytes)
-                    } else {
-                        bytes.append(0)
-                    }
-                    append(field.name, into: &bytes)
-                    append(field.type, into: &bytes)
-                }
+                append(fields, into: &bytes)
             case .enumeration(let cases):
                 appendUInt32(UInt32(cases.count), into: &bytes)
                 for enumCase in cases {
                     append(enumCase.name, into: &bytes)
                 }
+            case .union(let cases):
+                appendUInt32(UInt32(cases.count), into: &bytes)
+                for unionCase in cases {
+                    append(unionCase.name, into: &bytes)
+                    append(unionCase.fields, into: &bytes)
+                }
             case .reference(let name):
                 append(name, into: &bytes)
+        }
+    }
+
+    private static func append(_ fields: [TypeSchema.Field], into bytes: inout [UInt8]) {
+        appendUInt32(UInt32(fields.count), into: &bytes)
+        for field in fields {
+            if let key = field.key {
+                bytes.append(1)
+                appendInt64(Int64(key), into: &bytes)
+            } else {
+                bytes.append(0)
+            }
+            append(field.name, into: &bytes)
+            append(field.type, into: &bytes)
         }
     }
 

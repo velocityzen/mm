@@ -12,6 +12,8 @@ public protocol MMPackWriter {
     mutating func writeFloat(_ value: Float)
     mutating func writeDouble(_ value: Double)
     mutating func writeString(_ value: String)
+    /// Writes a `bin` holding the bytes.
+    mutating func writeBytes(_ value: MMBytes)
     /// Writes a `bin` holding the value's VPTS encoding, as for every wire time kind.
     mutating func writeDate(_ value: MMDate)
     mutating func writeDateTime(_ value: MMDateTime)
@@ -48,6 +50,9 @@ public protocol MMPackReader {
     mutating func readFloat() throws -> Float
     mutating func readDouble() throws -> Double
     mutating func readString() throws -> String
+    /// Reads a `bin`, or a `str` as its UTF-8 bytes, as `MMPackDecoder` reads
+    /// an ``MMBytes``.
+    mutating func readBytes() throws -> MMBytes
     /// Reads a `bin` holding a VPTS encoding of the kind's precision; a null
     /// VPTS fails, as wherever a value is required.
     mutating func readDate() throws -> MMDate
