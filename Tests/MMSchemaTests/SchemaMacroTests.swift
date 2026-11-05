@@ -197,6 +197,11 @@ private enum Desk: MethodNamespace {
                 Field("ok", .bool)
             }
         }
+        // A part that IS another container's type, made optional.
+        Call("latest") {
+            Access { .read }
+            Response(.optional(HandTypes.Stamp.self))
+        }
     }
 }
 
@@ -334,5 +339,12 @@ struct SchemaMacroTypesTests {
         let request = Desk.FileRequest(stamp: stamp, cosigner: nil, history: [stamp])
         #expect(request.stamp.priority == .high)
         #expect(request.history == [stamp])
+    }
+
+    @Test("a part can be another container's type, made optional")
+    func optionalCrossSchemaPayload() throws {
+        let latest: MMSchema.Method<Desk.LatestRequest, HandTypes.Stamp?> = Desk.latest
+        let signature = try latest.signature().get()
+        #expect(signature.response == .optional(.reference("hand.Stamp")))
     }
 }

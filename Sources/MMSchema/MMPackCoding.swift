@@ -98,6 +98,27 @@ public protocol MMPackDecodable: Decodable, SendableMetatype {
 
 public typealias MMPackCodable = MMPackEncodable & MMPackDecodable
 
+// A part declared as `.optional(...)` around a named type has `X?` as its
+// payload. These keep it on the generated path: nil, or the wrapped value
+// through its own generated code, the bytes `Optional`'s `Codable`
+// conformance writes through the coders.
+
+extension Optional: MMPackEncodable where Wrapped: MMPackEncodable {
+    @inlinable
+    public func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {
+        try writer.writeOptional(self) { writer, value in try value.encode(mmPack: &writer) }
+    }
+}
+
+extension Optional: MMPackDecodable where Wrapped: MMPackDecodable {
+    /// The wrapped value sits at the optional's own depth, as with
+    /// `Decodable`.
+    @inlinable
+    public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {
+        self = try reader.readOptional { reader in try Wrapped(mmPack: &reader, depth: depth) }
+    }
+}
+
 // The shapes generated code composes, inlinable so they specialize into it.
 
 extension MMPackWriter {

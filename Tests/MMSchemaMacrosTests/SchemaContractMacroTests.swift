@@ -205,6 +205,40 @@ struct SchemaContractMacroTests {
             ],
             macros: macros
         )
+        // A part can BE a named type, or one `.optional` of one: never `X??`
+        // (an absent `X?` and a present nil are the same bytes), and never an
+        // optional bare shape.
+        let payloadCases: [(String, String)] = [
+            (
+                #"Response(.optional(.optional(.reference("Note"))))"#,
+                #"Call("get"): Response payload must be a named-type reference, or .optional of one"#
+            ),
+            (
+                #"Request(.optional(.optional(Other.Note.self)))"#,
+                #"Call("get"): Request payload must be a named-type reference, or .optional of one"#
+            ),
+            (
+                #"Response(.optional(.int))"#,
+                #"Call("get"): unsupported Response argument .optional(.int)"#
+            ),
+        ]
+        for (part, message) in payloadCases {
+            let source = """
+                #schema("box") {
+                    Type("Note") { Field("text", .string) }
+                    Call("get") {
+                        Access(.read)
+                        \(part)
+                    }
+                }
+                """
+            assertMacroExpansion(
+                source,
+                expandedSource: source,
+                diagnostics: [DiagnosticSpec(message: message, line: 1, column: 1)],
+                macros: macros
+            )
+        }
         // `.input`: a required string, one per call, never with a request
         // stream, and `--input` is taken.
         let inputCases: [(String, String)] = [

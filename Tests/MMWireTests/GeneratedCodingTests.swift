@@ -320,6 +320,19 @@ struct GeneratedCodingTests {
         #expect(encodedThroughGeneratedCode(Catalog.RelayResponse()) == .success(mpBytes("80")))
     }
 
+    @Test("an optional of a generated type is generated too, with Codable's bytes")
+    func optionalPayload() throws {
+        var samples = Samples(seed: 0x6F70_7469_6F6E)
+        for _ in 0..<300 {
+            let item = samples.optional { $0.item() }
+            #expect(encodedThroughGeneratedCode(item) == encodedThroughCodable(item))
+            let bytes = try encodedThroughCodable(item).get()
+            #expect(decodedThroughGeneratedCode(Catalog.Item?.self, from: bytes) == .success(item))
+            #expect(decodedThroughCodable(Catalog.Item?.self, from: bytes) == .success(item))
+        }
+        #expect(encodedThroughGeneratedCode(Catalog.Item?.none) == .success(mpBytes("c0")))
+    }
+
     @Test("decodes what it writes, as the Codable path does")
     func roundTrip() throws {
         var samples = Samples(seed: 0x726F_756E_64)

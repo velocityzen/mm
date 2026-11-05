@@ -22,11 +22,16 @@ public struct MMCLIOutput: Sendable {
     /// a generated response or element its text form, no registry needed
     /// (`extension Journal.ReadResponse: CustomStringConvertible { ... }`);
     /// else compact JSON. Stream elements and terminals alike; the `json`
-    /// formats never consult either.
+    /// formats never consult either. An optional renders as what it holds,
+    /// so an optional response takes its wrapped type's entry; nil renders
+    /// as `null`.
     public static func render<T: Encodable>(
         _ value: T,
         format: OutputFormat
     ) throws -> String {
+        if let wrapped = Self.unwrapped(value) {
+            return try Self.render(wrapped, format: format)
+        }
         if format == .text {
             if let rendered = MMCLIDefaults.current.formatters.render(value) {
                 return rendered
@@ -60,7 +65,7 @@ public struct MMCLIOutput: Sendable {
         } catch {
             Self.note("output encoding failed: \(error)")
         }
-        MMCLIDefaults.current.programStatus?.report(value)
+        Self.reportStatus(value)
     }
 
     /// Renders one element of a stream. Above the first one, under
@@ -91,7 +96,7 @@ public struct MMCLIOutput: Sendable {
         } catch {
             Self.note("output encoding failed: \(error)")
         }
-        MMCLIDefaults.current.programStatus?.report(value)
+        Self.reportStatus(value)
     }
 
     /// Writes already-rendered output to stdout as one line. The raw-call
@@ -115,4 +120,28 @@ public struct MMCLIOutput: Sendable {
     private static func write(_ text: String, to handle: FileHandle) {
         try? handle.write(contentsOf: Data(text.utf8))
     }
+
+    /// Sends the report `value`'s ``On(_:_:)`` entry makes of it. An
+    /// optional reports as what it holds, so an optional response takes its
+    /// wrapped type's entry; nil reports nothing.
+    private static func reportStatus<T>(_ value: T) {
+        if let wrapped = Self.unwrapped(value) {
+            return Self.reportStatus(wrapped)
+        }
+        MMCLIDefaults.current.programStatus?.report(value)
+    }
+
+    /// What `value` holds when it is an optional that holds something.
+    private static func unwrapped<T>(_ value: T) -> (any Encodable)? {
+        (value as? any OptionalOutput)?.wrappedOutput
+    }
+}
+
+/// `Optional` seen through to what it holds, for the output entry points.
+private protocol OptionalOutput {
+    var wrappedOutput: (any Encodable)? { get }
+}
+
+extension Optional: OptionalOutput where Wrapped: Encodable {
+    fileprivate var wrappedOutput: (any Encodable)? { self.map { $0 } }
 }

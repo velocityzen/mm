@@ -365,7 +365,8 @@ private struct ParsedCall {
     var requestName: String?
     var requestDescription: String?
     /// A `Request(.reference("X"))` / `Request(X.self)` payload: the request
-    /// IS a named type; no request struct is generated.
+    /// IS a named type, or `X?` under `.optional(...)`; no request struct is
+    /// generated.
     var requestPayload: ParsedType?
     var requestStream: [ParsedField]?
     var requestStreamName: String?
@@ -377,7 +378,8 @@ private struct ParsedCall {
     var responseName: String?
     var responseDescription: String?
     /// A `Response(.reference("X"))` / `Response(X.self)` payload: the
-    /// response IS a named type; no response struct is generated.
+    /// response IS a named type, or `X?` under `.optional(...)`; no response
+    /// struct is generated.
     var responsePayload: ParsedType?
     var responseStream: [ParsedField]?
     var responseStreamName: String?
@@ -1329,8 +1331,9 @@ private func requireDescriptionLiteral(
 /// Parses Request/Response/RequestStream/ResponseStream: an optional leading
 /// type-name string literal, an ignored StreamOptions argument, an optional
 /// `description:`, and a trailing closure of Field declarations (optional for
-/// Request/Response) — or, for Response and the streams, a bare payload
-/// reference (`.reference("X")` / `X.self`) meaning the part IS a named type.
+/// Request/Response) — or a bare payload reference (`.reference("X")` /
+/// `X.self`) meaning the part IS a named type, optionally wrapped in
+/// `.optional(...)` (the part is then `X?`: a lookup that may find nothing).
 private func parseFieldsPart(
     _ part: FunctionCallExprSyntax,
     partName: String,
@@ -1378,14 +1381,11 @@ private func parseFieldsPart(
                     "Call(\"\(callName)\"): \(partName) mixes a payload reference with fields or a type name"
             )
         }
-        guard case .reference = payload else {
-            guard case .external = payload else {
-                throw SchemaMacroError(
-                    description:
-                        "Call(\"\(callName)\"): \(partName) payload must be a named-type reference"
-                )
-            }
-            return (nil, description, [], payload)
+        guard isNamedPayload(payload) else {
+            throw SchemaMacroError(
+                description:
+                    "Call(\"\(callName)\"): \(partName) payload must be a named-type reference, or .optional of one"
+            )
         }
         return (nil, description, [], payload)
     }
@@ -1398,14 +1398,24 @@ private func parseFieldsPart(
 }
 
 /// Whether a part argument is a payload reference: `.reference("X")` or a
-/// Swift type reference (`Other.Name.self`).
+/// Swift type reference (`Other.Name.self`), either one optionally wrapped
+/// in `.optional(...)`.
 private func isPayloadReference(_ expr: ExprSyntax) -> Bool {
     if let call = expr.as(FunctionCallExprSyntax.self),
         let member = call.calledExpression.as(MemberAccessExprSyntax.self),
-        member.base == nil,
-        member.declName.baseName.text == "reference"
+        member.base == nil
     {
-        return true
+        switch member.declName.baseName.text {
+            case "reference":
+                return true
+            case "optional":
+                guard call.arguments.count == 1, let wrapped = call.arguments.first else {
+                    return false
+                }
+                return isPayloadReference(wrapped.expression)
+            default:
+                return false
+        }
     }
     if let member = expr.as(MemberAccessExprSyntax.self),
         member.declName.baseName.text == "self",
@@ -1414,6 +1424,20 @@ private func isPayloadReference(_ expr: ExprSyntax) -> Bool {
         return true
     }
     return false
+}
+
+/// Whether a parsed payload is one a part can BE: a named type, local or
+/// cross-schema, or one level of `.optional` around one. `X??` is not: on
+/// the wire an absent `X?` and a present `nil` are the same bytes.
+private func isNamedPayload(_ payload: ParsedType) -> Bool {
+    switch payload {
+        case .reference, .external:
+            return true
+        case .optional(.reference), .optional(.external):
+            return true
+        default:
+            return false
+    }
 }
 
 private func parseFields(_ closure: ClosureExprSyntax, context: String) throws -> [ParsedField] {
@@ -2486,21 +2510,22 @@ private func commandDeclaration(
     let wireName = wireName(namespace: namespace, call: call)
     // Request fields: a generated struct's declared fields, a local
     // named-type reference's fields (the type is a sibling with a memberwise
-    // init), or — for external references — a single JSON option.
+    // init), or — for external and optional references — a single JSON
+    // option.
     var fields = call.request
-    var requestIsExternalReference = false
+    var requestTakesJSON = false
     if let payload = call.requestPayload {
         switch payload {
             case .reference(let name):
                 fields = structsByName[name] ?? []
-                requestIsExternalReference = structsByName[name] == nil
+                requestTakesJSON = structsByName[name] == nil
             default:
-                requestIsExternalReference = true
+                requestTakesJSON = true
         }
     }
     // The `.input` field, when there is one: the command then reads its
     // values from an input (see `MMCLIInputRunner`).
-    let inputField = requestIsExternalReference ? nil : fields.first(where: isInputField)
+    let inputField = requestTakesJSON ? nil : fields.first(where: isInputField)
     var lines: [String] = []
     let conformances = inputField == nil ? "AsyncParsableCommand" : "MMCLIInputCommand"
     lines.append("public struct \(call.commandTypeName): \(conformances) {")
@@ -2528,15 +2553,24 @@ private func commandDeclaration(
     var preludes: [String] = []
     var requestArguments: [String] = []
 
-    if requestIsExternalReference {
+    if requestTakesJSON {
         lines.append(entityProperty)
-        let requestType = call.requestSwiftType
-        lines.append(
-            "    @Option(name: .customLong(\"request\"), help: \"The request payload as JSON\") public var requestJSON: String"
-        )
-        preludes.append(
-            "let requestValue = try MMCLIJSON.decodeRequired(\(requestType).self, from: requestJSON, option: \"request\")"
-        )
+        if case .optional(let wrapped) = call.requestPayload {
+            // An optional request: leaving the option out sends nil.
+            lines.append(
+                "    @Option(name: .customLong(\"request\"), help: \"The request payload as JSON; omit to send none\") public var requestJSON: String?"
+            )
+            preludes.append(
+                "let requestValue = try MMCLIJSON.decode(\(swiftType(wrapped)).self, from: requestJSON, option: \"request\")"
+            )
+        } else {
+            lines.append(
+                "    @Option(name: .customLong(\"request\"), help: \"The request payload as JSON\") public var requestJSON: String"
+            )
+            preludes.append(
+                "let requestValue = try MMCLIJSON.decodeRequired(\(call.requestSwiftType).self, from: requestJSON, option: \"request\")"
+            )
+        }
     } else {
         // Positional layout: required positional fields, then optional
         // single-value ones, then the omittable entity, then array
@@ -2624,7 +2658,7 @@ private func commandDeclaration(
     for prelude in preludes {
         lines.append("        \(prelude)")
     }
-    if requestIsExternalReference {
+    if requestTakesJSON {
         lines.append("        let request = requestValue")
     } else {
         let requestType = call.requestSwiftType
