@@ -557,6 +557,23 @@ struct StreamRuntimeTests {
         #expect(!runtime.shouldSendUnaryTerminal(msgid: 40))
     }
 
+    @Test("more stream frames on a live unary msgid still send one code-6")
+    func unaryMisaddressAnswersOnce() async {
+        let funnel = RecordingFunnel()
+        let runtime = makeRuntime(funnel: funnel)
+        #expect(runtime.registerUnary(msgid: 41))
+        let item = try! MMPackEncoder().encode(1).get()
+        await runtime.route(.end(msgid: 41), framesDropped: droppedCounter())
+        await runtime.route(.end(msgid: 41), framesDropped: droppedCounter())
+        await runtime.route(.item(msgid: 41, seq: 0, item: item), framesDropped: droppedCounter())
+        let terminals = funnel.envelopes.filter {
+            if case .response(41, _, _) = $0 { return true } else { return false }
+        }
+        #expect(terminals.count == 1)
+        #expect(funnel.terminalCode(msgid: 41) == .some(.some(MMErrorCode.streamViolation.code)))
+        #expect(!runtime.shouldSendUnaryTerminal(msgid: 41))
+    }
+
     @Test("stream frames for unknown msgids drop and count, never terminate")
     func unknownMsgidDrops() async {
         let funnel = RecordingFunnel()

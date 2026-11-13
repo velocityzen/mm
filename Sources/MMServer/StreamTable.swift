@@ -30,7 +30,9 @@ import MMWire
 /// 4. a request item whose payload fails to decode as the declared element type.
 ///
 /// A stream frame addressed to a live unary msgid is a separate case
-/// (`.unaryViolation`), also answered with a code-6 terminal.
+/// (`.unaryViolation`), also answered with a code-6 terminal. Only the first
+/// one: that terminal answers the call, so later stream frames on the msgid
+/// drop, as they would for a retired msgid.
 ///
 /// ## Single-terminal invariant
 ///
@@ -65,7 +67,8 @@ struct StreamTable: Sendable {
         case live
         /// A stream frame hit this live unary msgid: the connection already
         /// answered with a code-6 terminal, so the unary handler's own terminal
-        /// must be suppressed to preserve the single-terminal guarantee.
+        /// must be suppressed to preserve the single-terminal guarantee. Later
+        /// stream frames on the msgid drop, for the same reason.
         case suppressed
     }
 
@@ -129,9 +132,15 @@ struct StreamTable: Sendable {
 
     /// Routes one stream item (kind 3).
     mutating func routeItem(msgid: UInt32, seq: UInt32) -> ItemDecision {
-        if self.unary[msgid] != nil {
-            self.unary[msgid] = .suppressed
-            return .unaryViolation
+        switch self.unary[msgid] {
+            case .live:
+                self.unary[msgid] = .suppressed
+                return .unaryViolation
+            case .suppressed:
+                // The code-6 terminal already answered this call.
+                return .drop
+            case nil:
+                break
         }
         guard var entry = self.streams[msgid] else { return .drop }
         guard entry.hasRequestStream else {
@@ -186,9 +195,15 @@ struct StreamTable: Sendable {
     /// direction, or nil to drop (unknown msgid, no request direction, or a
     /// second END).
     mutating func routeEnd(msgid: UInt32) -> EndDecision {
-        if self.unary[msgid] != nil {
-            self.unary[msgid] = .suppressed
-            return .unaryViolation
+        switch self.unary[msgid] {
+            case .live:
+                self.unary[msgid] = .suppressed
+                return .unaryViolation
+            case .suppressed:
+                // The code-6 terminal already answered this call.
+                return .drop
+            case nil:
+                break
         }
         guard var entry = self.streams[msgid] else { return .drop }
         guard entry.hasRequestStream else {

@@ -34,19 +34,6 @@ struct HelloTests {
         #expect(Self.pinnedHello.encode().mpSuccess?.readableBytes == 15)
     }
 
-    @Test("round trips over seeded random values")
-    func randomRoundTrips() {
-        var rng = SplitMix64(seed: 0x4d4d)
-        for _ in 0..<100 {
-            let hello = MMHello(
-                protocolVersion: UInt8.random(in: .min ... .max, using: &rng),
-                schemaFingerprint: UInt64.random(in: .min ... .max, using: &rng),
-                capabilities: UInt32.random(in: .min ... .max, using: &rng)
-            )
-            #expect(MMHello.decode(from: hello.encode().mpSuccess!) == .success(hello))
-        }
-    }
-
     @Test("bad matter in either byte is badMatter")
     func badMatter() {
         #expect(

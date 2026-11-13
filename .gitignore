@@ -10,6 +10,9 @@
 .DS_Store
 *.xcodeproj
 
+# Hegel property-test failures, replayed first on the next run
+.hegel/
+
 # SourceKit-LSP index builds compile the MMCLIGeneratorPlugin output of
 # MMCLITests without an output-file-map entry, so the compiler writes these
 # into the working directory (an upstream bug).

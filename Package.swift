@@ -29,6 +29,9 @@ let package = Package(
         .package(url: "https://github.com/velocityzen/fp-swift-pipe.git", from: "2.1.0"),
         .package(url: "https://github.com/velocityzen/fp-swift-service.git", branch: "main"),
         .package(url: "https://github.com/velocityzen/ProgramStatus.git", from: "0.4.0"),
+        // Property-based tests. Test targets only, so the package's users
+        // never fetch it.
+        .package(url: "https://github.com/velocityzen/hegel-swift.git", from: "0.51.1"),
     ],
     targets: [
         .target(
@@ -242,6 +245,23 @@ let package = Package(
                 .product(name: "ProgramStatus", package: "ProgramStatus"),
             ],
             plugins: ["MMCLIGeneratorPlugin"]
+        ),
+        // Hegel's engine is built for macOS and Linux only, so on the other
+        // platforms this target is empty: every file is behind
+        // `#if os(macOS) || os(Linux)`.
+        .testTarget(
+            name: "MMPropertyTests",
+            dependencies: [
+                "MMWire",
+                "MMServer",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+                .product(
+                    name: "HegelTesting",
+                    package: "hegel-swift",
+                    condition: .when(platforms: [.macOS, .linux])
+                ),
+            ]
         ),
         .testTarget(
             name: "MMIntegrationTests",
