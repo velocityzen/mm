@@ -542,26 +542,97 @@ struct StreamRuntimeTests {
         #expect(funnel.terminalCode(msgid: 7) == .some(.none))
     }
 
+    // MARK: - Msgid reused after its terminal
+
+    @Test("a msgid reused after a CANCEL is not retired by the cancelled handler")
+    func cancelledHandlerLeavesReusedMsgidAlone() async {
+        // The code-7 terminal answers the first call, so the client may reuse
+        // its msgid at once, while the cancelled handler is still running.
+        let funnel = RecordingFunnel()
+        let runtime = makeRuntime(funnel: funnel)
+        let firstStarted = AsyncRelease()
+        let firstRelease = AsyncRelease()
+        let secondStarted = AsyncRelease()
+        let secondRelease = AsyncRelease()
+        let first = Handle(
+            ServerStreamMethod<StreamReq, Int, Ack>(name: "s.first", access: .read)
+        ) { _, _, _ in
+            await firstStarted.release()
+            // Not cancellation-aware: it returns after the reuse below.
+            await firstRelease.wait()
+            return .success(Ack(count: 1))
+        }
+        let second = Handle(
+            ServerStreamMethod<StreamReq, Int, Ack>(name: "s.second", access: .read)
+        ) { _, _, _ in
+            await secondStarted.release()
+            await secondRelease.wait()
+            return .success(Ack(count: 2))
+        }
+        let context = makeContext()
+        guard
+            let firstPlan = await runtime.openStream(
+                msgid: 9, route: first, params: openParams(), context: context
+            )
+        else {
+            Issue.record("first open accepted")
+            return
+        }
+        let firstRun = Task { await firstPlan.run() }
+        await firstStarted.wait()
+        await runtime.route(.cancel(msgid: 9), framesDropped: droppedCounter())
+
+        guard
+            let secondPlan = await runtime.openStream(
+                msgid: 9, route: second, params: openParams(), context: context
+            )
+        else {
+            Issue.record("a msgid whose call was answered can be reused")
+            await firstRelease.release()
+            await firstRun.value
+            return
+        }
+        let secondRun = Task { await secondPlan.run() }
+        await secondStarted.wait()
+        await firstRelease.release()
+        await firstRun.value
+        await secondRelease.release()
+        await secondRun.value
+
+        // One terminal per call: the first call's code-7, then the second
+        // call's own result.
+        let terminals: [(error: MMError?, result: ByteBuffer?)] = funnel.envelopes.compactMap {
+            if case .response(9, let error, let result) = $0 { return (error, result) }
+            return nil
+        }
+        #expect(terminals.count == 2)
+        #expect(terminals.first?.error?.code == MMErrorCode.cancelled.code)
+        let secondResult = terminals.dropFirst().first?.result.flatMap {
+            try? MMPackDecoder().decode(Ack.self, from: $0).get()
+        }
+        #expect(secondResult?.count == 2)
+    }
+
     // MARK: - Unary-msgid guard
 
     @Test("a stream frame on a live unary msgid is a code-6 and suppresses the unary terminal")
-    func unaryMisaddressSuppresses() async {
+    func unaryMisaddressSuppresses() async throws {
         let funnel = RecordingFunnel()
         let runtime = makeRuntime(funnel: funnel)
-        #expect(runtime.registerUnary(msgid: 40))
+        let call = try #require(runtime.registerUnary(msgid: 40))
         let item = try! MMPackEncoder().encode(1).get()
         await runtime.route(.item(msgid: 40, seq: 0, item: item), framesDropped: droppedCounter())
         // Code-6 sent.
         #expect(funnel.terminalCode(msgid: 40) == .some(.some(MMErrorCode.streamViolation.code)))
         // The unary handler's own terminal is now suppressed.
-        #expect(!runtime.shouldSendUnaryTerminal(msgid: 40))
+        #expect(!runtime.shouldSendUnaryTerminal(msgid: 40, call: call))
     }
 
     @Test("more stream frames on a live unary msgid still send one code-6")
-    func unaryMisaddressAnswersOnce() async {
+    func unaryMisaddressAnswersOnce() async throws {
         let funnel = RecordingFunnel()
         let runtime = makeRuntime(funnel: funnel)
-        #expect(runtime.registerUnary(msgid: 41))
+        let call = try #require(runtime.registerUnary(msgid: 41))
         let item = try! MMPackEncoder().encode(1).get()
         await runtime.route(.end(msgid: 41), framesDropped: droppedCounter())
         await runtime.route(.end(msgid: 41), framesDropped: droppedCounter())
@@ -571,7 +642,11 @@ struct StreamRuntimeTests {
         }
         #expect(terminals.count == 1)
         #expect(funnel.terminalCode(msgid: 41) == .some(.some(MMErrorCode.streamViolation.code)))
-        #expect(!runtime.shouldSendUnaryTerminal(msgid: 41))
+        // The code-6 answered the call: the client may reuse msgid 41 before the
+        // first handler returns, and the two calls keep apart.
+        let reuse = try #require(runtime.registerUnary(msgid: 41))
+        #expect(!runtime.shouldSendUnaryTerminal(msgid: 41, call: call))
+        #expect(runtime.shouldSendUnaryTerminal(msgid: 41, call: reuse))
     }
 
     @Test("stream frames for unknown msgids drop and count, never terminate")

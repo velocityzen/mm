@@ -30,22 +30,34 @@ import MMWire
 /// 4. a request item whose payload fails to decode as the declared element type.
 ///
 /// A stream frame addressed to a live unary msgid is a separate case
-/// (`.unaryViolation`), also answered with a code-6 terminal. Only the first
-/// one: that terminal answers the call, so later stream frames on the msgid
-/// drop, as they would for a retired msgid.
+/// (`.unaryViolation`), also answered with a code-6 terminal. That terminal
+/// answers the unary call, so the call is removed: later stream frames on the
+/// msgid drop, and the msgid is free for a new call.
 ///
 /// ## Single-terminal invariant
 ///
-/// A msgid is present in exactly one of `streams` or `unary`, or in neither
-/// (never registered, or already retired). Every terminal-producing transition
-/// (a `.violation` decision, `routeCancel`, and the handler-completion
-/// `retireStream`) removes the entry in the same locked mutation that
-/// authorizes the terminal, so the connection sends exactly one terminal per
-/// msgid and a second frame for a retired msgid can only reach the drop path.
-/// `retireStream` returns false once the entry is gone, which is how a handler
-/// completing *after* a CANCEL/violation has its now-redundant terminal
-/// suppressed.
+/// A msgid holds at most one live call: a stream in `streams` or a unary call
+/// in `unary`, never both. Every transition that sends a terminal (a
+/// `.violation` or `.unaryViolation` decision, `routeCancel`, and the
+/// handler's own `retireStream` or `consumeUnaryTerminal`) removes the call in
+/// the same locked mutation that authorizes the terminal, so each call gets
+/// exactly one terminal and a later frame for its msgid can only reach the
+/// drop path.
+///
+/// A handler can outlive its call. A CANCEL or a violation answers the call
+/// while the handler is still running, and the client may then reuse the
+/// msgid for a new call. So every registration gets its own ``CallIdentity``,
+/// and the handler retires with it: `retireStream` and `consumeUnaryTerminal`
+/// return false unless the msgid still holds that same call. That drops the
+/// handler's now-redundant terminal and leaves a newer call on the msgid
+/// alone.
 struct StreamTable: Sendable {
+    /// One registered call. Every registration gets a new identity, so a
+    /// handler can retire its own call and never a later one on the same msgid.
+    struct CallIdentity: Hashable, Sendable {
+        fileprivate let value: UInt64
+    }
+
     /// One live stream's direction bookkeeping. The erased `control` applies
     /// effects; the flags here decide legality without touching `Element` types.
     struct Entry {
@@ -60,23 +72,18 @@ struct StreamTable: Sendable {
         var requestEnded = false
     }
 
-    /// A live unary call's terminal disposition.
-    enum UnaryState {
-        /// Dispatch is running; its terminal will be sent when the handler
-        /// returns.
-        case live
-        /// A stream frame hit this live unary msgid: the connection already
-        /// answered with a code-6 terminal, so the unary handler's own terminal
-        /// must be suppressed to preserve the single-terminal guarantee. Later
-        /// stream frames on the msgid drop, for the same reason.
-        case suppressed
+    /// A live stream: its call and its direction bookkeeping.
+    private struct LiveStream {
+        let call: CallIdentity
+        var entry: Entry
     }
 
-    private var streams: [UInt32: Entry] = [:]
-    /// Live unary-call msgids and whether their terminal is still owed, so a
-    /// stream frame addressed to one is classified as a violation (not an
-    /// unknown-msgid drop) and the redundant unary terminal is suppressed.
-    private var unary: [UInt32: UnaryState] = [:]
+    private var streams: [UInt32: LiveStream] = [:]
+    /// Live unary calls, so a stream frame addressed to one is classified as a
+    /// violation (not an unknown-msgid drop).
+    private var unary: [UInt32: CallIdentity] = [:]
+    /// The last identity handed out.
+    private var lastCall: UInt64 = 0
 
     /// Count of currently open streams, against
     /// `maxConcurrentStreamsPerConnection`.
@@ -84,16 +91,16 @@ struct StreamTable: Sendable {
 
     // MARK: - Registration
 
-    /// Registers an accepted stream open. Fails (returns false) if the msgid is
-    /// already in use — a client bug (msgid reuse while live); the connection
-    /// answers such an open with an internal-error terminal. The cap is checked
-    /// by the caller before this (an over-cap open never reaches here).
-    mutating func registerStream(msgid: UInt32, entry: Entry) -> Bool {
-        guard self.streams[msgid] == nil, self.unary[msgid] == nil else {
-            return false
-        }
-        self.streams[msgid] = entry
-        return true
+    /// Registers an accepted stream open and returns its call's identity, which
+    /// the handler retires with. Nil if the msgid already holds a live call: a
+    /// client reusing a msgid before its terminal, which the caller drops. The
+    /// cap is checked by the caller before this (an over-cap open never
+    /// reaches here).
+    mutating func registerStream(msgid: UInt32, entry: Entry) -> CallIdentity? {
+        guard !self.isOwned(msgid: msgid) else { return nil }
+        let call = self.newCall()
+        self.streams[msgid] = LiveStream(call: call, entry: entry)
+        return call
     }
 
     /// Whether `msgid` is already owned by a live stream or a live unary call.
@@ -105,44 +112,42 @@ struct StreamTable: Sendable {
     }
 
     /// Marks a msgid as a live unary call for the duration of its dispatch, so
-    /// stream frames targeting it are violations. Fails (returns false) if the
-    /// msgid is already owned by a live stream or unary call — a reused msgid,
-    /// which the caller drops-and-counts rather than registering a second
-    /// competing terminal owner (the single-terminal invariant).
-    mutating func registerUnary(msgid: UInt32) -> Bool {
-        guard self.streams[msgid] == nil, self.unary[msgid] == nil else {
-            return false
-        }
-        self.unary[msgid] = .live
+    /// stream frames targeting it are violations, and returns the call's
+    /// identity. Nil if the msgid already holds a live stream or unary call — a
+    /// reused msgid, which the caller drops-and-counts rather than registering
+    /// a second competing terminal owner (the single-terminal invariant).
+    mutating func registerUnary(msgid: UInt32) -> CallIdentity? {
+        guard !self.isOwned(msgid: msgid) else { return nil }
+        let call = self.newCall()
+        self.unary[msgid] = call
+        return call
+    }
+
+    /// Whether the unary handler's terminal for `call` should be sent; retires
+    /// the call when it should. False when a stream frame already answered the
+    /// call with a code-6 terminal, so the connection drops the redundant unary
+    /// terminal, and leaves alone any newer call the msgid holds by then.
+    mutating func consumeUnaryTerminal(msgid: UInt32, call: CallIdentity) -> Bool {
+        guard self.unary[msgid] == call else { return false }
+        self.unary[msgid] = nil
         return true
     }
 
-    /// Whether the unary handler's terminal for `msgid` should be sent, then
-    /// retires the unary entry. Returns false when a stream frame already forced
-    /// a code-6 terminal for this msgid (state `.suppressed`), so the connection
-    /// drops the redundant unary terminal.
-    mutating func consumeUnaryTerminal(msgid: UInt32) -> Bool {
-        switch self.unary.removeValue(forKey: msgid) {
-            case .suppressed: return false
-            case .live, nil: return true
-        }
+    private mutating func newCall() -> CallIdentity {
+        self.lastCall &+= 1
+        return CallIdentity(value: self.lastCall)
     }
 
     // MARK: - Frame routing actions
 
     /// Routes one stream item (kind 3).
     mutating func routeItem(msgid: UInt32, seq: UInt32) -> ItemDecision {
-        switch self.unary[msgid] {
-            case .live:
-                self.unary[msgid] = .suppressed
-                return .unaryViolation
-            case .suppressed:
-                // The code-6 terminal already answered this call.
-                return .drop
-            case nil:
-                break
+        if self.unary.removeValue(forKey: msgid) != nil {
+            // The code-6 terminal answers the unary call.
+            return .unaryViolation
         }
-        guard var entry = self.streams[msgid] else { return .drop }
+        guard var live = self.streams[msgid] else { return .drop }
+        let entry = live.entry
         guard entry.hasRequestStream else {
             self.streams[msgid] = nil
             return .violation(entry.control)
@@ -169,15 +174,17 @@ struct StreamTable: Sendable {
             self.streams[msgid] = nil
             return .violation(entry.control)
         }
-        entry.expectedInSeq &+= 1
-        self.streams[msgid] = entry
-        return .deliver(entry.control)
+        live.entry.expectedInSeq &+= 1
+        self.streams[msgid] = live
+        return .deliver(entry.control, live.call)
     }
 
     /// The outcome of `routeItem` — mirrors ``Action`` but names only the item
     /// cases, so the connection's item path is exhaustive without a default.
+    /// `deliver` carries the call, so a payload that then fails to decode
+    /// retires that call and no other.
     enum ItemDecision {
-        case deliver(any StreamControl)
+        case deliver(any StreamControl, CallIdentity)
         case violation(any StreamControl)
         case unaryViolation
         case drop
@@ -187,7 +194,7 @@ struct StreamTable: Sendable {
     /// the sink; grants on a stream with no response direction, or an unknown
     /// msgid, are dropped.
     func routeCredit(msgid: UInt32) -> (any StreamControl)? {
-        guard let entry = self.streams[msgid], entry.hasResponseStream else { return nil }
+        guard let entry = self.streams[msgid]?.entry, entry.hasResponseStream else { return nil }
         return entry.control
     }
 
@@ -195,25 +202,19 @@ struct StreamTable: Sendable {
     /// direction, or nil to drop (unknown msgid, no request direction, or a
     /// second END).
     mutating func routeEnd(msgid: UInt32) -> EndDecision {
-        switch self.unary[msgid] {
-            case .live:
-                self.unary[msgid] = .suppressed
-                return .unaryViolation
-            case .suppressed:
-                // The code-6 terminal already answered this call.
-                return .drop
-            case nil:
-                break
+        if self.unary.removeValue(forKey: msgid) != nil {
+            // The code-6 terminal answers the unary call.
+            return .unaryViolation
         }
-        guard var entry = self.streams[msgid] else { return .drop }
-        guard entry.hasRequestStream else {
+        guard var live = self.streams[msgid] else { return .drop }
+        guard live.entry.hasRequestStream else {
             self.streams[msgid] = nil
-            return .violation(entry.control)
+            return .violation(live.entry.control)
         }
-        guard !entry.requestEnded else { return .drop }
-        entry.requestEnded = true
-        self.streams[msgid] = entry
-        return .end(entry.control)
+        guard !live.entry.requestEnded else { return .drop }
+        live.entry.requestEnded = true
+        self.streams[msgid] = live
+        return .end(live.entry.control)
     }
 
     enum EndDecision {
@@ -229,7 +230,7 @@ struct StreamTable: Sendable {
     /// dropped — the caller has no response stream to stop and the call answers
     /// itself.
     func routeStop(msgid: UInt32) -> (any StreamControl)? {
-        guard let entry = self.streams[msgid], entry.hasResponseStream else { return nil }
+        guard let entry = self.streams[msgid]?.entry, entry.hasResponseStream else { return nil }
         return entry.control
     }
 
@@ -239,19 +240,21 @@ struct StreamTable: Sendable {
     /// (unary calls answer with their own terminal and CANCEL is client→whole
     /// call — retiring an already-answering unary would double-terminate).
     mutating func routeCancel(msgid: UInt32) -> (any StreamControl)? {
-        guard let entry = self.streams[msgid] else { return nil }
-        self.streams[msgid] = nil
-        return entry.control
+        guard let live = self.streams.removeValue(forKey: msgid) else { return nil }
+        return live.entry.control
     }
 
     // MARK: - Retirement
 
-    /// Retires a stream on its handler's terminal (graceful return or the
-    /// code-6/7 terminal already accounted). Returns false if the entry was
-    /// already gone (a CANCEL or violation retired it first), so the connection
-    /// suppresses the now-redundant terminal — the single-terminal guarantee.
-    mutating func retireStream(msgid: UInt32) -> Bool {
-        self.streams.removeValue(forKey: msgid) != nil
+    /// Retires a stream's `call` on its handler's terminal. Returns false if
+    /// the call was already answered (a CANCEL or violation retired it first),
+    /// so the connection suppresses the now-redundant terminal — the
+    /// single-terminal guarantee — and leaves alone any newer call the msgid
+    /// holds by then.
+    mutating func retireStream(msgid: UInt32, call: CallIdentity) -> Bool {
+        guard self.streams[msgid]?.call == call else { return false }
+        self.streams[msgid] = nil
+        return true
     }
 
     /// Whether a stream entry is still live (test/debug aid).
@@ -266,6 +269,6 @@ struct StreamTable: Sendable {
     /// the writer before the channel closes (the graceful-drain contract).
     /// Unary msgids need no teardown (their tasks are in the same group).
     func liveControls() -> [any StreamControl] {
-        self.streams.values.map(\.control)
+        self.streams.values.map(\.entry.control)
     }
 }

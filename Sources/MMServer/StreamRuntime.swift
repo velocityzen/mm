@@ -36,18 +36,20 @@ final class StreamRuntime: Sendable {
     // MARK: - Unary guard
 
     /// Marks `msgid` a live unary call so a stream frame misaddressed to it is a
-    /// violation, not a silent drop. Returns false if the msgid is already owned
-    /// by a live stream or unary call (a reused msgid), so the caller drops it
-    /// rather than registering a second terminal owner.
-    func registerUnary(msgid: UInt32) -> Bool {
+    /// violation, not a silent drop, and returns the call's identity. Nil if
+    /// the msgid is already owned by a live stream or unary call (a reused
+    /// msgid), so the caller drops it rather than registering a second
+    /// terminal owner.
+    func registerUnary(msgid: UInt32) -> StreamTable.CallIdentity? {
         self.table.withLockedValue { $0.registerUnary(msgid: msgid) }
     }
 
-    /// Whether the unary handler's terminal for `msgid` should still be sent
-    /// (false when a stream frame already forced a code-6 terminal for it),
-    /// retiring the unary entry either way.
-    func shouldSendUnaryTerminal(msgid: UInt32) -> Bool {
-        self.table.withLockedValue { $0.consumeUnaryTerminal(msgid: msgid) }
+    /// Whether the unary handler's terminal for `call` should still be sent,
+    /// retiring the call when it should. False when a stream frame already
+    /// answered the call with a code-6 terminal; a newer call on the msgid is
+    /// left alone.
+    func shouldSendUnaryTerminal(msgid: UInt32, call: StreamTable.CallIdentity) -> Bool {
+        self.table.withLockedValue { $0.consumeUnaryTerminal(msgid: msgid, call: call) }
     }
 
     // MARK: - Opening a stream
@@ -118,7 +120,7 @@ final class StreamRuntime: Sendable {
             return nil
         }
 
-        let registered = self.table.withLockedValue { table in
+        let call = self.table.withLockedValue { table in
             table.registerStream(
                 msgid: msgid,
                 entry: StreamTable.Entry(
@@ -128,7 +130,7 @@ final class StreamRuntime: Sendable {
                 )
             )
         }
-        guard registered else {
+        guard let call else {
             // Defensive: the up-front ownership check already caught msgid
             // reuse, so this can only happen if a frame registered the msgid
             // between that check and here — impossible under the single request
@@ -152,16 +154,19 @@ final class StreamRuntime: Sendable {
             } onCancel: {
                 handlerTask.cancel()
             }
-            await self.finishStream(msgid: msgid, terminal: terminal)
+            await self.finishStream(msgid: msgid, call: call, terminal: terminal)
         }
     }
 
     /// The handler returned: send its terminal and retire the stream — but only
-    /// if the stream is still live. A CANCEL or a violation may have retired it
+    /// if its call is still live. A CANCEL or a violation may have retired it
     /// and already sent a code-6/7 terminal; in that case the handler's terminal
-    /// is discarded (the single-terminal guarantee).
-    private func finishStream(msgid: UInt32, terminal: StreamTerminal) async {
-        let stillLive = self.table.withLockedValue { $0.retireStream(msgid: msgid) }
+    /// is discarded (the single-terminal guarantee), and a newer call the
+    /// client opened on the msgid since is left alone.
+    private func finishStream(
+        msgid: UInt32, call: StreamTable.CallIdentity, terminal: StreamTerminal
+    ) async {
+        let stillLive = self.table.withLockedValue { $0.retireStream(msgid: msgid, call: call) }
         guard stillLive else { return }
         self.metrics.ended.increment()
         let envelope: MMEnvelope
@@ -215,7 +220,7 @@ final class StreamRuntime: Sendable {
     ) async {
         let decision = self.table.withLockedValue { $0.routeItem(msgid: msgid, seq: seq) }
         switch decision {
-            case .deliver(let control):
+            case .deliver(let control, let call):
                 if case .failure = control.deliver(item) {
                     // Element decode failure: a stream violation. Unlike the
                     // `.violation` decisions (which nil the entry under the table
@@ -223,7 +228,9 @@ final class StreamRuntime: Sendable {
                     // to advance seq/credit — so retire it here before the code-6
                     // terminal, or the later `finishStream` would emit a SECOND
                     // terminal for this msgid (the single-terminal invariant).
-                    let stillLive = self.table.withLockedValue { $0.retireStream(msgid: msgid) }
+                    let stillLive = self.table.withLockedValue {
+                        $0.retireStream(msgid: msgid, call: call)
+                    }
                     if stillLive {
                         await self.violation(msgid: msgid, control: control)
                     } else {
@@ -285,7 +292,7 @@ final class StreamRuntime: Sendable {
 
     /// A stream frame misaddressed to a live unary msgid: the caller broke the
     /// contract. Send a code-6 terminal; the unary handler's own terminal is
-    /// suppressed (the table flipped the entry to `.suppressed`).
+    /// suppressed (the table already removed the call).
     private func unaryViolation(msgid: UInt32) async {
         self.metrics.violations.increment()
         _ = await self.writer.send(

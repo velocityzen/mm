@@ -1064,7 +1064,7 @@ package struct ServerRuntime: Sendable {
                 // terminal for it, so this reopen is dropped-and-counted — never
                 // admitted, never given a terminal of its own (the single-terminal
                 // invariant).
-                guard streams.registerUnary(msgid: msgid) else {
+                guard let call = streams.registerUnary(msgid: msgid) else {
                     self.metrics.streamFramesDropped.increment()
                     return
                 }
@@ -1077,7 +1077,7 @@ package struct ServerRuntime: Sendable {
                     // Retire the just-registered unary entry so it does not linger,
                     // then answer the over-cap open with a code-4 terminal (this is
                     // this msgid's own single terminal — it was not owned before).
-                    _ = streams.shouldSendUnaryTerminal(msgid: msgid)
+                    _ = streams.shouldSendUnaryTerminal(msgid: msgid, call: call)
                     _ = await writer.send(
                         .response(
                             msgid: msgid,
@@ -1089,9 +1089,11 @@ package struct ServerRuntime: Sendable {
                 }
                 handlers.addTask {
                     let response = await self.router.dispatch(envelope: envelope, context: context)
-                    // Retire the unary msgid; suppress the terminal if a stream frame
-                    // already forced a code-6 for it (the misaddressed-frame guard).
-                    if streams.shouldSendUnaryTerminal(msgid: msgid), let response {
+                    // Retire the unary call; suppress the terminal if a stream frame
+                    // already answered it with a code-6 (the misaddressed-frame
+                    // guard). By then the client may have reused the msgid for a
+                    // new call, which this leaves alone.
+                    if streams.shouldSendUnaryTerminal(msgid: msgid, call: call), let response {
                         _ = await writer.send(response)
                     }
                     inFlight.withLockedValue { $0 -= 1 }

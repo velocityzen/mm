@@ -86,16 +86,18 @@ struct StreamTableTests {
         var table = StreamTable()
         let control = RecordingStreamControl(request: true, response: false)
         let first = table.registerStream(msgid: 5, entry: entry(control))
-        #expect(first)
+        #expect(first != nil)
         #expect(table.openStreamCount == 1)
         // Same msgid still live: reuse rejected.
         let reused = table.registerStream(msgid: 5, entry: entry(control))
-        #expect(!reused)
+        #expect(reused == nil)
         // A msgid marked as a live unary call also blocks a stream registration.
         let unaryRegistered = table.registerUnary(msgid: 6)
-        #expect(unaryRegistered)
+        #expect(unaryRegistered != nil)
         let unaryClash = table.registerStream(msgid: 6, entry: entry(control))
-        #expect(!unaryClash)
+        #expect(unaryClash == nil)
+        // Every registration is its own call.
+        #expect(first != unaryRegistered)
     }
 
     @Test("registerUnary rejects a msgid already owned by a live stream or unary call")
@@ -103,14 +105,14 @@ struct StreamTableTests {
         var table = StreamTable()
         // A live unary msgid cannot be reused for another unary call.
         let firstUnary = table.registerUnary(msgid: 3)
-        #expect(firstUnary)
+        #expect(firstUnary != nil)
         let reusedUnary = table.registerUnary(msgid: 3)
-        #expect(!reusedUnary)
+        #expect(reusedUnary == nil)
         // A live stream msgid blocks a unary registration on the same id.
         let control = RecordingStreamControl(request: true, response: false)
         _ = table.registerStream(msgid: 4, entry: entry(control))
         let unaryOnStream = table.registerUnary(msgid: 4)
-        #expect(!unaryOnStream)
+        #expect(unaryOnStream == nil)
         // isOwned reports both.
         #expect(table.isOwned(msgid: 3))
         #expect(table.isOwned(msgid: 4))
@@ -300,89 +302,138 @@ struct StreamTableTests {
     }
 
     @Test("retireStream is true once then false — the single-terminal guarantee")
-    func retireOnce() {
+    func retireOnce() throws {
         var table = StreamTable()
         let control = RecordingStreamControl(request: true, response: true)
-        _ = table.registerStream(msgid: 1, entry: entry(control))
-        let first = table.retireStream(msgid: 1)
+        let registration = table.registerStream(msgid: 1, entry: entry(control))
+        let call = try #require(registration)
+        let first = table.retireStream(msgid: 1, call: call)
         #expect(first)
-        let second = table.retireStream(msgid: 1)
+        let second = table.retireStream(msgid: 1, call: call)
         #expect(!second)
     }
 
     @Test("a CANCEL then a handler completion never double-terminates")
-    func cancelThenCompletionSingleTerminal() {
+    func cancelThenCompletionSingleTerminal() throws {
         var table = StreamTable()
         let control = RecordingStreamControl(request: true, response: true)
-        _ = table.registerStream(msgid: 1, entry: entry(control))
+        let registration = table.registerStream(msgid: 1, entry: entry(control))
+        let call = try #require(registration)
         // CANCEL retires the entry (runtime sends code-7).
         let cancelled = table.routeCancel(msgid: 1)
         #expect(cancelled != nil)
         // The handler later completes and asks to retire: already gone, so its
         // terminal is suppressed.
-        let retired = table.retireStream(msgid: 1)
+        let retired = table.retireStream(msgid: 1, call: call)
         #expect(!retired)
+    }
+
+    @Test("a handler that returns after its call was answered leaves a reused msgid alone")
+    func lateHandlerLeavesReusedMsgid() throws {
+        var table = StreamTable()
+        let first = RecordingStreamControl(request: true, response: true)
+        let firstRegistration = table.registerStream(msgid: 1, entry: entry(first))
+        let firstCall = try #require(firstRegistration)
+        // The code-7 answers the first call, so the client may reuse msgid 1
+        // while the first handler is still running.
+        #expect(table.routeCancel(msgid: 1) != nil)
+        let second = RecordingStreamControl(request: true, response: true)
+        let secondRegistration = table.registerStream(msgid: 1, entry: entry(second))
+        let secondCall = try #require(secondRegistration)
+        #expect(secondCall != firstCall)
+        // The first handler returns: nothing of its own to retire.
+        let firstRetired = table.retireStream(msgid: 1, call: firstCall)
+        #expect(!firstRetired)
+        #expect(table.isStreamLive(msgid: 1))
+        let secondRetired = table.retireStream(msgid: 1, call: secondCall)
+        #expect(secondRetired)
+        #expect(!table.isStreamLive(msgid: 1))
     }
 
     // MARK: - Unary-msgid guard
 
     @Test("a stream item on a live unary msgid is a unary violation and suppresses its terminal")
-    func unaryViolationSuppresses() {
+    func unaryViolationSuppresses() throws {
         var table = StreamTable()
-        _ = table.registerUnary(msgid: 7)
+        let registration = table.registerUnary(msgid: 7)
+        let call = try #require(registration)
         guard case .unaryViolation = table.routeItem(msgid: 7, seq: 0) else {
             Issue.record("item on a live unary msgid is a unary violation")
             return
         }
         // The unary handler's terminal is now suppressed.
-        let suppressed = table.consumeUnaryTerminal(msgid: 7)
+        let suppressed = table.consumeUnaryTerminal(msgid: 7, call: call)
         #expect(!suppressed)
     }
 
     @Test("an END on a live unary msgid is a unary violation")
-    func unaryEndViolation() {
+    func unaryEndViolation() throws {
         var table = StreamTable()
-        _ = table.registerUnary(msgid: 7)
+        let registration = table.registerUnary(msgid: 7)
+        let call = try #require(registration)
         guard case .unaryViolation = table.routeEnd(msgid: 7) else {
             Issue.record("END on a live unary msgid is a unary violation")
             return
         }
-        let suppressed = table.consumeUnaryTerminal(msgid: 7)
+        let suppressed = table.consumeUnaryTerminal(msgid: 7, call: call)
         #expect(!suppressed)
     }
 
     @Test("only the first stream frame on a live unary msgid is a violation; later ones drop")
-    func unaryViolationAnswersOnce() {
+    func unaryViolationAnswersOnce() throws {
         var table = StreamTable()
-        _ = table.registerUnary(msgid: 7)
+        let registration = table.registerUnary(msgid: 7)
+        let call = try #require(registration)
         guard case .unaryViolation = table.routeEnd(msgid: 7) else {
             Issue.record("the first END on a live unary msgid is a unary violation")
             return
         }
         // Its code-6 terminal answered the call, so no frame earns a second one.
         guard case .drop = table.routeEnd(msgid: 7) else {
-            Issue.record("a second END on a suppressed unary msgid drops")
+            Issue.record("a second END on an answered unary msgid drops")
             return
         }
         guard case .drop = table.routeItem(msgid: 7, seq: 0) else {
-            Issue.record("an item on a suppressed unary msgid drops")
+            Issue.record("an item on an answered unary msgid drops")
             return
         }
-        // The msgid stays owned until the unary handler returns.
-        #expect(table.isOwned(msgid: 7))
-        let send = table.consumeUnaryTerminal(msgid: 7)
+        let send = table.consumeUnaryTerminal(msgid: 7, call: call)
         #expect(!send)
     }
 
-    @Test("a normal unary call keeps its terminal; retiring an unknown msgid is allowed")
-    func unaryTerminalKept() {
+    @Test("a unary msgid answered by a code-6 is free for a new call before its handler returns")
+    func unaryMsgidReusedAfterViolation() throws {
         var table = StreamTable()
-        _ = table.registerUnary(msgid: 7)
-        let live = table.consumeUnaryTerminal(msgid: 7)
+        let firstRegistration = table.registerUnary(msgid: 7)
+        let firstCall = try #require(firstRegistration)
+        guard case .unaryViolation = table.routeItem(msgid: 7, seq: 0) else {
+            Issue.record("item on a live unary msgid is a unary violation")
+            return
+        }
+        // The client has its terminal, so it may reuse msgid 7.
+        #expect(!table.isOwned(msgid: 7))
+        let secondRegistration = table.registerUnary(msgid: 7)
+        let secondCall = try #require(secondRegistration)
+        // The first handler returns: its terminal stays dropped, and the
+        // second call keeps the msgid.
+        let firstSends = table.consumeUnaryTerminal(msgid: 7, call: firstCall)
+        #expect(!firstSends)
+        #expect(table.isOwned(msgid: 7))
+        let secondSends = table.consumeUnaryTerminal(msgid: 7, call: secondCall)
+        #expect(secondSends)
+        #expect(!table.isOwned(msgid: 7))
+    }
+
+    @Test("a normal unary call sends its terminal once")
+    func unaryTerminalKept() throws {
+        var table = StreamTable()
+        let registration = table.registerUnary(msgid: 7)
+        let call = try #require(registration)
+        let live = table.consumeUnaryTerminal(msgid: 7, call: call)
         #expect(live)  // live → send
-        // Retiring again (unknown now) still returns true — nothing to suppress.
-        let again = table.consumeUnaryTerminal(msgid: 7)
-        #expect(again)
+        // The call is retired: a second consume finds nothing to send.
+        let again = table.consumeUnaryTerminal(msgid: 7, call: call)
+        #expect(!again)
     }
 
     // MARK: - Teardown
