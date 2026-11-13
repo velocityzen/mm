@@ -259,6 +259,7 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
+                .product(name: "Logging", package: "swift-log"),
                 .product(
                     name: "HegelTesting",
                     package: "hegel-swift",

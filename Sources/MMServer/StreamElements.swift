@@ -100,15 +100,18 @@ public struct MMRequestStream<Element: Codable & Sendable>: AsyncSequence, Senda
 /// ## Credit accounting (server is the *receiver* of request items)
 ///
 /// The client begins with ``MMStreamFlowControl/initialWindow`` implicit
-/// credits. Each accepted item spends one (`clientCredit -= 1`); an item that
-/// arrives at zero client credit is a **credit overrun** — a code-6 violation,
-/// which the stream table detects via `hasCreditForItem` before delivery. When
-/// the handler drains the producer buffer below its low watermark the delegate's
-/// `produceMore` fires: the source grants exactly the *deficit* below the
-/// initial window in one additive kind-2 frame (via the grant pump), topping the
-/// client's window back up. Granting on the drain edge — never per item — is the
-/// watermark-batching policy, and granting only the deficit keeps
-/// `clientCredit ≤ initialWindow` so the overrun check stays exact.
+/// credits. Each accepted item spends one (`clientCredit -= 1`) and waits
+/// unread in the producer buffer (`unread += 1`) until the handler takes it;
+/// an item that arrives at zero client credit is a **credit overrun** — a
+/// code-6 violation, which the stream table detects via `hasCreditForItem`
+/// before delivery. As the handler reads (``didConsume``, and the delegate's
+/// `produceMore` when the buffer drains), the source grants the *deficit*
+/// `initialWindow - clientCredit - unread` in one additive kind-2 frame (via
+/// the grant pump): the items read since the window was last full. Granting
+/// in batches — never per item — is the watermark-batching policy, and
+/// counting the unread items keeps `clientCredit + unread ≤ initialWindow`,
+/// so the overrun check stays exact and the buffer never holds more than one
+/// window, however fast the client sends and however slowly the handler reads.
 ///
 /// ## No continuations
 ///
@@ -132,6 +135,10 @@ final class MMRequestStreamSource<Element: Codable & Sendable>: Sendable {
         /// before a grant. Starts at the initial window; spent per item,
         /// replenished by grants.
         var clientCredit: UInt32
+        /// Items delivered into the producer buffer that the handler has not
+        /// taken yet. A grant leaves room for these, so they and the client's
+        /// credit never add up to more than the initial window.
+        var unread: UInt32 = 0
         /// Items the handler has consumed since the last grant. The consume edge
         /// (`didConsume`) accrues this and, once it crosses the grant watermark,
         /// tops the client's window back up — this is what keeps a client
@@ -210,6 +217,7 @@ final class MMRequestStreamSource<Element: Codable & Sendable>: Sendable {
             let source = self.state.withLockedValue { state -> Source? in
                 guard !state.terminated, let source = state.source else { return nil }
                 state.clientCredit &-= 1
+                state.unread &+= 1
                 return source
             }
             guard let source else { return }
@@ -258,20 +266,24 @@ final class MMRequestStreamSource<Element: Codable & Sendable>: Sendable {
     }
 
     /// The handler consumed one request element (its iterator returned an item).
-    /// Accrue it toward the credit grant; once a full watermark has been drained
-    /// since the last grant, top the client's window back up to the initial
-    /// window in one additive kind-2 frame (the deficit) and nudge the pump.
+    /// It no longer waits unread; accrue it toward the credit grant, and once a
+    /// full watermark has been drained since the last grant, grant the deficit
+    /// in one additive kind-2 frame and nudge the pump.
     ///
     /// This is the primary grant trigger — it fires whenever the handler keeps up
     /// (the common, fast-handler case), independent of whether the producer
     /// buffer ever reaches its high watermark. `produceMore` remains a secondary
     /// trigger for the parked-then-drains case (a handler that fills the window
     /// before consuming). Granting exactly the deficit keeps
-    /// `clientCredit ≤ initialWindow`, so the overrun check stays exact and the
-    /// two triggers can never over-grant past the window.
+    /// `clientCredit + unread ≤ initialWindow`, so the overrun check stays
+    /// exact, the buffer stays within the window, and the two triggers can
+    /// never over-grant past it.
     func didConsume() {
         let due = self.state.withLockedValue { state -> Bool in
             guard !state.terminated else { return false }
+            if state.unread > 0 {
+                state.unread -= 1
+            }
             state.consumedSinceGrant &+= 1
             guard state.consumedSinceGrant >= MMStreamFlowControl.grantWatermark else {
                 return false
@@ -287,12 +299,18 @@ final class MMRequestStreamSource<Element: Codable & Sendable>: Sendable {
         }
     }
 
-    /// How far the window is from full — the top-up amount both triggers use.
+    /// How far the client's credit plus the items still unread fall short of
+    /// the initial window — the top-up amount both triggers use. Counting the
+    /// unread items is what bounds the buffer: a grant that refilled the
+    /// client's credit alone would let it send a full window more while
+    /// earlier items still wait unread.
     private static func windowDeficit(_ state: State) -> UInt32 {
-        MMStreamFlowControl.initialWindow - state.clientCredit
+        let held = UInt64(state.clientCredit) + UInt64(state.unread)
+        let window = UInt64(MMStreamFlowControl.initialWindow)
+        return held < window ? UInt32(window - held) : 0
     }
 
-    /// The one over-grant-proof top-up: refill the window and accrue the
+    /// The one over-grant-proof top-up: fill the window and accrue the
     /// pending additive grant, always by the same deficit.
     private static func applyDeficitGrant(_ state: inout State, _ deficit: UInt32) {
         state.clientCredit &+= deficit
@@ -340,9 +358,10 @@ extension MMRequestStreamSource: NIOAsyncSequenceProducerDelegate {
     /// in one additive grant (the *deficit*) and nudges the pump. Synchronous:
     /// the actual wire write happens on the pump task, never here.
     ///
-    /// Granting exactly the deficit keeps `clientCredit ≤ initialWindow` by
-    /// construction, so the accounting can never over-grant past the window and
-    /// the overrun check (`hasCreditForItem`) stays exact — and because both
+    /// Granting exactly the deficit keeps `clientCredit + unread ≤ initialWindow`
+    /// by construction, so the accounting can never over-grant past the window,
+    /// the buffer stays within it, and the overrun check (`hasCreditForItem`)
+    /// stays exact — and because both
     /// triggers grant only the deficit, whichever fires first drives the window
     /// to full and the other computes a zero deficit (a no-op), so they can never
     /// double-grant.
