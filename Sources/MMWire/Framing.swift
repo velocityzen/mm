@@ -51,13 +51,17 @@ public struct MMFrameDecoder: ByteToMessageDecoder, Sendable {
         return .continue
     }
 
-    /// Policy for leftover partial-frame bytes at EOF: complete frames still buffered
-    /// are drained and emitted; if any bytes then remain (a partial length prefix or a
-    /// partial body) and EOF has been seen, the decoder throws `MMWireError.truncated`
-    /// so the truncation is observable to the pipeline's error handling instead of
-    /// being silently discarded. When called without EOF (handler removal), leftover
-    /// bytes are not an error — they are handed back to the pipeline by
-    /// `ByteToMessageHandler`'s removal machinery.
+    /// Policy for leftover partial-frame bytes: complete frames still buffered are
+    /// drained and emitted first. What happens to the bytes that then remain (a
+    /// partial length prefix or a partial body) depends on why the decoder is done:
+    ///
+    /// - At EOF the frame can never complete, so the decoder throws
+    ///   `MMWireError.truncated`: the truncation reaches the pipeline's error
+    ///   handling instead of being silently discarded.
+    /// - On removal from the pipeline (no EOF) the bytes belong to whatever reads
+    ///   the stream next, as in a protocol upgrade, so the decoder passes them on
+    ///   down the pipeline as one raw, unframed read. `ByteToMessageHandler` does
+    ///   not do this itself: on removal it only calls `decodeLast`.
     public mutating func decodeLast(
         context: ChannelHandlerContext,
         buffer: inout ByteBuffer,
@@ -67,8 +71,14 @@ public struct MMFrameDecoder: ByteToMessageDecoder, Sendable {
             let state = try self.decode(context: context, buffer: &buffer)
             if case .needMoreData = state { break }
         }
-        if seenEOF && buffer.readableBytes > 0 {
+        guard buffer.readableBytes > 0 else {
+            return .needMoreData
+        }
+        if seenEOF {
             throw MMWireError.truncated
+        }
+        if let leftover = buffer.readSlice(length: buffer.readableBytes) {
+            context.fireChannelRead(self.wrapInboundOut(leftover))
         }
         return .needMoreData
     }

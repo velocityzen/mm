@@ -161,6 +161,36 @@ struct FrameDecoderTests {
         #expect(try channel.readInbound(as: ByteBuffer.self).map(mpHex) == "0102")
         #expect(try channel.finish().isClean)
     }
+
+    @Test("removal mid-frame passes the unread bytes on, unframed")
+    func removalPassesLeftoversOn() throws {
+        let handler = ByteToMessageHandler(MMFrameDecoder())
+        let channel = EmbeddedChannel(handler: handler)
+        var wire = frame("2a")
+        wire.writeInteger(UInt32(3), endianness: .little)
+        wire.writeBytes([0x01, 0x02])
+        try channel.writeInbound(wire)
+        #expect(try channel.readInbound(as: ByteBuffer.self).map(mpHex) == "2a")
+        let removal = channel.pipeline.syncOperations.removeHandler(handler)
+        channel.embeddedEventLoop.run()
+        try removal.wait()
+        #expect(try channel.readInbound(as: ByteBuffer.self).map(mpHex) == "030000000102")
+        #expect(try channel.readInbound(as: ByteBuffer.self) == nil)
+        #expect(try channel.finish().isClean)
+    }
+
+    @Test("removal on a frame boundary passes nothing on")
+    func removalOnBoundaryPassesNothing() throws {
+        let handler = ByteToMessageHandler(MMFrameDecoder())
+        let channel = EmbeddedChannel(handler: handler)
+        try channel.writeInbound(frame("0102"))
+        #expect(try channel.readInbound(as: ByteBuffer.self).map(mpHex) == "0102")
+        let removal = channel.pipeline.syncOperations.removeHandler(handler)
+        channel.embeddedEventLoop.run()
+        try removal.wait()
+        #expect(try channel.readInbound(as: ByteBuffer.self) == nil)
+        #expect(try channel.finish().isClean)
+    }
 }
 
 @Suite("MMFrameEncoder")
