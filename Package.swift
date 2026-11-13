@@ -255,6 +255,7 @@ let package = Package(
                 "MMWire",
                 "MMSchema",
                 "MMServer",
+                "MMClient",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
