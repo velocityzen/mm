@@ -59,7 +59,9 @@ struct GeneratedCodingMarker: Codable, Hashable, Sendable, SchemaDescribable, MM
 }
 
 /// Every field shape the macros generate code for, plus the two they hand to
-/// `Codable` (maps and external types).
+/// `Codable` (maps and external types). MMPropertyTests keeps a copy of this
+/// catalog (without the relay call) for its generated values: keep the two in
+/// step when adding a field shape.
 private enum Catalog: MethodNamespace {
     #schema("catalog") {
         Enum("Condition") {
@@ -152,265 +154,20 @@ private func decodedThroughGeneratedCode<T: MMPackDecodable>(
     MMPackDecoder(maxDepth: maxDepth).decode(type, from: buffer)
 }
 
-/// Seeded sample values covering each shape's edges: empty and long strings
-/// (fixstr, str8, str16), negative and widest integers, empty and 16+
-/// element arrays and maps (the 16-bit headers), both kinds of optional.
-private struct Samples {
-    var random: SplitMix64
-
-    init(seed: UInt64) {
-        self.random = SplitMix64(seed: seed)
-    }
-
-    mutating func chance() -> Bool {
-        Bool.random(using: &self.random)
-    }
-
-    mutating func count(upTo limit: Int) -> Int {
-        Int.random(in: 0...limit, using: &self.random)
-    }
-
-    mutating func string() -> String {
-        let lengths = [0, 1, 5, 31, 32, 255, 256]
-        let length = lengths.randomElement(using: &self.random)!
-        let alphabet = Array("abcxyz-é漢🙂")
-        return String((0..<length).map { _ in alphabet.randomElement(using: &self.random)! })
-    }
-
-    mutating func int() -> Int {
-        let edges = [0, 1, -1, 127, 128, -32, -33, 255, 65_536, .min, .max]
-        return self.chance()
-            ? edges.randomElement(using: &self.random)!
-            : Int.random(in: .min ... .max, using: &self.random)
-    }
-
-    mutating func uint() -> UInt64 {
-        let edges: [UInt64] = [0, 127, 128, 255, 65_535, 1 << 32, .max]
-        return self.chance()
-            ? edges.randomElement(using: &self.random)!
-            : UInt64.random(in: 0 ... .max, using: &self.random)
-    }
-
-    mutating func double() -> Double {
-        let edges = [0.0, -0.0, 1.5, -2.25, .infinity, -.infinity, .greatestFiniteMagnitude]
-        return edges.randomElement(using: &self.random)!
-    }
-
-    mutating func float() -> Float {
-        let edges: [Float] = [0, -0.0, 3.5, -1.25, .infinity, .leastNonzeroMagnitude]
-        return edges.randomElement(using: &self.random)!
-    }
-
-    mutating func optional<Value>(_ make: (inout Samples) -> Value) -> Value? {
-        self.chance() ? make(&self) : nil
-    }
-
-    mutating func array<Value>(upTo limit: Int, _ make: (inout Samples) -> Value) -> [Value] {
-        (0..<self.count(upTo: limit)).map { _ in make(&self) }
-    }
-
-    mutating func item() -> Catalog.Item {
-        let released = [MMDate("2026-07-22")!, MMDate("1970-01-01")!, MMDate("0001-12-31")!]
-        let updated = [MMDateTime("2026-07-22T14:30:00")!, MMDateTime("2026-07-22T14:30:00.5")!]
-        let stamped = [
-            MMTimestamp("2026-07-22T14:30:00Z")!, MMTimestamp("2026-07-22T14:30:00-04:00")!,
-        ]
-        return Catalog.Item(
-            sku: self.string(),
-            quantity: self.int(),
-            stock: self.uint(),
-            price: self.double(),
-            weight: self.float(),
-            active: self.chance(),
-            condition: self.chance() ? .new : .used,
-            tags: self.array(upTo: 18) { $0.string() },
-            note: self.optional { $0.string() },
-            grid: self.array(upTo: 3) { samples in
-                samples.array(upTo: 17) { samples in samples.optional { $0.int() } }
-            },
-            lookup: Dictionary(
-                self.array(upTo: 17) { ($0.string(), $0.int()) },
-                uniquingKeysWith: { first, _ in first }
-            ),
-            serials: Dictionary(
-                self.array(upTo: 3) { ($0.uint(), $0.string()) },
-                uniquingKeysWith: { first, _ in first }
-            ),
-            released: released.randomElement(using: &self.random)!,
-            updated: self.optional { $0.chance() ? updated[0] : updated[1] },
-            stamped: self.optional { $0.chance() ? stamped[0] : stamped[1] },
-            stamp: GeneratedCodingStamp(author: self.string(), level: self.int()),
-            owner: Catalog.Item.Owner(
-                name: self.string(),
-                since: self.optional { _ in released[0] }
-            ),
-            photo: self.bytes(),
-            thumbnail: self.optional { $0.bytes() }
-        )
-    }
-
-    mutating func bytes() -> MMBytes {
-        let lengths = [0, 1, 31, 255, 256]
-        let length = lengths.randomElement(using: &self.random)!
-        return MMBytes((0..<length).map { _ in UInt8.random(in: 0...255, using: &self.random) })
-    }
-
-    mutating func shipment(depth: Int = 0) -> Catalog.Shipment {
-        switch Int.random(in: 0..<(depth < 2 ? 3 : 2), using: &self.random) {
-            case 0:
-                return .pending
-            case 1:
-                return .shipped(
-                    carrier: self.string(),
-                    tracking: self.optional { $0.bytes() },
-                    condition: self.chance() ? .new : .used
-                )
-            default:
-                return .split(
-                    parts: self.array(upTo: 3) { $0.shipment(depth: depth + 1) },
-                    box: .init(label: self.string())
-                )
-        }
-    }
-
-    mutating func putRequest() -> Catalog.PutRequest {
-        Catalog.PutRequest(
-            items: self.array(upTo: 3) { $0.item() },
-            conditions: self.array(upTo: 17) { samples in
-                samples.optional { $0.chance() ? .new : .used }
-            },
-            flag: self.optional { samples in samples.optional { $0.chance() } },
-            shipments: self.optional { samples in samples.array(upTo: 17) { $0.shipment() } }
-        )
-    }
-}
-
-/// The result with each float replaced by its bit pattern, so a corrupted
-/// float that reads as NaN still compares equal to itself.
-private func bitwise(
-    _ result: Result<Catalog.PutRequest, MMWireError>
-) -> Result<Catalog.PutRequest, MMWireError> {
-    result.map { request in
-        var copy = request
-        copy.items = request.items.map { item in
-            var copy = item
-            copy.price = Double(item.price.bitPattern)
-            copy.weight = Float(item.weight.bitPattern)
-            return copy
-        }
-        return copy
-    }
-}
-
 @Suite("Generated MessagePack code agrees with Codable")
 struct GeneratedCodingTests {
-    @Test("writes the same bytes as the Codable path")
-    func sameBytes() throws {
-        var samples = Samples(seed: 0x6D6D_7061_636B)
-        for _ in 0..<300 {
-            let request = samples.putRequest()
-            #expect(encodedThroughGeneratedCode(request) == encodedThroughCodable(request))
-            let item = samples.item()
-            #expect(encodedThroughGeneratedCode(item) == encodedThroughCodable(item))
-        }
+    // Generated values are compared with the Codable path in MMPropertyTests'
+    // GeneratedCodingProperties, which runs on macOS and Linux. The fixed
+    // payloads here run on every platform.
+
+    @Test("an unknown enum case, an empty response and an absent optional have fixed bytes")
+    func fixedBytes() {
         #expect(
             encodedThroughGeneratedCode(Catalog.Condition.unknown)
                 == .success(mpBytes("a7756e6b6e6f776e"))
         )
         #expect(encodedThroughGeneratedCode(Catalog.RelayResponse()) == .success(mpBytes("80")))
-    }
-
-    @Test("an optional of a generated type is generated too, with Codable's bytes")
-    func optionalPayload() throws {
-        var samples = Samples(seed: 0x6F70_7469_6F6E)
-        for _ in 0..<300 {
-            let item = samples.optional { $0.item() }
-            #expect(encodedThroughGeneratedCode(item) == encodedThroughCodable(item))
-            let bytes = try encodedThroughCodable(item).get()
-            #expect(decodedThroughGeneratedCode(Catalog.Item?.self, from: bytes) == .success(item))
-            #expect(decodedThroughCodable(Catalog.Item?.self, from: bytes) == .success(item))
-        }
         #expect(encodedThroughGeneratedCode(Catalog.Item?.none) == .success(mpBytes("c0")))
-    }
-
-    @Test("decodes what it writes, as the Codable path does")
-    func roundTrip() throws {
-        var samples = Samples(seed: 0x726F_756E_64)
-        for _ in 0..<300 {
-            let request = samples.putRequest()
-            let bytes = try encodedThroughGeneratedCode(request).get()
-            // An optional of an optional holding nil writes a plain nil, which
-            // reads back as absent: Codable flattens it, and so does the
-            // generated code.
-            var expected = request
-            if case .some(.none) = request.flag { expected.flag = nil }
-            #expect(
-                decodedThroughGeneratedCode(Catalog.PutRequest.self, from: bytes)
-                    == .success(expected)
-            )
-            #expect(
-                decodedThroughCodable(Catalog.PutRequest.self, from: bytes) == .success(expected)
-            )
-        }
-    }
-
-    @Test("every truncation fails the same way")
-    func truncations() throws {
-        var samples = Samples(seed: 0x7472_756E_63)
-        // Every prefix decodes, so a few payloads cover thousands of cuts.
-        for _ in 0..<4 {
-            let bytes = try encodedThroughCodable(samples.putRequest()).get()
-            for length in 0..<bytes.readableBytes {
-                let prefix = bytes.getSlice(at: bytes.readerIndex, length: length)!
-                #expect(
-                    decodedThroughGeneratedCode(Catalog.PutRequest.self, from: prefix)
-                        == decodedThroughCodable(Catalog.PutRequest.self, from: prefix),
-                    "prefix of \(length) bytes: \(mpHex(prefix))"
-                )
-            }
-        }
-    }
-
-    @Test("corrupted payloads decode, or fail, the same way")
-    func corruptions() throws {
-        var samples = Samples(seed: 0x636F_7272_7570)
-        var random = SplitMix64(seed: 0x6D75_7461_7465)
-        for _ in 0..<2000 {
-            var bytes = Array(
-                try encodedThroughCodable(samples.putRequest()).get().readableBytesView
-            )
-            for _ in 0..<Int.random(in: 1...3, using: &random) {
-                let index = Int.random(in: 0..<bytes.count, using: &random)
-                bytes[index] = UInt8.random(in: 0...255, using: &random)
-            }
-            let corrupted = ByteBuffer(bytes: bytes)
-            #expect(
-                bitwise(decodedThroughGeneratedCode(Catalog.PutRequest.self, from: corrupted))
-                    == bitwise(decodedThroughCodable(Catalog.PutRequest.self, from: corrupted)),
-                "\(mpHex(corrupted))"
-            )
-        }
-    }
-
-    @Test("nesting limits fail at the same depth")
-    func nestingLimits() throws {
-        var samples = Samples(seed: 0x6465_7074_68)
-        for _ in 0..<20 {
-            let bytes = try encodedThroughCodable(samples.putRequest()).get()
-            for maxDepth in 0...6 {
-                let generated = decodedThroughGeneratedCode(
-                    Catalog.PutRequest.self,
-                    from: bytes,
-                    maxDepth: maxDepth
-                )
-                let codable = decodedThroughCodable(
-                    Catalog.PutRequest.self,
-                    from: bytes,
-                    maxDepth: maxDepth
-                )
-                #expect(generated == codable, "maxDepth \(maxDepth): \(mpHex(bytes))")
-            }
-        }
     }
 
     @Test("keys: first occurrence wins, the integer key before the name, unknown keys skipped")

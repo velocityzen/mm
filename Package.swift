@@ -253,6 +253,7 @@ let package = Package(
             name: "MMPropertyTests",
             dependencies: [
                 "MMWire",
+                "MMSchema",
                 "MMServer",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),

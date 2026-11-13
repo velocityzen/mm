@@ -146,6 +146,8 @@
         let handlers: Pool<RunningHandler>
         /// The terminals the connection sent for each call.
         var terminals: [StreamTable.CallIdentity: Int] = [:]
+        /// Every msgid a frame has named, live or not.
+        var seen: Set<UInt32> = []
 
         init(handlers: Pool<RunningHandler>) {
             self.handlers = handlers
@@ -193,13 +195,31 @@
             return call
         }
 
+        /// Any msgid, or often one a frame named before, so calls collide
+        /// and reuse msgids.
+        mutating func msgid(from tc: TestCase) throws -> UInt32 {
+            let any = Gen<UInt32>.integer()
+            let msgid = try tc.draw(
+                self.seen.isEmpty ? any : .oneOf(.element(of: self.seen.sorted()), any),
+                named: "msgid"
+            )
+            self.seen.insert(msgid)
+            return msgid
+        }
+
+        /// One of the live streams with a request direction, for the rules
+        /// that act on what the handler does with it.
+        func requestStream(from tc: TestCase) throws -> StreamCall {
+            let msgids = self.calls.keys.filter { self.stream($0)?.control.hasRequestStream == true }
+            try tc.assume(!msgids.isEmpty)
+            let msgid = try tc.draw(.element(of: msgids.sorted()), named: "msgid")
+            return try #require(self.stream(msgid))
+        }
+
         var streamCount: Int {
             self.calls.values.count(where: { if case .stream = $0 { true } else { false } })
         }
     }
-
-    /// A few msgids, so calls collide and reuse them.
-    let msgids: Gen<UInt32> = .integer(in: 1...3)
 
     /// How far an item's seq is from the one expected: usually 0, sometimes a
     /// gap, a repeat (`UInt32.max` wraps to one behind), or anything.
@@ -212,7 +232,7 @@
     /// and after the client reused its msgid.
     let streamTableMachine = StateMachine<StreamTableModel>(steps: 200)
         .rule("open stream", weight: 2) { s, tc in
-            let msgid = try #draw(msgids, from: tc)
+            let msgid = try s.msgid(from: tc)
             let request = try #draw(.bool(probability: 0.7), from: tc)
             let response = try #draw(.bool(), from: tc)
             let control = ModelStreamControl(request: request, response: response)
@@ -228,7 +248,7 @@
             }
         }
         .rule("open unary") { s, tc in
-            let msgid = try #draw(msgids, from: tc)
+            let msgid = try s.msgid(from: tc)
             let call = s.table.registerUnary(msgid: msgid)
             #expect((call != nil) == (s.calls[msgid] == nil))
             if let call {
@@ -236,7 +256,7 @@
             }
         }
         .rule("item", weight: 4) { s, tc in
-            let msgid = try #draw(msgids, from: tc)
+            let msgid = try s.msgid(from: tc)
             let offset = try #draw(seqOffsets, from: tc)
             switch s.calls[msgid] {
                 case nil:
@@ -276,7 +296,7 @@
             }
         }
         .rule("end request") { s, tc in
-            let msgid = try #draw(msgids, from: tc)
+            let msgid = try s.msgid(from: tc)
             let decision = s.table.routeEnd(msgid: msgid)
             switch s.calls[msgid] {
                 case nil:
@@ -300,7 +320,7 @@
             }
         }
         .rule("grant response credit") { s, tc in
-            let msgid = try #draw(msgids, from: tc)
+            let msgid = try s.msgid(from: tc)
             let control = s.table.routeCredit(msgid: msgid)
             if let call = s.stream(msgid), call.control.hasResponseStream {
                 #expect(isControl(control, of: call))
@@ -309,7 +329,7 @@
             }
         }
         .rule("stop response") { s, tc in
-            let msgid = try #draw(msgids, from: tc)
+            let msgid = try s.msgid(from: tc)
             let control = s.table.routeStop(msgid: msgid)
             if let call = s.stream(msgid), call.control.hasResponseStream {
                 #expect(isControl(control, of: call))
@@ -318,7 +338,7 @@
             }
         }
         .rule("cancel") { s, tc in
-            let msgid = try #draw(msgids, from: tc)
+            let msgid = try s.msgid(from: tc)
             let control = s.table.routeCancel(msgid: msgid)
             if let call = s.stream(msgid) {
                 #expect(isControl(control, of: call))
@@ -329,24 +349,21 @@
             }
         }
         .rule("consumer drains") { s, tc in
-            let msgid = try #draw(msgids, from: tc)
-            let call = s.stream(msgid)
-            try tc.assume(call?.control.hasRequestStream == true)
-            let count = try #draw(.int(in: 1...Int(MMStreamFlowControl.initialWindow)), from: tc)
-            call?.control.grantRequest(count)
+            let call = try s.requestStream(from: tc)
+            // The table reads only whether credit is left, so a grant of any
+            // size a UInt32 window holds.
+            let count = try #draw(.int(in: 1...Int(UInt32.max)), from: tc)
+            call.control.grantRequest(count)
         }
         .rule("handler stops consuming") { s, tc in
-            let msgid = try #draw(msgids, from: tc)
-            let call = s.stream(msgid)
-            try tc.assume(call?.control.hasRequestStream == true)
-            call?.control.terminateRequest()
+            try s.requestStream(from: tc).control.terminateRequest()
         }
         .rule("handler returns", weight: 2) { s, tc in
             let handler = try #draw(s.handlers.consumed, from: tc)
             s.finish(handler)
         }
         .invariant("the table holds the model's calls", everyStep: true) { s, _ in
-            for msgid: UInt32 in 1...3 {
+            for msgid in s.seen {
                 #expect(s.table.isStreamLive(msgid: msgid) == (s.stream(msgid) != nil), "msgid \(msgid)")
                 #expect(s.table.isOwned(msgid: msgid) == (s.calls[msgid] != nil), "msgid \(msgid)")
             }
@@ -366,7 +383,7 @@
                 while !s.handlers.isEmpty {
                     s.finish(try tc.draw(s.handlers.consumed, named: "handler"))
                 }
-                for msgid: UInt32 in 1...3 {
+                for msgid in s.seen {
                     #expect(!s.table.isOwned(msgid: msgid), "msgid \(msgid)")
                 }
                 #expect(s.calls.isEmpty)
