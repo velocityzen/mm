@@ -252,6 +252,7 @@ let package = Package(
         .testTarget(
             name: "MMPropertyTests",
             dependencies: [
+                "MMCLI",
                 "MMWire",
                 "MMSchema",
                 "MMServer",

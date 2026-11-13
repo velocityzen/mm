@@ -147,6 +147,14 @@ extension SchemaValue {
                             path: Self.appending(duplicate, to: path), problem: "duplicate key")
                     )
                 }
+                if let repeated = Self.firstRepeatedIntegerKey(members.map(\.name), keySchema) {
+                    return .failure(
+                        SchemaValueError(
+                            path: Self.appending(repeated.key, to: path),
+                            problem: "duplicate key (the same integer as '\(repeated.earlier)')"
+                        )
+                    )
+                }
                 return members
                     .traverse { member in
                         let memberPath = Self.appending(member.name, to: path)
@@ -304,6 +312,29 @@ extension SchemaValue {
     /// One member/field path segment appended to a (possibly empty) parent path.
     private static func appending(_ name: String, to path: String) -> String {
         path.isEmpty ? name : "\(path).\(name)"
+    }
+
+    /// The first key of an integer-keyed map that names the same integer as
+    /// an earlier one, with that earlier key. `"5"`, `"05"` and `"+5"` are
+    /// distinct text but one wire key, and a wire map keeps only one entry
+    /// per key. Keys parse as `validateMapKey` reads them; a key that does
+    /// not parse is left for it to refuse.
+    private static func firstRepeatedIntegerKey(
+        _ names: [String],
+        _ keySchema: TypeSchema
+    ) -> (key: String, earlier: String)? {
+        switch keySchema {
+            case .int, .uint:
+                var seen: [Int64: String] = [:]
+                for name in names {
+                    guard let number = Int64(name) else { continue }
+                    if let earlier = seen[number] { return (name, earlier) }
+                    seen[number] = name
+                }
+                return nil
+            default:
+                return nil
+        }
     }
 
     /// JSON keys are strings; integer-keyed wire maps take their keys as

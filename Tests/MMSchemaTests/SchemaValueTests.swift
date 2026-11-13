@@ -133,6 +133,36 @@ struct SchemaValueTests {
             path: "three")
     }
 
+    @Test("an integer-keyed map refuses two spellings of one key")
+    func repeatedIntegerKeys() {
+        for spelling in ["05", "+5", "005"] {
+            expectFailure(
+                SchemaValue.object([.init("5", .string("x")), .init(spelling, .string("y"))])
+                    .validated(against: .map(key: .int, value: .string), resolver: resolver),
+                path: spelling)
+        }
+        expectFailure(
+            SchemaValue.object([.init("7", .bool(false)), .init("07", .bool(true))])
+                .validated(against: .map(key: .uint, value: .bool), resolver: resolver),
+            path: "07")
+        expectFailure(
+            SchemaValue.object([.init("-1", .bool(false)), .init("-01", .bool(true))])
+                .validated(against: .map(key: .int, value: .bool), resolver: resolver),
+            path: "-01")
+        expectFailure(
+            SchemaValue.object([.init("0", .bool(false)), .init("-0", .bool(true))])
+                .validated(against: .map(key: .int, value: .bool), resolver: resolver),
+            path: "-0")
+        // A string-keyed map keeps them apart: they are distinct wire keys.
+        #expect(
+            throws: Never.self,
+            "string keys that spell one number are distinct"
+        ) {
+            try SchemaValue.object([.init("5", .string("x")), .init("05", .string("y"))])
+                .validated(against: .map(key: .string, value: .string), resolver: resolver).get()
+        }
+    }
+
     @Test("bytes take base64 strings; bad base64 fails")
     func bytes() throws {
         let canonical = try SchemaValue.string("aGk=").validated(against: .bytes, resolver: resolver).get()

@@ -1,6 +1,7 @@
 // Hegel runs on macOS and Linux only; see Package.swift.
 #if os(macOS) || os(Linux)
 
+    import Foundation
     import HegelTesting
     import MMSchema
 
@@ -58,6 +59,10 @@
         /// Whether `.unknown` slots appear. The wire coders refuse to encode
         /// them.
         var unknownSlots: Bool
+        /// Whether a float slot may hold any double, which `validated` keeps
+        /// and a request narrows to `Float`, rather than only a `Float`'s
+        /// value. Off unless a property turns it on.
+        var doublesInFloatSlots = false
     }
 
     /// The schema kinds that hold other schemas.
@@ -490,6 +495,11 @@
                         try tc.draw(SchemaValueGenerators.uint64s(edgeRate: policy.edgeRate))
                     )
                 case .float:
+                    if policy.doublesInFloatSlots, try tc.draw(.bool()) {
+                        return .double(
+                            try tc.draw(SchemaValueGenerators.doubles(edgeRate: policy.edgeRate))
+                        )
+                    }
                     return .double(
                         Double(try tc.draw(SchemaValueGenerators.floats(edgeRate: policy.edgeRate)))
                     )
@@ -737,6 +747,416 @@
 
         visit(fitting.value, fitting.schema, open: [], depth: 0)
         return labels
+    }
+
+    /// Repeats a member of an integer-keyed map under another spelling of
+    /// its key, with a fresh value: `{"5": a}` becomes `{"5": a, "05": b}`.
+    /// Each spelling is a valid key, and both name wire key 5.
+    ///
+    /// The non-empty integer-keyed maps are numbered as the walk meets them,
+    /// and only the `target`th gets a repeated member. With no target the
+    /// walk draws nothing and only counts them in `eligible`, so a first
+    /// pass can count and a second pass can pick one evenly.
+    struct IntegerKeyRepeater {
+        let values: ValueDrawing
+        let target: Int?
+        var eligible = 0
+
+        mutating func repeating(_ tc: TestCase, _ value: SchemaValue, _ schema: TypeSchema)
+            throws -> SchemaValue
+        {
+            switch (try values.table.resolve(schema), value) {
+                case (.optional, .null):
+                    return value
+                case (.optional(let wrapped), _):
+                    return try repeating(tc, value, wrapped)
+                case (.array(let element), .array(let items)):
+                    return .array(try items.map { try repeating(tc, $0, element) })
+                case (.map(let keySchema, let valueSchema), .object(let members)):
+                    var result = try members.map {
+                        SchemaValue.Member($0.name, try repeating(tc, $0.value, valueSchema))
+                    }
+                    if case .string = keySchema { return .object(result) }
+                    guard !members.isEmpty else { return .object(result) }
+                    let index = eligible
+                    eligible += 1
+                    guard index == target else { return .object(result) }
+                    let key = members[try tc.draw(.int(in: 0..<members.count))].name
+                    let spelling =
+                        key.hasPrefix("-")
+                        ? "-0" + key.dropFirst()
+                        : try tc.draw(.element(of: ["+" + key, "0" + key]))
+                    result.append(
+                        SchemaValue.Member(
+                            spelling,
+                            try values.value(tc, for: valueSchema, depth: 1)
+                        )
+                    )
+                    return .object(result)
+                case (.structure(let fields), .object(let members)):
+                    return .object(
+                        try members.map { member in
+                            guard let field = fields.first(where: { $0.name == member.name })
+                            else { return member }
+                            return SchemaValue.Member(
+                                member.name,
+                                try repeating(tc, member.value, field.type)
+                            )
+                        }
+                    )
+                case (.union(let cases), .object(let members)):
+                    guard
+                        case .string(let name)? = members.first(where: { $0.name == "case" })?
+                            .value,
+                        let chosen = cases.first(where: { $0.name == name })
+                    else { return value }
+                    return .object(
+                        try members.map { member in
+                            guard member.name == "fields" else { return member }
+                            return SchemaValue.Member(
+                                member.name,
+                                try repeating(tc, member.value, .structure(fields: chosen.fields))
+                            )
+                        }
+                    )
+                default:
+                    return value
+            }
+        }
+    }
+
+    /// A value as a user might write it, and the canonical value
+    /// `validated` should make of it.
+    struct LooseValue: Sendable {
+        var loose: SchemaValue
+        var expected: SchemaValue
+    }
+
+    /// Rewrites a canonical value into loose forms `validated` takes: a
+    /// number in another kind that holds it exactly, bytes as base64 with or
+    /// without padding, structure and union members out of order, a union's
+    /// `fields` left out when nothing in it is present or given empty for a
+    /// case without fields, and an integer map key respelled (`+5`, `05`,
+    /// `-0`). Each eligible position is rewritten at `rate`.
+    ///
+    /// The expected value is the canonical one, except that a respelled map
+    /// key keeps its spelling: `validated` checks map keys and leaves them
+    /// as written. Base64 comes from Foundation, not from MMSchema's own
+    /// encoder, so a decoding bug can't hide behind a matching encoding one.
+    struct Loosener {
+        let table: DefinitionTable
+        let rate: Double
+        var labels: Set<String> = []
+
+        init(table: DefinitionTable, rate: Double) {
+            self.table = table
+            self.rate = rate
+        }
+
+        mutating func loosen(_ tc: TestCase, _ value: SchemaValue, _ schema: TypeSchema) throws
+            -> LooseValue
+        {
+            switch (try table.resolve(schema), value) {
+                case (.optional, .null):
+                    return LooseValue(loose: .null, expected: .null)
+                case (.optional(let wrapped), _):
+                    return try loosen(tc, value, wrapped)
+                case (.int, .int(let number)):
+                    var forms: [(String, SchemaValue)] = []
+                    if let unsigned = UInt64(exactly: number) {
+                        forms.append(("an int given as a uint", .uint(unsigned)))
+                    }
+                    if let double = Double(exactly: number) {
+                        forms.append(("an int given as a double", .double(double)))
+                    }
+                    return LooseValue(loose: try pick(tc, value, forms), expected: value)
+                case (.uint, .uint(let number)):
+                    var forms: [(String, SchemaValue)] = []
+                    if let signed = Int64(exactly: number) {
+                        forms.append(("a uint given as an int", .int(signed)))
+                    }
+                    if let double = Double(exactly: number) {
+                        forms.append(("a uint given as a double", .double(double)))
+                    }
+                    return LooseValue(loose: try pick(tc, value, forms), expected: value)
+                case (.float, .double(let number)), (.double, .double(let number)):
+                    // Only a form that converts back to the same bits: −0
+                    // as an integer would come back as +0.
+                    var forms: [(String, SchemaValue)] = []
+                    if let signed = Int64(exactly: number),
+                        Double(signed).bitPattern == number.bitPattern
+                    {
+                        forms.append(("a double given as an int", .int(signed)))
+                    }
+                    if let unsigned = UInt64(exactly: number),
+                        Double(unsigned).bitPattern == number.bitPattern
+                    {
+                        forms.append(("a double given as a uint", .uint(unsigned)))
+                    }
+                    return LooseValue(loose: try pick(tc, value, forms), expected: value)
+                case (.bytes, .bytes(let bytes)):
+                    let padded = Data(bytes).base64EncodedString()
+                    var forms: [(String, SchemaValue)] = [
+                        ("bytes given as base64", .string(padded))
+                    ]
+                    if padded.hasSuffix("=") {
+                        forms.append(
+                            (
+                                "bytes given as unpadded base64",
+                                .string(String(padded.filter { $0 != "=" }))
+                            )
+                        )
+                    }
+                    return LooseValue(loose: try pick(tc, value, forms), expected: value)
+                case (.array(let element), .array(let items)):
+                    var loose: [SchemaValue] = []
+                    var expected: [SchemaValue] = []
+                    for item in items {
+                        let rewritten = try loosen(tc, item, element)
+                        loose.append(rewritten.loose)
+                        expected.append(rewritten.expected)
+                    }
+                    return LooseValue(loose: .array(loose), expected: .array(expected))
+                case (.map(let keySchema, let valueSchema), .object(let members)):
+                    var rewritten: [SchemaValue.Member] = []
+                    var expected: [SchemaValue.Member] = []
+                    for member in members {
+                        let name = try respelled(tc, member.name, keySchema)
+                        let entry = try loosen(tc, member.value, valueSchema)
+                        rewritten.append(SchemaValue.Member(name, entry.loose))
+                        expected.append(SchemaValue.Member(name, entry.expected))
+                    }
+                    return LooseValue(loose: .object(rewritten), expected: .object(expected))
+                case (.structure(let fields), .object(let members)):
+                    return try loosenStructure(tc, members, fields)
+                case (.union(let cases), .object(let members)):
+                    guard
+                        case .string(let name)? = members.first(where: { $0.name == "case" })?.value,
+                        let chosen = cases.first(where: { $0.name == name })
+                    else {
+                        throw GeneratorFault(description: "a union value with no known case")
+                    }
+                    let tag = SchemaValue.Member("case", .string(name))
+                    var loose = [tag]
+                    var expected = [tag]
+                    if case .object(let fieldMembers)? = members.first(where: {
+                        $0.name == "fields"
+                    })?.value {
+                        let fields = try loosenStructure(tc, fieldMembers, chosen.fields)
+                        expected.append(SchemaValue.Member("fields", fields.expected))
+                        if fieldMembers.isEmpty, try tc.draw(.bool(probability: rate)) {
+                            labels.insert("union fields left out")
+                        } else {
+                            loose.append(SchemaValue.Member("fields", fields.loose))
+                        }
+                    } else if try tc.draw(.bool(probability: rate)) {
+                        labels.insert("union fields given for a case without any")
+                        loose.append(SchemaValue.Member("fields", .object([])))
+                    }
+                    return LooseValue(
+                        loose: .object(
+                            try shuffled(tc, loose, label: "union members out of order")
+                        ),
+                        expected: .object(expected)
+                    )
+                default:
+                    return LooseValue(loose: value, expected: value)
+            }
+        }
+
+        mutating func loosenStructure(
+            _ tc: TestCase,
+            _ members: [SchemaValue.Member],
+            _ fields: [TypeSchema.Field]
+        ) throws -> LooseValue {
+            var loose: [SchemaValue.Member] = []
+            var expected: [SchemaValue.Member] = []
+            for member in members {
+                guard let field = fields.first(where: { $0.name == member.name }) else {
+                    throw GeneratorFault(description: "member '\(member.name)' has no field")
+                }
+                let rewritten = try loosen(tc, member.value, field.type)
+                loose.append(SchemaValue.Member(member.name, rewritten.loose))
+                expected.append(SchemaValue.Member(member.name, rewritten.expected))
+            }
+            return LooseValue(
+                loose: .object(try shuffled(tc, loose, label: "members out of order")),
+                expected: .object(expected)
+            )
+        }
+
+        /// One of the forms at `rate`, the value itself otherwise.
+        mutating func pick(
+            _ tc: TestCase,
+            _ value: SchemaValue,
+            _ forms: [(String, SchemaValue)]
+        ) throws -> SchemaValue {
+            guard !forms.isEmpty, try tc.draw(.bool(probability: rate)) else { return value }
+            let (label, form) = forms[try tc.draw(.int(in: 0..<forms.count))]
+            labels.insert(label)
+            return form
+        }
+
+        /// An integer map key written another way that reads as the same
+        /// number: a plus sign, a leading zero, or `-0`.
+        mutating func respelled(_ tc: TestCase, _ key: String, _ keySchema: TypeSchema) throws
+            -> String
+        {
+            switch keySchema {
+                case .int, .uint:
+                    guard try tc.draw(.bool(probability: rate)) else { return key }
+                    labels.insert("a respelled map key")
+                    if key.hasPrefix("-") { return "-0" + key.dropFirst() }
+                    return try tc.draw(.element(of: ["+" + key, "0" + key]))
+                default:
+                    return key
+            }
+        }
+
+        /// The members in a drawn order at `rate`.
+        mutating func shuffled(
+            _ tc: TestCase,
+            _ members: [SchemaValue.Member],
+            label: String
+        ) throws -> [SchemaValue.Member] {
+            guard members.count > 1, try tc.draw(.bool(probability: rate)) else { return members }
+            var order = members
+            for index in stride(from: order.count - 1, to: 0, by: -1) {
+                order.swapAt(index, try tc.draw(.int(in: 0...index)))
+            }
+            if zip(order, members).contains(where: { $0.name != $1.name }) { labels.insert(label) }
+            return order
+        }
+    }
+
+    /// How many nodes a value has: itself, and every item and member value
+    /// below it.
+    func nodeCount(_ value: SchemaValue) -> Int {
+        switch value {
+            case .array(let items): return 1 + items.map(nodeCount).reduce(0, +)
+            case .object(let members): return 1 + members.map { nodeCount($0.value) }.reduce(0, +)
+            default: return 1
+        }
+    }
+
+    /// The value with its node at `target`, counted in pre-order, replaced.
+    func replacing(_ value: SchemaValue, at target: Int, with replacement: SchemaValue)
+        -> SchemaValue
+    {
+        var index = 0
+        func rebuild(_ value: SchemaValue) -> SchemaValue {
+            let here = index
+            index += 1
+            if here == target { return replacement }
+            switch value {
+                case .array(let items):
+                    return .array(items.map(rebuild))
+                case .object(let members):
+                    return .object(members.map { SchemaValue.Member($0.name, rebuild($0.value)) })
+                default:
+                    return value
+            }
+        }
+        return rebuild(value)
+    }
+
+    /// The node at `target`, counted in pre-order as `replacing` counts.
+    func node(of value: SchemaValue, at target: Int) -> SchemaValue? {
+        var flat: [SchemaValue] = []
+        func flatten(_ value: SchemaValue) {
+            flat.append(value)
+            switch value {
+                case .array(let items): items.forEach(flatten)
+                case .object(let members): members.forEach { flatten($0.value) }
+                default: break
+            }
+        }
+        flatten(value)
+        return flat.indices.contains(target) ? flat[target] : nil
+    }
+
+    extension SchemaValueGenerators {
+        /// Text a bytes slot may or may not take as base64: well formed,
+        /// unpadded, a lone character, padding in the wrong place, a
+        /// character outside the alphabet, or any text.
+        static let base64Texts: Gen<String> = .oneOf(
+            .element(of: [
+                "", "AA==", "AAA=", "AA", "A", "A=", "=", "A===", "AAAA====", "!!!!", "AA AA",
+            ]),
+            Gen<[UInt8]>.bytes().map { Data($0).base64EncodedString() },
+            names
+        )
+
+        /// A value close to `value`: the same number in another kind,
+        /// exact or not, as text, or moved by a step; bytes as any text and
+        /// text as bytes; a member dropped, repeated or added; an item
+        /// dropped or repeated; null, or an empty container. Some fit the
+        /// slot `value` came from and some don't, which is the point.
+        static func nearby(_ value: SchemaValue) -> Gen<SchemaValue> {
+            var forms: [Gen<SchemaValue>] = [.element(of: [.null, .object([]), .array([])])]
+            switch value {
+                case .int(let number):
+                    forms += [
+                        .just(.uint(UInt64(bitPattern: number))),
+                        .just(.double(Double(number))),
+                        .just(.double(Double(number) + 0.5)),
+                        .just(.string(String(number))),
+                    ]
+                case .uint(let number):
+                    forms += [
+                        .just(.int(Int64(bitPattern: number))),
+                        .just(.double(Double(number))),
+                        .just(.string(String(number))),
+                    ]
+                case .double(let number):
+                    let whole = number.isFinite ? number.rounded(.towardZero) : 0
+                    forms += [
+                        .just(.int(Int64(exactly: whole) ?? 0)),
+                        .just(.uint(UInt64(exactly: whole) ?? 0)),
+                        .just(.double(number.nextUp)),
+                        .just(.string(String(number))),
+                    ]
+                case .bytes(let bytes):
+                    forms += [
+                        base64Texts.map { .string($0) },
+                        .just(.array(bytes.map { .uint(UInt64($0)) })),
+                    ]
+                case .string(let text):
+                    forms += [
+                        .just(.bytes(Array(text.utf8))),
+                        .just(.string(text + "x")),
+                        base64Texts.map { .string($0) },
+                    ]
+                case .bool(let flag):
+                    forms += [.just(.int(flag ? 1 : 0)), .just(.string(String(flag)))]
+                case .array(let items) where !items.isEmpty:
+                    forms += [
+                        Gen<Int>.int(in: 0..<items.count).map { index in
+                            var fewer = items
+                            fewer.remove(at: index)
+                            return .array(fewer)
+                        },
+                        Gen<Int>.int(in: 0..<items.count).map { .array(items + [items[$0]]) },
+                    ]
+                case .object(let members) where !members.isEmpty:
+                    forms += [
+                        Gen<Int>.int(in: 0..<members.count).map { index in
+                            var fewer = members
+                            fewer.remove(at: index)
+                            return .object(fewer)
+                        },
+                        Gen<Int>.int(in: 0..<members.count).map {
+                            .object(members + [members[$0]])
+                        },
+                        Hegel.zip(names, looseScalars).map {
+                            .object(members + [SchemaValue.Member($0, $1)])
+                        },
+                    ]
+                default:
+                    break
+            }
+            return .oneOf(forms)
+        }
     }
 
 #endif

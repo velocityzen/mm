@@ -50,6 +50,116 @@
                 }
             }
         }
+
+        /// A loose form of a canonical value validates to that value, and
+        /// validating the result again changes nothing. The loose forms are
+        /// what JSON input brings: a number in another kind that holds it
+        /// exactly, bytes as base64 with or without padding, structure and
+        /// union members out of order, a union's `fields` left out or given
+        /// empty, and an integer map key respelled, which `validated` keeps
+        /// as written.
+        ///
+        /// Mutation check: `validated` keeping structure members in the
+        /// order they came in; keeping an int, a uint or a double in the
+        /// kind it came in; making bytes base64 text; refusing base64 with
+        /// two padding characters or swapping `+` and `/`; requiring a
+        /// union's `fields` when its case has some; or keeping an empty
+        /// `fields` for a case without any, fails here. A 100-case run
+        /// catches most of them and a 1,000-case run catches every one.
+        @Test
+        func looseFormsValidateToTheCanonicalValue() throws {
+            try property { tc in
+                let policy = try #draw(SchemaValueGenerators.policies(unknownSlots: true), from: tc)
+                let fitting = try #draw(SchemaValueGenerators.fitting(policy), from: tc)
+                let looseRate = try #draw(Gen<Double>.element(of: [0.5, 1.0]), from: tc)
+                var loosener = Loosener(
+                    table: DefinitionTable(fitting.definitions),
+                    rate: looseRate
+                )
+                let rewritten = try loosener.loosen(tc, fitting.value, fitting.schema)
+                for label in loosener.labels.sorted() {
+                    try tc.event(label)
+                }
+                switch rewritten.loose.validated(
+                    against: fitting.schema,
+                    resolver: fitting.resolver
+                ) {
+                    case .failure(let error):
+                        Issue.record("the loose form \(rewritten.loose) does not fit: \(error)")
+                    case .success(let canonical):
+                        #expect(
+                            identical(canonical, rewritten.expected),
+                            "the loose form \(rewritten.loose) validated to \(canonical)"
+                        )
+                        try expectFixedPoint(canonical, fitting)
+                }
+            }
+        }
+
+        /// Whatever `validated` accepts, its result validates to itself.
+        /// The input is a loose form with one node replaced by something
+        /// close to it or by any tree at all, so it reaches what the
+        /// generator never makes: a number in another kind whether or not
+        /// it fits, any text as base64, a member dropped, repeated or
+        /// added, an item dropped or repeated, null and empty containers
+        /// where they may or may not fit.
+        ///
+        /// Mutation check: `validated` making bytes base64 text, which its
+        /// next pass decodes back to bytes, fails here. The other mistakes
+        /// `looseFormsValidateToTheCanonicalValue` catches leave `validated`
+        /// idempotent, since every pass takes kinds and member order from
+        /// the schema; that property is the check for them.
+        @Test
+        func validatedIsIdempotent() throws {
+            try property { tc in
+                let policy = try #draw(SchemaValueGenerators.policies(unknownSlots: true), from: tc)
+                let fitting = try #draw(SchemaValueGenerators.fitting(policy), from: tc)
+                let looseRate = try #draw(Gen<Double>.element(of: [0.5, 1.0]), from: tc)
+                var loosener = Loosener(
+                    table: DefinitionTable(fitting.definitions),
+                    rate: looseRate
+                )
+                let loose = try loosener.loosen(tc, fitting.value, fitting.schema).loose
+                // An inner node when there is one: almost nothing fits in
+                // place of a whole value, and a one-node value still puts
+                // the root up for replacement.
+                let count = nodeCount(loose)
+                let position = try #draw(Gen<Int>.int(in: (count > 1 ? 1 : 0)..<count), from: tc)
+                let original = node(of: loose, at: position) ?? .null
+                let replacement = try #draw(
+                    Gen<SchemaValue>.oneOf(
+                        SchemaValueGenerators.nearby(original),
+                        SchemaValueGenerators.looseValues
+                    ),
+                    from: tc
+                )
+                let input = replacing(loose, at: position, with: replacement)
+                switch input.validated(against: fitting.schema, resolver: fitting.resolver) {
+                    case .failure:
+                        try tc.event("the input was refused")
+                    case .success(let canonical):
+                        try tc.event("the input was accepted")
+                        try tc.event(
+                            identical(canonical, input)
+                                ? "accepted as it was" : "accepted and rewritten"
+                        )
+                        try expectFixedPoint(canonical, fitting)
+                }
+            }
+        }
+
+        /// `validated` takes its own result and gives it back unchanged.
+        func expectFixedPoint(_ canonical: SchemaValue, _ fitting: FittingValue) throws {
+            switch canonical.validated(against: fitting.schema, resolver: fitting.resolver) {
+                case .failure(let error):
+                    Issue.record("validated refuses its own result \(canonical): \(error)")
+                case .success(let again):
+                    #expect(
+                        identical(again, canonical),
+                        "validating \(canonical) again made \(again)"
+                    )
+            }
+        }
     }
 
 #endif
