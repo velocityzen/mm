@@ -185,8 +185,7 @@
     /// MessagePack values in any encoding that can hold them, and inputs made
     /// from them. Hegel shrinks toward the narrowest encodings.
     enum PackGenerators {
-        /// Every header that can declare `count`: the fix format when it
-        /// holds `count`, then the 8-, 16- and 32-bit ones that do.
+        /// Any header that can declare `count`.
         static func headers(
             count: Int,
             fix: (base: UInt8, limit: Int)?,
@@ -194,6 +193,27 @@
             sixteenBit: UInt8,
             thirtyTwoBit: UInt8
         ) -> Gen<[UInt8]> {
+            .element(
+                of: headerOptions(
+                    count: count,
+                    fix: fix,
+                    eightBit: eightBit,
+                    sixteenBit: sixteenBit,
+                    thirtyTwoBit: thirtyTwoBit
+                )
+            )
+        }
+
+        /// Every header that can declare `count`, narrowest first: the fix
+        /// format when it holds `count`, then the 8-, 16- and 32-bit ones
+        /// that do.
+        static func headerOptions(
+            count: Int,
+            fix: (base: UInt8, limit: Int)?,
+            eightBit: UInt8?,
+            sixteenBit: UInt8,
+            thirtyTwoBit: UInt8
+        ) -> [[UInt8]] {
             var options: [[UInt8]] = []
             if let fix, count < fix.limit {
                 options.append([fix.base | UInt8(count)])
@@ -205,7 +225,7 @@
                 options.append([sixteenBit] + bigEndianBytes(UInt16(count)))
             }
             options.append([thirtyTwoBit] + bigEndianBytes(UInt32(count)))
-            return .element(of: options)
+            return options
         }
 
         /// Every integer format that holds `value`, of either signedness.

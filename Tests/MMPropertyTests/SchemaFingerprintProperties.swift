@@ -1,0 +1,616 @@
+// Hegel runs on macOS and Linux only; see Package.swift.
+#if os(macOS) || os(Linux)
+
+    import HegelTesting
+    import MMSchema
+    import MMWire
+    import NIOCore
+    import Testing
+
+    /// A method set and the named types it references.
+    struct SchemaSet: Sendable {
+        var signatures: [MethodSignature]
+        var types: [TypeDefinition]
+
+        var fingerprint: UInt64 { SchemaFingerprint.compute(signatures, types: types) }
+    }
+
+    func packedBytes(_ value: some Encodable) throws -> [UInt8] {
+        Array(try MMPackEncoder().encode(value).get().readableBytesView)
+    }
+
+    /// The set as the wire carries it, with no order and no descriptions:
+    /// each signature's and each definition's MessagePack form with its
+    /// descriptions stripped, sorted. Two sets with the same form describe
+    /// the same schema, byte for byte in every name; any other two differ.
+    func wireForm(_ set: SchemaSet) throws -> [[[UInt8]]] {
+        let signatures = try set.signatures.map { try packedBytes($0.strippingDescriptions) }
+        let types = try set.types.map { try packedBytes($0.strippingDescriptions) }
+        return [
+            signatures.sorted { $0.lexicographicallyPrecedes($1) },
+            types.sorted { $0.lexicographicallyPrecedes($1) },
+        ]
+    }
+
+    /// The schema's every description, field, case and nested, set to
+    /// `text`.
+    func describing(_ schema: TypeSchema, _ text: String?) -> TypeSchema {
+        func fields(_ fields: [TypeSchema.Field]) -> [TypeSchema.Field] {
+            fields.map {
+                TypeSchema.Field(
+                    key: $0.key,
+                    name: $0.name,
+                    type: describing($0.type, text),
+                    description: text
+                )
+            }
+        }
+        switch schema {
+            case .optional(let wrapped): return .optional(describing(wrapped, text))
+            case .array(let element): return .array(describing(element, text))
+            case .map(let key, let value):
+                return .map(key: describing(key, text), value: describing(value, text))
+            case .structure(let list): return .structure(fields: fields(list))
+            case .enumeration(let cases):
+                return .enumeration(
+                    cases: cases.map { TypeSchema.EnumCase(name: $0.name, description: text) }
+                )
+            case .union(let cases):
+                return .union(
+                    cases: cases.map {
+                        TypeSchema.UnionCase(
+                            name: $0.name,
+                            fields: fields($0.fields),
+                            description: text
+                        )
+                    }
+                )
+            default: return schema
+        }
+    }
+
+    func describing(_ signature: MethodSignature, _ text: String?) -> MethodSignature {
+        MethodSignature(
+            name: signature.name,
+            access: signature.access,
+            request: describing(signature.request, text),
+            response: describing(signature.response, text),
+            requestStream: signature.requestStream.map { describing($0, text) },
+            responseStream: signature.responseStream.map { describing($0, text) },
+            description: text,
+            requestDescription: text,
+            responseDescription: text,
+            requestStreamDescription: text,
+            responseStreamDescription: text
+        )
+    }
+
+    /// The schemas directly inside one.
+    func children(of schema: TypeSchema) -> [TypeSchema] {
+        switch schema {
+            case .optional(let wrapped): [wrapped]
+            case .array(let element): [element]
+            case .map(let key, let value): [key, value]
+            case .structure(let fields): fields.map(\.type)
+            case .union(let cases): cases.flatMap { $0.fields.map(\.type) }
+            default: []
+        }
+    }
+
+    /// The schema with its child at `index`, as `children(of:)` counts,
+    /// replaced.
+    func replacingChild(_ index: Int, of schema: TypeSchema, with child: TypeSchema) -> TypeSchema {
+        func replaced(_ field: TypeSchema.Field) -> TypeSchema.Field {
+            TypeSchema.Field(
+                key: field.key,
+                name: field.name,
+                type: child,
+                description: field.description
+            )
+        }
+        switch schema {
+            case .optional: return .optional(child)
+            case .array: return .array(child)
+            case .map(let key, let value):
+                return index == 0 ? .map(key: child, value: value) : .map(key: key, value: child)
+            case .structure(var fields):
+                fields[index] = replaced(fields[index])
+                return .structure(fields: fields)
+            case .union(var cases):
+                var remaining = index
+                for caseIndex in cases.indices {
+                    if remaining < cases[caseIndex].fields.count {
+                        var fields = cases[caseIndex].fields
+                        fields[remaining] = replaced(fields[remaining])
+                        cases[caseIndex] = TypeSchema.UnionCase(
+                            name: cases[caseIndex].name,
+                            fields: fields,
+                            description: cases[caseIndex].description
+                        )
+                        return .union(cases: cases)
+                    }
+                    remaining -= cases[caseIndex].fields.count
+                }
+                return schema
+            default: return schema
+        }
+    }
+
+    /// Every schema inside this one, itself first, each with the child
+    /// indexes, as `children(of:)` counts them, that lead to it.
+    func nodes(of schema: TypeSchema, at path: [Int] = []) -> [(path: [Int], node: TypeSchema)] {
+        [(path, schema)]
+            + children(of: schema).enumerated().flatMap { index, child in
+                nodes(of: child, at: path + [index])
+            }
+    }
+
+    /// The schema with the node at `path` replaced.
+    func replacing(at path: [Int], in schema: TypeSchema, with replacement: TypeSchema)
+        -> TypeSchema
+    {
+        guard let index = path.first else { return replacement }
+        let child = replacing(
+            at: Array(path.dropFirst()),
+            in: children(of: schema)[index],
+            with: replacement
+        )
+        return replacingChild(index, of: schema, with: child)
+    }
+
+    /// One edit inside a schema.
+    enum SchemaEdit: String, CaseIterable, Sendable {
+        case fieldRenamed = "a field renamed"
+        case fieldKeyChanged = "a field key changed"
+        case fieldsSwapped = "two fields swapped"
+        case fieldDropped = "a field dropped"
+        case fieldAdded = "a field added"
+        case enumCaseRenamed = "an enum case renamed"
+        case enumCasesSwapped = "two enum cases swapped"
+        case enumCaseDropped = "an enum case dropped"
+        case unionCaseRenamed = "a union case renamed"
+        case unionCasesSwapped = "two union cases swapped"
+        case unionCaseDropped = "a union case dropped"
+        case unionCaseFieldEdited = "a union case's field edited"
+        case schemaReplaced = "a schema replaced"
+
+        static let fieldEdits: [SchemaEdit] = [
+            .fieldRenamed, .fieldKeyChanged, .fieldsSwapped, .fieldDropped, .fieldAdded,
+        ]
+
+        /// Whether the edit can be made at this node.
+        func applies(to node: TypeSchema) -> Bool {
+            switch (self, node) {
+                case (.fieldRenamed, .structure(let fields)),
+                    (.fieldKeyChanged, .structure(let fields)),
+                    (.fieldDropped, .structure(let fields)):
+                    !fields.isEmpty
+                case (.fieldsSwapped, .structure(let fields)): fields.count >= 2
+                case (.fieldAdded, .structure): true
+                case (.enumCaseRenamed, .enumeration(let cases)),
+                    (.enumCaseDropped, .enumeration(let cases)):
+                    !cases.isEmpty
+                case (.enumCasesSwapped, .enumeration(let cases)): cases.count >= 2
+                case (.unionCaseRenamed, .union(let cases)), (.unionCaseDropped, .union(let cases)),
+                    (.unionCaseFieldEdited, .union(let cases)):
+                    !cases.isEmpty
+                case (.unionCasesSwapped, .union(let cases)): cases.count >= 2
+                case (.schemaReplaced, _): true
+                default: false
+            }
+        }
+    }
+
+    /// One change to the set or to a signature, outside its schemas.
+    enum SetChange: String, CaseIterable, Sendable {
+        case signatureAdded = "a signature added"
+        case definitionAdded = "a definition added"
+        case methodRenamed = "a method renamed"
+        case accessChanged = "access changed"
+        case requestStreamChanged = "the request stream changed"
+        case responseStreamChanged = "the response stream changed"
+        case streamMoved = "a stream moved to the other slot"
+        case streamsSwapped = "the streams swapped slots"
+        case signatureDoubled = "a signature doubled"
+        case signatureDropped = "a signature dropped"
+        case definitionRenamed = "a definition renamed"
+        case definitionDropped = "a definition dropped"
+
+        var needsDefinition: Bool { self == .definitionRenamed || self == .definitionDropped }
+    }
+
+    /// Where a schema sits in a set.
+    enum SchemaSlot: Sendable {
+        case request(Int), response(Int), requestStream(Int), responseStream(Int), definition(Int)
+    }
+
+    extension SchemaSet {
+        var slots: [SchemaSlot] {
+            signatures.indices.flatMap { index in
+                [.request(index), .response(index)]
+                    + (signatures[index].requestStream == nil ? [] : [.requestStream(index)])
+                    + (signatures[index].responseStream == nil ? [] : [.responseStream(index)])
+            } + types.indices.map { .definition($0) }
+        }
+
+        func schema(at slot: SchemaSlot) -> TypeSchema {
+            switch slot {
+                case .request(let index): signatures[index].request
+                case .response(let index): signatures[index].response
+                case .requestStream(let index): signatures[index].requestStream!
+                case .responseStream(let index): signatures[index].responseStream!
+                case .definition(let index): types[index].schema
+            }
+        }
+
+        mutating func replace(_ slot: SchemaSlot, with schema: TypeSchema) {
+            switch slot {
+                case .request(let index): signatures[index].request = schema
+                case .response(let index): signatures[index].response = schema
+                case .requestStream(let index): signatures[index].requestStream = schema
+                case .responseStream(let index): signatures[index].responseStream = schema
+                case .definition(let index):
+                    types[index] = TypeDefinition(name: types[index].name, schema: schema)
+            }
+        }
+
+        /// Every node in every schema of the set where the edit applies.
+        func places(for edit: SchemaEdit) -> [(slot: SchemaSlot, path: [Int], node: TypeSchema)] {
+            slots.flatMap { slot in
+                nodes(of: schema(at: slot)).filter { edit.applies(to: $0.node) }.map {
+                    (slot, $0.path, $0.node)
+                }
+            }
+        }
+
+        /// The signatures a change to one signature applies to, or nil for
+        /// a change to the set.
+        func signatures(for change: SetChange) -> [Int]? {
+            switch change {
+                case .signatureAdded, .definitionAdded, .definitionRenamed, .definitionDropped: nil
+                case .streamMoved:
+                    signatures.indices.filter {
+                        (signatures[$0].requestStream == nil)
+                            != (signatures[$0].responseStream == nil)
+                    }
+                case .streamsSwapped:
+                    signatures.indices.filter {
+                        signatures[$0].requestStream != nil && signatures[$0].responseStream != nil
+                    }
+                default: Array(signatures.indices)
+            }
+        }
+    }
+
+    enum FingerprintGenerators {
+        /// Names from a small pool, so duplicates and near misses come up
+        /// (`é` precomposed and decomposed are equal Strings with different
+        /// bytes), or any text.
+        static let names: Gen<String> = .oneOf(
+            .element(of: [
+                "a", "b", "aa", "journal.append", "server.schema", "\u{E9}", "e\u{301}", "",
+            ]),
+            .string()
+        )
+
+        static let descriptions: Gen<String?> = .optional(.string())
+
+        static let keys: Gen<Int?> = .optional(
+            .oneOf(.int(), .element(of: [0, 1, -1, .min, .max]))
+        )
+
+        static let leaves: Gen<TypeSchema> = .oneOf(
+            .element(of: [
+                .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp,
+                .unknown,
+            ]),
+            names.map { .reference($0) }
+        )
+
+        static func fields(_ schemas: Gen<TypeSchema>) -> Gen<TypeSchema.Field> {
+            Gen { tc in
+                TypeSchema.Field(
+                    key: try tc.draw(keys),
+                    name: try tc.draw(names),
+                    type: try tc.draw(schemas),
+                    description: try tc.draw(descriptions)
+                )
+            }
+        }
+
+        static let enumCases: Gen<TypeSchema.EnumCase> = Hegel.zip(names, descriptions)
+            .map { TypeSchema.EnumCase(name: $0, description: $1) }
+
+        static let schemas: Gen<TypeSchema> = .recursive(maxDepth: 4, maxLeaves: 8, leaf: leaves) {
+            schema in
+            .oneOf(
+                schema.map { .optional($0) },
+                schema.map { .array($0) },
+                Hegel.zip(schema, schema).map { .map(key: $0, value: $1) },
+                Gen<[TypeSchema.Field]>.array(of: fields(schema), count: 0...4).map {
+                    .structure(fields: $0)
+                },
+                Gen<[TypeSchema.EnumCase]>.array(of: enumCases, count: 0...4).map {
+                    .enumeration(cases: $0)
+                },
+                Gen<[TypeSchema.UnionCase]>.array(
+                    of: Hegel.zip(names, .array(of: fields(schema), count: 0...3), descriptions)
+                        .map { TypeSchema.UnionCase(name: $0, fields: $1, description: $2) }
+                )
+                .map { .union(cases: $0) }
+            )
+        }
+
+        static let accesses: Gen<AccessMode> = Gen<UInt8>.oneOf(.integer(in: 0...7), .integer())
+            .map { AccessMode(rawValue: $0) }
+
+        /// A request or response: half the time a structure, as most are.
+        static let payloads: Gen<TypeSchema> = .oneOf(
+            Gen<[TypeSchema.Field]>.array(of: fields(schemas), count: 1...4).map {
+                .structure(fields: $0)
+            },
+            schemas
+        )
+
+        static let signatures: Gen<MethodSignature> = Gen { tc in
+            MethodSignature(
+                name: try tc.draw(names),
+                access: try tc.draw(accesses),
+                request: try tc.draw(payloads),
+                response: try tc.draw(payloads),
+                requestStream: try tc.draw(.optional(schemas)),
+                responseStream: try tc.draw(.optional(schemas)),
+                description: try tc.draw(descriptions),
+                requestDescription: try tc.draw(descriptions),
+                responseDescription: try tc.draw(descriptions),
+                requestStreamDescription: try tc.draw(descriptions),
+                responseStreamDescription: try tc.draw(descriptions)
+            )
+        }
+
+        static let definitions: Gen<TypeDefinition> = Gen { tc in
+            TypeDefinition(
+                name: try tc.draw(names),
+                schema: try tc.draw(schemas),
+                description: try tc.draw(descriptions)
+            )
+        }
+
+        /// Up to six signatures and four definitions: enough for order and
+        /// duplicates to matter, few enough to keep a case cheap.
+        static func sets(signatureCount: ClosedRange<Int>) -> Gen<SchemaSet> {
+            Hegel.zip(
+                .array(of: signatures, count: signatureCount),
+                .array(of: definitions, count: 0...4)
+            )
+            .map { SchemaSet(signatures: $0, types: $1) }
+        }
+
+        /// The list in an order drawn by sorting on drawn keys.
+        static func shuffled<Element>(_ list: [Element], _ tc: TestCase) throws -> [Element] {
+            let order = try tc.draw(
+                Gen<[UInt64]>.array(of: .integer(), count: list.count...list.count)
+            )
+            return zip(list, order).sorted { $0.1 < $1.1 }.map(\.0)
+        }
+
+        /// The set reordered, with every description set to one drawn text
+        /// or removed.
+        static func restated(_ set: SchemaSet, _ tc: TestCase) throws -> SchemaSet {
+            let text = try tc.draw(descriptions)
+            return SchemaSet(
+                signatures: try shuffled(set.signatures.map { describing($0, text) }, tc),
+                types: try shuffled(
+                    set.types.map {
+                        TypeDefinition(
+                            name: $0.name,
+                            schema: describing($0.schema, text),
+                            description: text
+                        )
+                    },
+                    tc
+                )
+            )
+        }
+
+        /// The fields with one edit: a structure's, or a union case's.
+        static func editedFields(
+            _ fields: [TypeSchema.Field],
+            _ edit: SchemaEdit,
+            _ tc: TestCase
+        ) throws -> [TypeSchema.Field] {
+            var fields = fields
+            switch edit {
+                case .fieldRenamed:
+                    let index = try pick(fields.count, tc)
+                    let field = fields[index]
+                    fields[index] = TypeSchema.Field(
+                        key: field.key,
+                        name: try tc.draw(names),
+                        type: field.type
+                    )
+                case .fieldKeyChanged:
+                    let index = try pick(fields.count, tc)
+                    let field = fields[index]
+                    var key = try tc.draw(keys)
+                    if key == field.key { key = key == nil ? 0 : nil }
+                    fields[index] = TypeSchema.Field(key: key, name: field.name, type: field.type)
+                case .fieldsSwapped:
+                    try swapTwo(&fields, tc)
+                case .fieldDropped:
+                    fields.remove(at: try pick(fields.count, tc))
+                default:
+                    let added = try tc.draw(FingerprintGenerators.fields(leaves))
+                    fields.insert(added, at: try tc.draw(Gen<Int>.int(in: 0...fields.count)))
+            }
+            return fields
+        }
+
+        /// The node with the edit made, and a label for the statistics.
+        static func applying(_ edit: SchemaEdit, to node: TypeSchema, _ tc: TestCase) throws -> (
+            TypeSchema, String
+        ) {
+            switch node {
+                case .structure(let fields) where edit != .schemaReplaced:
+                    return (.structure(fields: try editedFields(fields, edit, tc)), edit.rawValue)
+                case .enumeration(var cases) where edit != .schemaReplaced:
+                    switch edit {
+                        case .enumCaseRenamed:
+                            cases[try pick(cases.count, tc)] = TypeSchema.EnumCase(
+                                name: try tc.draw(names)
+                            )
+                        case .enumCasesSwapped:
+                            try swapTwo(&cases, tc)
+                        default:
+                            cases.remove(at: try pick(cases.count, tc))
+                    }
+                    return (.enumeration(cases: cases), edit.rawValue)
+                case .union(var cases) where edit != .schemaReplaced:
+                    let index = try pick(cases.count, tc)
+                    let unionCase = cases[index]
+                    switch edit {
+                        case .unionCaseRenamed:
+                            cases[index] = TypeSchema.UnionCase(
+                                name: try tc.draw(names),
+                                fields: unionCase.fields
+                            )
+                        case .unionCasesSwapped:
+                            try swapTwo(&cases, tc)
+                        case .unionCaseDropped:
+                            cases.remove(at: index)
+                        default:
+                            let fieldEdits = SchemaEdit.fieldEdits.filter {
+                                $0.applies(to: .structure(fields: unionCase.fields))
+                            }
+                            let fieldEdit = try tc.draw(Gen<SchemaEdit>.element(of: fieldEdits))
+                            let fields = try editedFields(unionCase.fields, fieldEdit, tc)
+                            cases[index] = TypeSchema.UnionCase(
+                                name: unionCase.name,
+                                fields: fields
+                            )
+                            return (.union(cases: cases), "a union case: " + fieldEdit.rawValue)
+                    }
+                    return (.union(cases: cases), edit.rawValue)
+                default:
+                    return (try tc.draw(schemas), SchemaEdit.schemaReplaced.rawValue)
+            }
+        }
+
+        /// The set with one change: half the time a change to the set or a
+        /// signature, otherwise an edit inside one of its schemas. Every
+        /// kind is drawn as often as the others and made where it applies,
+        /// at a place drawn from all such places; a kind with no place in
+        /// the set adds a signature or replaces a schema instead.
+        static func changed(_ set: SchemaSet, _ tc: TestCase) throws -> (SchemaSet, String) {
+            var set = set
+            if try tc.draw(Gen<Bool>.bool()) {
+                var edit = try tc.draw(Gen<SchemaEdit>.element(of: SchemaEdit.allCases))
+                if set.places(for: edit).isEmpty { edit = .schemaReplaced }
+                let places = set.places(for: edit)
+                let place = places[try pick(places.count, tc)]
+                let (node, label) = try applying(edit, to: place.node, tc)
+                set.replace(
+                    place.slot,
+                    with: replacing(at: place.path, in: set.schema(at: place.slot), with: node)
+                )
+                return (set, label)
+            }
+            var change = try tc.draw(Gen<SetChange>.element(of: SetChange.allCases))
+            if set.signatures(for: change)?.isEmpty == true
+                || (change.needsDefinition && set.types.isEmpty)
+            {
+                change = .signatureAdded
+            }
+            let candidates = set.signatures(for: change) ?? Array(set.signatures.indices)
+            let index = candidates[try pick(candidates.count, tc)]
+            let typeIndex = set.types.isEmpty ? 0 : try pick(set.types.count, tc)
+            switch change {
+                case .signatureAdded:
+                    set.signatures.append(try tc.draw(signatures))
+                case .definitionAdded:
+                    set.types.append(try tc.draw(definitions))
+                case .methodRenamed:
+                    set.signatures[index].name = try tc.draw(names)
+                case .accessChanged:
+                    set.signatures[index].access = try tc.draw(accesses)
+                case .requestStreamChanged:
+                    set.signatures[index].requestStream = try tc.draw(.optional(schemas))
+                case .responseStreamChanged:
+                    set.signatures[index].responseStream = try tc.draw(.optional(schemas))
+                case .streamMoved, .streamsSwapped:
+                    let signature = set.signatures[index]
+                    set.signatures[index].requestStream = signature.responseStream
+                    set.signatures[index].responseStream = signature.requestStream
+                case .signatureDoubled:
+                    set.signatures.append(set.signatures[index])
+                case .signatureDropped:
+                    set.signatures.remove(at: index)
+                case .definitionRenamed:
+                    set.types[typeIndex] = TypeDefinition(
+                        name: try tc.draw(names),
+                        schema: set.types[typeIndex].schema
+                    )
+                case .definitionDropped:
+                    set.types.remove(at: typeIndex)
+            }
+            return (set, change.rawValue)
+        }
+
+        static func pick(_ count: Int, _ tc: TestCase) throws -> Int {
+            try tc.draw(Gen<Int>.int(in: 0...(count - 1)))
+        }
+
+        /// Two members of the list, at different places, swapped.
+        static func swapTwo<Element>(_ list: inout [Element], _ tc: TestCase) throws {
+            let first = try pick(list.count, tc)
+            let step = try pick(list.count - 1, tc)
+            list.swapAt(first, (first + 1 + step) % list.count)
+        }
+    }
+
+    @Suite("SchemaFingerprint properties", .hegel)
+    struct SchemaFingerprintProperties {
+        /// Reordering the signatures and the type definitions, and
+        /// rewriting or removing every description, leaves the fingerprint
+        /// as it was, duplicate method names included.
+        ///
+        /// Mutation check: dropping the tie-break on the full encoding, so
+        /// two methods of one name stay in the order they came in, or
+        /// hashing an enum case's description, fails here.
+        @Test
+        func fingerprintIgnoresOrderAndDescriptions() throws {
+            try property { tc in
+                let set = try #draw(FingerprintGenerators.sets(signatureCount: 0...6), from: tc)
+                let restated = try FingerprintGenerators.restated(set, tc)
+                try tc.event("signatures", value: Double(set.signatures.count))
+                if Set(set.signatures.map(\.name)).count < set.signatures.count {
+                    try tc.event("duplicate method names")
+                }
+                #expect(restated.fingerprint == set.fingerprint)
+            }
+        }
+
+        /// Two sets fingerprint the same exactly when their wire forms, with
+        /// no order and no descriptions, are the same: one change anywhere,
+        /// a name, an access mode, a field's name, key or place, a case, a
+        /// stream or its slot, a definition, changes the fingerprint unless
+        /// it changes nothing on the wire.
+        ///
+        /// Mutation check: leaving a field's key, a union case's fields or
+        /// the access mode out of the hash, or tagging a response stream as
+        /// a request stream, fails here.
+        @Test
+        func fingerprintSeesEveryChange() throws {
+            try property { tc in
+                let set = try #draw(FingerprintGenerators.sets(signatureCount: 1...6), from: tc)
+                let (changed, label) = try FingerprintGenerators.changed(set, tc)
+                let restated = try FingerprintGenerators.restated(changed, tc)
+                let same = try wireForm(set) == wireForm(restated)
+                try tc.event(label)
+                try tc.event(same ? "nothing changed on the wire" : "the wire form changed")
+                #expect((restated.fingerprint == set.fingerprint) == same, "\(label)")
+            }
+        }
+    }
+
+#endif
