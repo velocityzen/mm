@@ -23,11 +23,13 @@
         let hasResponseStream: Bool
         private let source: NIOLockedValueBox<Source>
 
-        init(request: Bool, response: Bool) {
+        /// `window` is the request credit the source starts with. A real one
+        /// starts at `MMStreamFlowControl.initialWindow`; smaller ones let a
+        /// run use up its credit in a few items.
+        init(request: Bool, response: Bool, window: Int) {
             self.hasRequestStream = request
             self.hasResponseStream = response
-            let window = request ? Int(MMStreamFlowControl.initialWindow) : 0
-            self.source = NIOLockedValueBox(Source(credit: window))
+            self.source = NIOLockedValueBox(Source(credit: request ? window : 0))
         }
 
         var credit: Int { self.source.withLockedValue { $0.credit } }
@@ -148,6 +150,8 @@
         var terminals: [StreamTable.CallIdentity: Int] = [:]
         /// Every msgid a frame has named, live or not.
         var seen: Set<UInt32> = []
+        /// Every msgid whose call has been answered at least once.
+        var answered: Set<UInt32> = []
 
         init(handlers: Pool<RunningHandler>) {
             self.handlers = handlers
@@ -170,14 +174,32 @@
                 return
             }
             self.terminals[call, default: 0] += 1
+            self.answered.insert(msgid)
             #expect(self.terminals[call, default: 0] == 1, "msgid \(msgid) answered twice")
+        }
+
+        /// Records, for the statistics report, an open on a msgid that is
+        /// live, or free again after an earlier call on it was answered.
+        func recordOpen(on msgid: UInt32, in tc: TestCase) throws {
+            if self.calls[msgid] != nil {
+                try tc.event("an open on a live msgid")
+            } else if self.answered.contains(msgid) {
+                try tc.event("an open reusing an answered msgid")
+            }
         }
 
         /// A handler returns. Its terminal goes out only when its own call is
         /// still live; one a CANCEL or a violation answered already finds the
         /// msgid free, or holding a newer call it must leave alone.
-        mutating func finish(_ handler: RunningHandler) {
+        mutating func finish(_ handler: RunningHandler, in tc: TestCase) throws {
             let live = self.calls[handler.msgid]?.identity == handler.call
+            if !live {
+                try tc.event(
+                    self.calls[handler.msgid] == nil
+                        ? "a handler returns after its call was answered"
+                        : "a handler returns after its msgid was reused"
+                )
+            }
             let sends =
                 if handler.isStream {
                     self.table.retireStream(msgid: handler.msgid, call: handler.call)
@@ -195,14 +217,17 @@
             return call
         }
 
-        /// Any msgid, or often one a frame named before, so calls collide
-        /// and reuse msgids.
+        /// Any msgid, or often a live one or one a frame named before, so
+        /// frames reach live calls, calls collide and msgids are reused.
         mutating func msgid(from tc: TestCase) throws -> UInt32 {
-            let any = Gen<UInt32>.integer()
-            let msgid = try tc.draw(
-                self.seen.isEmpty ? any : .oneOf(.element(of: self.seen.sorted()), any),
-                named: "msgid"
-            )
+            var msgids: [Gen<UInt32>] = [.integer()]
+            if !self.seen.isEmpty {
+                msgids.append(.element(of: self.seen.sorted()))
+            }
+            if !self.calls.isEmpty {
+                msgids.append(.element(of: self.calls.keys.sorted()))
+            }
+            let msgid = try tc.draw(.oneOf(msgids), named: "msgid")
             self.seen.insert(msgid)
             return msgid
         }
@@ -210,7 +235,9 @@
         /// One of the live streams with a request direction, for the rules
         /// that act on what the handler does with it.
         func requestStream(from tc: TestCase) throws -> StreamCall {
-            let msgids = self.calls.keys.filter { self.stream($0)?.control.hasRequestStream == true }
+            let msgids = self.calls.keys.filter {
+                self.stream($0)?.control.hasRequestStream == true
+            }
             try tc.assume(!msgids.isEmpty)
             let msgid = try tc.draw(.element(of: msgids.sorted()), named: "msgid")
             return try #require(self.stream(msgid))
@@ -235,7 +262,12 @@
             let msgid = try s.msgid(from: tc)
             let request = try #draw(.bool(probability: 0.7), from: tc)
             let response = try #draw(.bool(), from: tc)
-            let control = ModelStreamControl(request: request, response: response)
+            let window = try #draw(
+                .oneOf(.element(of: [0, 1, 2]), .just(Int(MMStreamFlowControl.initialWindow))),
+                from: tc
+            )
+            let control = ModelStreamControl(request: request, response: response, window: window)
+            try s.recordOpen(on: msgid, in: tc)
             let entry = StreamTable.Entry(
                 control: control,
                 hasRequestStream: request,
@@ -244,11 +276,15 @@
             let call = s.table.registerStream(msgid: msgid, entry: entry)
             #expect((call != nil) == (s.calls[msgid] == nil))
             if let call {
-                try s.open(.stream(StreamTableModel.StreamCall(call: call, control: control)), on: msgid)
+                try s.open(
+                    .stream(StreamTableModel.StreamCall(call: call, control: control)),
+                    on: msgid
+                )
             }
         }
         .rule("open unary") { s, tc in
             let msgid = try s.msgid(from: tc)
+            try s.recordOpen(on: msgid, in: tc)
             let call = s.table.registerUnary(msgid: msgid)
             #expect((call != nil) == (s.calls[msgid] == nil))
             if let call {
@@ -278,6 +314,10 @@
                         } else {
                             .deliver
                         }
+                    try tc.event("an item on a stream: \(expected)")
+                    if expected == .violation, offset == 0, control.hasRequestStream {
+                        try tc.event("an item with no credit left")
+                    }
                     let decision = s.table.routeItem(msgid: msgid, seq: call.expectedSeq &+ offset)
                     #expect(decision.outcome == expected)
                     switch decision {
@@ -341,6 +381,7 @@
             let msgid = try s.msgid(from: tc)
             let control = s.table.routeCancel(msgid: msgid)
             if let call = s.stream(msgid) {
+                try tc.event("a cancel answers a stream")
                 #expect(isControl(control, of: call))
                 s.answer(msgid)
             } else {
@@ -360,11 +401,14 @@
         }
         .rule("handler returns", weight: 2) { s, tc in
             let handler = try #draw(s.handlers.consumed, from: tc)
-            s.finish(handler)
+            try s.finish(handler, in: tc)
         }
         .invariant("the table holds the model's calls", everyStep: true) { s, _ in
             for msgid in s.seen {
-                #expect(s.table.isStreamLive(msgid: msgid) == (s.stream(msgid) != nil), "msgid \(msgid)")
+                #expect(
+                    s.table.isStreamLive(msgid: msgid) == (s.stream(msgid) != nil),
+                    "msgid \(msgid)"
+                )
                 #expect(s.table.isOwned(msgid: msgid) == (s.calls[msgid] != nil), "msgid \(msgid)")
             }
             #expect(s.table.openStreamCount == s.streamCount)
@@ -376,12 +420,17 @@
         /// Never two terminals for one call, never an item past the credit
         /// window, a handler only ever retires its own call, and once every
         /// handler returns, every call has had exactly one terminal.
-        @Test(.hegel(testCases: 300))
+        ///
+        /// Mutation-checked: dropping the credit gate fails this with one
+        /// item on a stream opened with no credit, and retiring a stream by
+        /// msgid alone fails it when a late handler returns after its msgid
+        /// was reused.
+        @Test
         func everyCallIsAnsweredOnce() throws {
             try property { tc in
                 var s = try streamTableMachine.run(tc, from: StreamTableModel(handlers: tc.pool()))
                 while !s.handlers.isEmpty {
-                    s.finish(try tc.draw(s.handlers.consumed, named: "handler"))
+                    try s.finish(try tc.draw(s.handlers.consumed, named: "handler"), in: tc)
                 }
                 for msgid in s.seen {
                     #expect(!s.table.isOwned(msgid: msgid), "msgid \(msgid)")

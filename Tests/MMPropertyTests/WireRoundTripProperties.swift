@@ -86,7 +86,8 @@
         value.doubles = fixture.doubles.map { _ in 0 }
         value.nested = zeroed(fixture.nested)
         value.maybeNested = fixture.maybeNested.map(zeroed)
-        let floats: [Double] = [fixture.double] + fixture.doubles + fixture.nested.values
+        let floats: [Double] =
+            [fixture.double] + fixture.doubles + fixture.nested.values
             + (fixture.maybeNested?.values ?? [])
         return Bitwise(
             value: value,
@@ -149,12 +150,26 @@
         .map { MMHello(protocolVersion: $0, schemaFingerprint: $1, capabilities: $2) }
     }
 
+    /// Records, for the statistics report, whether a string key reads as an
+    /// integer, in the canonical form that may travel as an integer key or
+    /// in another one that must stay a string.
+    func recordIntegerLookingKeys(_ keys: some Sequence<String>, in tc: TestCase) throws {
+        for key in keys {
+            guard let integer = Int(key) else { continue }
+            try tc.event(
+                String(integer) == key ? "a canonical integer key" : "a non-canonical integer key"
+            )
+        }
+    }
+
     @Suite("Wire round-trip properties", .hegel)
     struct WireRoundTripProperties {
-        @Test(.hegel(testCases: 500))
+        /// Any fixture decodes back to itself, float bits included.
+        @Test
         func fixtureRoundTrips() throws {
             try property { tc in
                 let fixture = try #draw(WireGenerators.fixture, from: tc)
+                try recordIntegerLookingKeys(fixture.stringMap.keys, in: tc)
                 let encoded = try MMPackEncoder().encode(fixture).get()
                 #expect(
                     MMPackDecoder().decode(Fixture.self, from: encoded).map(bitwise)
@@ -163,10 +178,13 @@
             }
         }
 
+        /// Any array of fixtures, the empty one included, decodes back to
+        /// itself.
         @Test
         func fixtureArraysRoundTrip() throws {
             try property { tc in
                 let fixtures = try #draw(.array(of: WireGenerators.fixture), from: tc)
+                try tc.event("fixtures", value: Double(fixtures.count))
                 let encoded = try MMPackEncoder().encode(fixtures).get()
                 #expect(
                     MMPackDecoder().decode([Fixture].self, from: encoded).map { $0.map(bitwise) }
@@ -175,6 +193,8 @@
             }
         }
 
+        /// Any hello encodes to its fixed byte count and decodes back to
+        /// itself. Menu: none, every field is drawn from its whole type.
         @Test
         func helloRoundTrips() throws {
             try property { tc in

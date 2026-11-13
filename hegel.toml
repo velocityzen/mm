@@ -1,0 +1,14 @@
+# Hegel settings for MMPropertyTests.
+#
+# Local runs use libhegel's development profile: 100 test cases per
+# property, and a failure database under .hegel/. CI derandomizes, so it sees
+# the same inputs every run. New inputs come from local runs and from the
+# nightly profile, which runs on a schedule and once before a property is
+# called done:
+#
+#   HEGEL_DEFAULT_PROFILE=nightly swift test --filter MMPropertyTests
+#
+# Add HEGEL_STATISTICS=1 to see how often each reach event occurs.
+
+[profiles.nightly]
+test_cases = 10_000

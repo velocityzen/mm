@@ -93,18 +93,58 @@
         }
     }
 
+    /// One test case's policy for the catalog generators. Properties draw it
+    /// first, so that cases differ in kind and not only in values.
+    struct CatalogShape: Sendable {
+        /// How often a string, binary or collection takes a size at a
+        /// MessagePack header boundary instead of one Hegel chooses. At 0,
+        /// Hegel sizes everything. A high rate stacks boundary-sized
+        /// collections inside each other, which makes the largest requests.
+        var boundaryRate: Double
+        /// How deep shipments may split. Each split nests three containers
+        /// (the case map, its fields map and the parts array), so 32 splits
+        /// nest about 101: inside the decoders' default limit of 128.
+        var shipmentDepth: Int
+    }
+
     /// Catalog values from their whole domains: any string, integer, float
-    /// (NaN and the infinities too), and sizes and depths Hegel chooses. On
-    /// top, each generator draws often at the MessagePack header boundaries:
-    /// strings and binaries of 31/32 and 255/256 bytes, collections of 15 to
-    /// 17 elements, and integers at each format's edge.
-    enum CatalogGenerators {
-        /// A fixstr holds up to 31 bytes and a str8 up to 255.
-        static let text: Gen<String> = .oneOf(
-            .string(),
-            .string(of: .ascii, count: 31...32),
-            .string(of: .ascii, count: 255...256)
+    /// (NaN and the infinities too), and sizes and depths Hegel chooses.
+    /// Integers draw often at each format's edge. At the shape's boundary
+    /// rate, strings and binaries take 31/32 and 255/256 bytes and
+    /// collections 15 to 17 elements.
+    struct CatalogGenerators: Sendable {
+        let shape: CatalogShape
+
+        init(_ shape: CatalogShape) {
+            self.shape = shape
+        }
+
+        /// Hegel shrinks toward the first entries: sizes it chooses, and
+        /// shipments with no splits.
+        static let shapes: Gen<CatalogShape> = Hegel.zip(
+            Gen<Double>.element(of: [0, 0.1, 0.5]),
+            Gen<Int>.element(of: [0, 3, 32])
         )
+        .map { CatalogShape(boundaryRate: $0, shipmentDepth: $1) }
+
+        /// `anySize`, or `boundarySize` at the shape's boundary rate.
+        func sometimes<Value>(_ boundarySize: Gen<Value>, otherwise anySize: Gen<Value>) -> Gen<
+            Value
+        > {
+            guard self.shape.boundaryRate > 0 else {
+                return anySize
+            }
+            return Gen<Bool>.bool(probability: self.shape.boundaryRate)
+                .flatMap { $0 ? boundarySize : anySize }
+        }
+
+        /// A fixstr holds up to 31 bytes and a str8 up to 255.
+        var text: Gen<String> {
+            self.sometimes(
+                .oneOf(.string(of: .ascii, count: 31...32), .string(of: .ascii, count: 255...256)),
+                otherwise: .string()
+            )
+        }
 
         /// The edges of positive and negative fixints, and of the 8-, 16- and
         /// 32-bit formats.
@@ -119,24 +159,27 @@
         )
 
         /// A bin8 holds up to 255 bytes.
-        static let bytes: Gen<MMBytes> = Gen<[UInt8]>.oneOf(.bytes(), .bytes(count: 255...256))
-            .map { MMBytes($0) }
+        var bytes: Gen<MMBytes> {
+            self.sometimes(.bytes(count: 255...256), otherwise: Gen<[UInt8]>.bytes()).map {
+                MMBytes($0)
+            }
+        }
 
         static let condition: Gen<Catalog.Condition> = .allCases
 
-        /// Any length, or 15 to 17 elements: a fixarray holds up to 15.
-        static func list<Element>(of element: Gen<Element>) -> Gen<[Element]> {
-            .oneOf(.array(of: element), .array(of: element, count: 15...17))
+        /// A fixarray holds up to 15 elements.
+        func list<Element>(of element: Gen<Element>) -> Gen<[Element]> {
+            self.sometimes(.array(of: element, count: 15...17), otherwise: .array(of: element))
         }
 
-        /// Any size, or 15 to 17 entries: a fixmap holds up to 15.
-        static func map<Key: Hashable & SendableMetatype, Value>(
+        /// A fixmap holds up to 15 entries.
+        func map<Key: Hashable & SendableMetatype, Value>(
             keys: Gen<Key>,
             values: Gen<Value>
         ) -> Gen<[Key: Value]> {
-            .oneOf(
-                .dictionary(keys: keys, values: values),
-                .dictionary(keys: keys, values: values, count: 15...17)
+            self.sometimes(
+                .dictionary(keys: keys, values: values, count: 15...17),
+                otherwise: .dictionary(keys: keys, values: values)
             )
         }
 
@@ -169,64 +212,147 @@
             )
         }
 
-        static let item: Gen<Catalog.Item> = Gen { tc in
-            try Catalog.Item(
-                sku: tc.draw(text),
-                quantity: tc.draw(integer),
-                stock: tc.draw(unsigned),
-                price: tc.draw(.double()),
-                weight: tc.draw(.float()),
-                active: tc.draw(.bool()),
-                condition: tc.draw(condition),
-                tags: tc.draw(list(of: text)),
-                note: tc.draw(.optional(text)),
-                grid: tc.draw(list(of: list(of: Gen<Int?>.optional(integer)))),
-                lookup: tc.draw(map(keys: text, values: integer)),
-                serials: tc.draw(map(keys: unsigned, values: text)),
-                released: tc.draw(date),
-                updated: tc.draw(.optional(dateTime)),
-                stamped: tc.draw(.optional(timestamp)),
-                stamp: GeneratedCodingStamp(author: tc.draw(text), level: tc.draw(integer)),
-                owner: Catalog.Item.Owner(name: tc.draw(text), since: tc.draw(.optional(date))),
-                photo: tc.draw(bytes),
-                thumbnail: tc.draw(.optional(bytes))
+        var item: Gen<Catalog.Item> {
+            Gen { tc in
+                try Catalog.Item(
+                    sku: tc.draw(self.text),
+                    quantity: tc.draw(Self.integer),
+                    stock: tc.draw(Self.unsigned),
+                    price: tc.draw(.double()),
+                    weight: tc.draw(.float()),
+                    active: tc.draw(.bool()),
+                    condition: tc.draw(Self.condition),
+                    tags: tc.draw(self.list(of: self.text)),
+                    note: tc.draw(.optional(self.text)),
+                    grid: tc.draw(self.list(of: self.list(of: Gen<Int?>.optional(Self.integer)))),
+                    lookup: tc.draw(self.map(keys: self.text, values: Self.integer)),
+                    serials: tc.draw(self.map(keys: Self.unsigned, values: self.text)),
+                    released: tc.draw(Self.date),
+                    updated: tc.draw(.optional(Self.dateTime)),
+                    stamped: tc.draw(.optional(Self.timestamp)),
+                    stamp: GeneratedCodingStamp(
+                        author: tc.draw(self.text),
+                        level: tc.draw(Self.integer)
+                    ),
+                    owner: Catalog.Item.Owner(
+                        name: tc.draw(self.text),
+                        since: tc.draw(.optional(Self.date))
+                    ),
+                    photo: tc.draw(self.bytes),
+                    thumbnail: tc.draw(.optional(self.bytes))
+                )
+            }
+        }
+
+        var shipment: Gen<Catalog.Shipment> {
+            .recursive(
+                maxDepth: self.shape.shipmentDepth,
+                leaf: .oneOf(
+                    .just(.pending),
+                    .just(.unknown),
+                    Gen { tc in
+                        try .shipped(
+                            carrier: tc.draw(self.text),
+                            tracking: tc.draw(.optional(self.bytes)),
+                            condition: tc.draw(Self.condition)
+                        )
+                    }
+                ),
+                branch: { parts in
+                    Gen { tc in
+                        try .split(
+                            parts: tc.draw(Gen<[Catalog.Shipment]>.array(of: parts)),
+                            box: .init(label: tc.draw(self.text))
+                        )
+                    }
+                }
             )
         }
 
-        /// Hegel's default nesting, up to 32 splits deep. Each split nests three
-        /// containers (the case map, its fields map and the parts array), so
-        /// the deepest request nests about 101: inside the decoder's default
-        /// limit of 128, which the properties decode with.
-        static let shipment: Gen<Catalog.Shipment> = .recursive(
-            leaf: .oneOf(
-                .just(.pending),
-                .just(.unknown),
-                Gen { tc in
-                    try .shipped(
-                        carrier: tc.draw(text),
-                        tracking: tc.draw(.optional(bytes)),
-                        condition: tc.draw(condition)
-                    )
-                }
-            ),
-            branch: { parts in
-                Gen { tc in
-                    try .split(
-                        parts: tc.draw(Gen<[Catalog.Shipment]>.array(of: parts)),
-                        box: .init(label: tc.draw(text))
-                    )
+        var putRequest: Gen<Catalog.PutRequest> {
+            Gen { tc in
+                try Catalog.PutRequest(
+                    items: tc.draw(self.list(of: self.item)),
+                    conditions: tc.draw(
+                        self.list(of: Gen<Catalog.Condition?>.optional(Self.condition))
+                    ),
+                    flag: tc.draw(Gen<Bool??>.optional(Gen<Bool?>.optional(.bool()))),
+                    shipments: tc.draw(.optional(self.list(of: self.shipment)))
+                )
+            }
+        }
+    }
+
+    /// The sizes in a request that decide which MessagePack formats encode
+    /// it: every string's UTF-8 byte count, every binary's byte count, every
+    /// collection's element count, and how deep its shipments split.
+    struct CatalogSizes {
+        var strings: [Int] = []
+        var binaries: [Int] = []
+        var collections: [Int] = []
+        var shipmentDepth = 0
+
+        init(_ request: Catalog.PutRequest) {
+            self.collections += [request.items.count, request.conditions.count]
+            for item in request.items {
+                self.add(item)
+            }
+            if let shipments = request.shipments {
+                self.collections.append(shipments.count)
+                for shipment in shipments {
+                    self.add(shipment, depth: 0)
                 }
             }
-        )
-
-        static let putRequest: Gen<Catalog.PutRequest> = Gen { tc in
-            try Catalog.PutRequest(
-                items: tc.draw(list(of: item)),
-                conditions: tc.draw(list(of: Gen<Catalog.Condition?>.optional(condition))),
-                flag: tc.draw(Gen<Bool??>.optional(Gen<Bool?>.optional(.bool()))),
-                shipments: tc.draw(.optional(list(of: shipment)))
-            )
         }
+
+        private mutating func add(_ item: Catalog.Item) {
+            self.strings += [item.sku, item.stamp.author, item.owner.name].map(\.utf8.count)
+            self.strings += item.tags.map(\.utf8.count) + (item.note.map { [$0.utf8.count] } ?? [])
+            self.strings +=
+                item.lookup.keys.map(\.utf8.count) + item.serials.values.map(\.utf8.count)
+            self.binaries +=
+                [item.photo.bytes.count] + (item.thumbnail.map { [$0.bytes.count] } ?? [])
+            self.collections += [
+                item.tags.count, item.grid.count, item.lookup.count, item.serials.count,
+            ]
+            self.collections += item.grid.map(\.count)
+        }
+
+        private mutating func add(_ shipment: Catalog.Shipment, depth: Int) {
+            switch shipment {
+                case .shipped(let carrier, let tracking, _):
+                    self.strings.append(carrier.utf8.count)
+                    self.binaries += tracking.map { [$0.bytes.count] } ?? []
+                case .split(let parts, let box):
+                    self.shipmentDepth = max(self.shipmentDepth, depth + 1)
+                    self.strings.append(box.label.utf8.count)
+                    self.collections.append(parts.count)
+                    for part in parts {
+                        self.add(part, depth: depth + 1)
+                    }
+                default:
+                    break
+            }
+        }
+    }
+
+    /// Records which MessagePack size formats the request reaches, for the
+    /// statistics report (`HEGEL_STATISTICS=1`).
+    func recordSizes(of request: Catalog.PutRequest, in tc: TestCase) throws {
+        let sizes = CatalogSizes(request)
+        if sizes.collections.contains(where: { $0 >= 16 }) {
+            try tc.event("a collection past fixarray or fixmap")
+        }
+        if sizes.strings.contains(where: { $0 >= 32 }) {
+            try tc.event("a string past fixstr")
+        }
+        if sizes.strings.contains(where: { $0 >= 256 }) {
+            try tc.event("a string past str8")
+        }
+        if sizes.binaries.contains(where: { $0 >= 256 }) {
+            try tc.event("a binary past bin8")
+        }
+        try tc.event("shipment split depth", value: Double(sizes.shipmentDepth))
     }
 
     // The two paths, named so each property says which one it takes: generic
@@ -262,7 +388,9 @@
     /// The buffer's readable bytes in lowercase hex, for failure messages.
     func hex(_ buffer: ByteBuffer) -> String {
         let digits = Array("0123456789abcdef")
-        return String(buffer.readableBytesView.flatMap { [digits[Int($0 >> 4)], digits[Int($0 & 0xf)]] })
+        return String(
+            buffer.readableBytesView.flatMap { [digits[Int($0 >> 4)], digits[Int($0 & 0xf)]] }
+        )
     }
 
 #endif

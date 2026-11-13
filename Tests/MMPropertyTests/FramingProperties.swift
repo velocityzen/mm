@@ -46,6 +46,30 @@
         var smallestLimit: UInt32 {
             if case .partialBody(let declaredLength, _) = self { declaredLength } else { 0 }
         }
+
+        /// A constant label for the statistics report.
+        var label: String {
+            switch self {
+                case .frameBoundary: "ends on a frame boundary"
+                case .partialLengthPrefix: "ends inside a length prefix"
+                case .partialBody: "ends inside a body"
+            }
+        }
+    }
+
+    /// Records, for the statistics report, whether a read ends inside one of
+    /// the length prefixes that start at `frameStarts`.
+    func recordReadsSplittingPrefixes(
+        _ chunkBoundaries: [Int],
+        frameStarts: some Sequence<Int>,
+        in tc: TestCase
+    ) throws {
+        let splitsAPrefix = frameStarts.contains { start in
+            chunkBoundaries.contains { start < $0 && $0 < start + 4 }
+        }
+        if splitsAPrefix {
+            try tc.event("a read ends inside a length prefix")
+        }
     }
 
     /// The length prefix model: `length` as four little-endian bytes, built
@@ -189,7 +213,10 @@
         /// gives them back unchanged and in order however the wire is cut into
         /// reads, each one by the read that completes its frame. EOF on the
         /// last frame's boundary is clean.
-        @Test(.hegel(testCases: 1_000))
+        ///
+        /// Mutation-checked: a decoder that rejects a length equal to its
+        /// limit fails this with one empty payload under a limit of 0.
+        @Test
         func anyPayloadsInAnyChunksComeOutTheSame() throws {
             try property { tc in
                 let payloadBuffers = try #draw(
@@ -226,6 +253,17 @@
                     ),
                     from: tc
                 )
+                try recordReadsSplittingPrefixes(
+                    chunkBoundaries,
+                    frameStarts: frameOffsets(payloads),
+                    in: tc
+                )
+                if payloads.contains(where: \.isEmpty) {
+                    try tc.event("an empty payload")
+                }
+                if encoderMaximumLength == largestPayload {
+                    try tc.event("the encoder's limit is the largest payload's length")
+                }
                 let decoder = decoderChannel(maximumLength: decoderMaximumLength)
                 try deliverCompleteFrames(
                     payloads,
@@ -241,7 +279,7 @@
         /// `frameTooLarge` on the read that completes its prefix, however the
         /// prefix is split, and never earlier; the complete frames before it
         /// are all emitted first.
-        @Test(.hegel(testCases: 1_000))
+        @Test
         func oversizedLengthIsRejectedBeforeItsBody() throws {
             try property { tc in
                 let maximumLength = try #draw(FramingGenerators.exceedableLimits, from: tc)
@@ -263,6 +301,14 @@
                     FramingGenerators.chunkBoundaries(byteCount: wire.count, frameStarts: offsets),
                     from: tc
                 )
+                try recordReadsSplittingPrefixes(
+                    chunkBoundaries,
+                    frameStarts: [prefixEnd - 4],
+                    in: tc
+                )
+                if !payloads.isEmpty {
+                    try tc.event("complete frames before the oversized one")
+                }
 
                 let expectedError = MMWireError.frameTooLarge(
                     length: declaredLength,
@@ -288,15 +334,19 @@
         /// The encoder rejects a payload with `frameTooLarge` exactly when its
         /// readable byte count is over the limit, and frames every other one
         /// as the model does, a payload exactly at the limit included.
-        @Test(.hegel(testCases: 1_000))
+        @Test
         func encoderRejectsExactlyThePayloadsOverTheLimit() throws {
             try property { tc in
                 let payloadBuffer = try #draw(FramingGenerators.payloadBuffers, from: tc)
                 let byteCount = UInt32(payloadBuffer.payload.count)
                 let maximumLength = try #draw(FramingGenerators.limits(around: byteCount), from: tc)
 
+                if byteCount == maximumLength {
+                    try tc.event("the payload's length is the limit")
+                }
                 let encoder = encoderChannel(maximumLength: maximumLength)
                 if byteCount > maximumLength {
+                    try tc.event("over the limit")
                     let expectedError = MMWireError.frameTooLarge(
                         length: byteCount,
                         limit: maximumLength
@@ -321,7 +371,7 @@
         /// exactly when the stream stops inside a length prefix or a body,
         /// whatever length that body declares up to the limit, and finishes
         /// clean when it stops on a frame boundary.
-        @Test(.hegel(testCases: 1_000))
+        @Test
         func endOfFileIsTruncatedExactlyInsideAFrame() throws {
             try property { tc in
                 let payloads = try #draw(FramingGenerators.payloads, from: tc)
@@ -338,6 +388,12 @@
                         frameStarts: frameOffsets(payloads)
                     ),
                     from: tc
+                )
+                try tc.event(streamEnding.label)
+                try recordReadsSplittingPrefixes(
+                    chunkBoundaries,
+                    frameStarts: frameOffsets(payloads),
+                    in: tc
                 )
 
                 let decoder = decoderChannel(maximumLength: maximumLength)
@@ -361,7 +417,10 @@
         /// Removing the decoder without EOF is not an error, and, as its
         /// `decodeLast` documents, hands the unread bytes of an unfinished
         /// frame on down the pipeline after the complete frames.
-        @Test(.hegel(testCases: 1_000))
+        ///
+        /// Mutation-checked: handing leftovers on only once a whole length
+        /// prefix has arrived fails this with one byte of a prefix.
+        @Test
         func removalHandsOnTheUnfinishedFrame() throws {
             try property { tc in
                 let payloads = try #draw(FramingGenerators.payloads, from: tc)
@@ -378,6 +437,12 @@
                         frameStarts: frameOffsets(payloads)
                     ),
                     from: tc
+                )
+                try tc.event(streamEnding.label)
+                try recordReadsSplittingPrefixes(
+                    chunkBoundaries,
+                    frameStarts: frameOffsets(payloads),
+                    in: tc
                 )
 
                 let handler = ByteToMessageHandler(MMFrameDecoder(maxFrameLength: maximumLength))

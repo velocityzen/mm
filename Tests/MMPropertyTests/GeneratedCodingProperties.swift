@@ -10,7 +10,10 @@
         var value = item
         value.price = 0
         value.weight = 0
-        return Bitwise(value: value, floatBits: [item.price.bitPattern, UInt64(item.weight.bitPattern)])
+        return Bitwise(
+            value: value,
+            floatBits: [item.price.bitPattern, UInt64(item.weight.bitPattern)]
+        )
     }
 
     func bitwise(_ request: Catalog.PutRequest) -> Bitwise<Catalog.PutRequest> {
@@ -28,14 +31,22 @@
         case remove(at: Int)
     }
 
-    /// Any number of replaced, inserted and removed bytes.
-    let mutations: Gen<[Mutation]> = .array(
-        of: .oneOf(
-            Hegel.zip(.int(in: 0...Int.max), Gen<UInt8>.integer()).map { .replace(at: $0, with: $1) },
-            Hegel.zip(Gen<UInt8>.integer(), .int(in: 0...Int.max)).map { .insert($0, at: $1) },
-            Gen<Int>.int(in: 0...Int.max).map { .remove(at: $0) }
+    let replacement: Gen<Mutation> = Hegel.zip(.int(in: 0...Int.max), Gen<UInt8>.integer())
+        .map { .replace(at: $0, with: $1) }
+
+    /// Any number of replaced, inserted and removed bytes, at least one, or
+    /// often one replaced byte: that keeps every length header right, so
+    /// more of those payloads still decode.
+    let mutations: Gen<[Mutation]> = .oneOf(
+        .array(
+            of: .oneOf(
+                replacement,
+                Hegel.zip(Gen<UInt8>.integer(), .int(in: 0...Int.max)).map { .insert($0, at: $1) },
+                Gen<Int>.int(in: 0...Int.max).map { .remove(at: $0) }
+            ),
+            count: 1...Int.max
         ),
-        count: 1...Int.max
+        replacement.map { [$0] }
     )
 
     func mutated(_ bytes: [UInt8], by mutations: [Mutation]) -> [UInt8] {
@@ -55,28 +66,87 @@
         return bytes
     }
 
+    /// Any length shorter than `byteCount`, often the empty prefix, the
+    /// longest one, or half.
+    func prefixLengths(below byteCount: Int) -> Gen<Int> {
+        .oneOf(
+            .element(of: [0, byteCount - 1, byteCount / 2]),
+            .int(in: 0...byteCount - 1)
+        )
+    }
+
+    /// The smallest container nesting limit under which `bytes` skips as one
+    /// MessagePack value, found by bisecting the limits up to the decoders'
+    /// default of 128.
+    func nestingDepth(of bytes: ByteBuffer) -> Int {
+        var tooShallow = -1
+        var deepEnough = 128
+        while deepEnough - tooShallow > 1 {
+            let middle = (tooShallow + deepEnough) / 2
+            var reader = bytes
+            if case .success = reader.skipMessagePackValue(maxDepth: middle) {
+                deepEnough = middle
+            } else {
+                tooShallow = middle
+            }
+        }
+        return deepEnough
+    }
+
+    /// Any nesting limit, often one below, at or above `depth`.
+    func nestingLimits(around depth: Int) -> Gen<Int> {
+        .oneOf(
+            .element(of: [depth - 1, depth, depth + 1]),
+            .int(in: 0...128),
+            .int()
+        )
+    }
+
+    /// A decode's outcome as a constant label for the statistics report: the
+    /// error's case without its values.
+    func outcome<Value>(_ result: Result<Value, MMWireError>) -> String {
+        switch result {
+            case .success: "decoded"
+            case .failure(let error):
+                "failed with \(String(describing: error).prefix { $0 != "(" })"
+        }
+    }
+
     @Suite("Generated MessagePack code agrees with Codable", .hegel)
     struct GeneratedCodingProperties {
-        @Test(.hegel(testCases: 300))
+        /// The generated code writes exactly the bytes Codable writes, for a
+        /// whole request and for one item.
+        ///
+        /// Mutation-checked: generated code writing a `UInt64` as an `Int64`
+        /// fails this once a value is above `Int64.max`.
+        @Test
         func writesTheSameBytes() throws {
             try property { tc in
-                let request = try #draw(CatalogGenerators.putRequest, from: tc)
+                let shape = try #draw(CatalogGenerators.shapes, from: tc)
+                let generators = CatalogGenerators(shape)
+                let request = try #draw(generators.putRequest, from: tc)
+                try recordSizes(of: request, in: tc)
                 #expect(encodedThroughGeneratedCode(request) == encodedThroughCodable(request))
-                let item = try #draw(CatalogGenerators.item, from: tc)
+                let item = try #draw(generators.item, from: tc)
                 #expect(encodedThroughGeneratedCode(item) == encodedThroughCodable(item))
             }
         }
 
-        /// An optional of a generated type is generated too, with Codable's bytes.
-        @Test(.hegel(testCases: 300))
+        /// An optional of a generated type is generated too: it writes
+        /// Codable's bytes, and both paths read it back, absent or present.
+        @Test
         func optionalPayloads() throws {
             try property { tc in
-                let item = try #draw(.optional(CatalogGenerators.item), from: tc)
+                let shape = try #draw(CatalogGenerators.shapes, from: tc)
+                let item = try #draw(.optional(CatalogGenerators(shape).item), from: tc)
+                try tc.event(item == nil ? "absent" : "present")
                 #expect(encodedThroughGeneratedCode(item) == encodedThroughCodable(item))
                 let bytes = try encodedThroughCodable(item).get()
                 let expected = Result<_, MMWireError>.success(item.map(bitwise))
                 #expect(
-                    decodedThroughGeneratedCode(Catalog.Item?.self, from: bytes).map { $0.map(bitwise) }
+                    decodedThroughGeneratedCode(Catalog.Item?.self, from: bytes).map {
+                        $0.map(bitwise)
+                    }
                         == expected
                 )
                 #expect(
@@ -86,16 +156,26 @@
             }
         }
 
-        @Test(.hegel(testCases: 300))
+        /// Both paths read back what the generated code writes, float bits
+        /// included.
+        ///
+        /// Mutation-checked: a fixarray header written for 16 elements fails
+        /// this, and `optionalPayloads` too.
+        @Test
         func decodesWhatItWrites() throws {
             try property { tc in
-                let request = try #draw(CatalogGenerators.putRequest, from: tc)
+                let shape = try #draw(CatalogGenerators.shapes, from: tc)
+                let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)
+                try recordSizes(of: request, in: tc)
                 let bytes = try encodedThroughGeneratedCode(request).get()
                 // An optional of an optional holding nil writes a plain nil, which
                 // reads back as absent: Codable flattens it, and so does the
                 // generated code.
                 var expected = request
-                if case .some(.none) = request.flag { expected.flag = nil }
+                if case .some(.none) = request.flag {
+                    try tc.event("flag holds an absent optional")
+                    expected.flag = nil
+                }
                 #expect(
                     decodedThroughGeneratedCode(Catalog.PutRequest.self, from: bytes).map(bitwise)
                         == .success(bitwise(expected))
@@ -107,71 +187,95 @@
             }
         }
 
-        /// Decoding every prefix costs the square of the payload's size, and a
-        /// request can run to hundreds of KB, so a case can take seconds: slow
-        /// by design, not a slow generator.
-        @Test(.hegel(testCases: 300, suppressHealthChecks: .tooSlow))
-        func everyTruncationFailsTheSameWay() throws {
+        /// No path decodes a strict prefix of a request's bytes, and both fail
+        /// on it with the same error.
+        @Test
+        func truncatedPayloadsFailTheSameWay() throws {
             try property { tc in
-                let request = try #draw(CatalogGenerators.putRequest, from: tc)
+                let shape = try #draw(CatalogGenerators.shapes, from: tc)
+                let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)
                 let bytes = try encodedThroughCodable(request).get()
-                for length in 0..<bytes.readableBytes {
-                    let prefix = try #require(bytes.getSlice(at: bytes.readerIndex, length: length))
-                    #expect(
-                        decodedThroughGeneratedCode(Catalog.PutRequest.self, from: prefix).map(bitwise)
-                            == decodedThroughCodable(Catalog.PutRequest.self, from: prefix).map(bitwise),
-                        "prefix of \(length) bytes: \(hex(prefix))"
+                let length = try #draw(prefixLengths(below: bytes.readableBytes), from: tc)
+                let prefix = try #require(bytes.getSlice(at: bytes.readerIndex, length: length))
+                let generated = decodedThroughGeneratedCode(Catalog.PutRequest.self, from: prefix)
+                let codable = decodedThroughCodable(Catalog.PutRequest.self, from: prefix)
+                try tc.event(outcome(generated))
+                #expect(generated.map(bitwise) == codable.map(bitwise), "\(hex(prefix))")
+                if case .success = generated {
+                    Issue.record(
+                        "the generated code decoded \(length) of \(bytes.readableBytes) bytes"
                     )
+                }
+                if case .success = codable {
+                    Issue.record("Codable decoded \(length) of \(bytes.readableBytes) bytes")
                 }
             }
         }
 
-        @Test(.hegel(testCases: 1_000))
+        /// Both paths decode a request with any bytes replaced, inserted or
+        /// removed to the same value, or fail on it with the same error.
+        @Test
         func corruptedPayloadsDecodeOrFailTheSameWay() throws {
             try property { tc in
-                let request = try #draw(CatalogGenerators.putRequest, from: tc)
+                let shape = try #draw(CatalogGenerators.shapes, from: tc)
+                let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)
                 let bytes = try Array(encodedThroughCodable(request).get().readableBytesView)
                 let changes = try #draw(mutations, from: tc)
                 let corrupted = ByteBuffer(bytes: mutated(bytes, by: changes))
+                let generated = decodedThroughGeneratedCode(
+                    Catalog.PutRequest.self,
+                    from: corrupted
+                )
+                try tc.event(outcome(generated))
                 #expect(
-                    decodedThroughGeneratedCode(Catalog.PutRequest.self, from: corrupted).map(bitwise)
-                        == decodedThroughCodable(Catalog.PutRequest.self, from: corrupted).map(bitwise),
+                    generated.map(bitwise)
+                        == decodedThroughCodable(Catalog.PutRequest.self, from: corrupted).map(
+                            bitwise
+                        ),
                     "\(hex(corrupted))"
                 )
             }
         }
 
-        @Test(.hegel(testCases: 300))
-        func nestingLimitsFailAtTheSameDepth() throws {
+        /// Under any container nesting limit, both paths decode a request to
+        /// the same value or fail on it with the same error.
+        ///
+        /// Mutation-checked: the generated reader rejecting a map one level
+        /// early fails this at the request's own depth. A guard one level
+        /// too loose can't fail it: before reading a struct's fields, the
+        /// generated code skips each value with the depth-checked skip,
+        /// which rejects any container past the limit first.
+        @Test
+        func nestingLimitsFailTheSameWay() throws {
             try property { tc in
-                let request = try #draw(CatalogGenerators.putRequest, from: tc)
+                let shape = try #draw(CatalogGenerators.shapes, from: tc)
+                let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)
                 let bytes = try encodedThroughCodable(request).get()
-                // Every limit up to the default, until both paths have decoded
-                // within one and the next: past those, every limit reads the
-                // same as the default.
-                var decodedWithin: Int?
-                for maxDepth in 0...128 {
-                    let generated = decodedThroughGeneratedCode(
-                        Catalog.PutRequest.self,
-                        from: bytes,
-                        maxDepth: maxDepth
-                    )
-                    let codable = decodedThroughCodable(
-                        Catalog.PutRequest.self,
-                        from: bytes,
-                        maxDepth: maxDepth
-                    )
-                    #expect(
-                        generated.map(bitwise) == codable.map(bitwise),
-                        "maxDepth \(maxDepth): \(hex(bytes))"
-                    )
-                    if let decodedWithin, maxDepth > decodedWithin {
-                        break
-                    }
-                    if case .success = generated, case .success = codable {
-                        decodedWithin = maxDepth
-                    }
+                let depth = nestingDepth(of: bytes)
+                let maxDepth = try #draw(nestingLimits(around: depth), from: tc)
+                try tc.event("request nesting depth", value: Double(depth))
+                if maxDepth == depth - 1 {
+                    try tc.event("limit one below the request's depth")
                 }
+                if maxDepth == depth {
+                    try tc.event("limit at the request's depth")
+                }
+                let generated = decodedThroughGeneratedCode(
+                    Catalog.PutRequest.self,
+                    from: bytes,
+                    maxDepth: maxDepth
+                )
+                try tc.event(outcome(generated))
+                #expect(
+                    generated.map(bitwise)
+                        == decodedThroughCodable(
+                            Catalog.PutRequest.self,
+                            from: bytes,
+                            maxDepth: maxDepth
+                        )
+                        .map(bitwise),
+                    "\(hex(bytes))"
+                )
             }
         }
     }
