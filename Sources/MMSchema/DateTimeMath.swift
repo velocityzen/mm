@@ -33,16 +33,33 @@ public enum MMDateComponent: Sendable, Hashable {
     case second(Int)
     case nanosecond(Int)
 
-    var negated: MMDateComponent {
+    /// The count, whatever the unit.
+    var count: Int {
         switch self {
-            case .year(let count): return .year(-count)
-            case .month(let count): return .month(-count)
-            case .day(let count): return .day(-count)
-            case .hour(let count): return .hour(-count)
-            case .minute(let count): return .minute(-count)
-            case .second(let count): return .second(-count)
-            case .nanosecond(let count): return .nanosecond(-count)
+            case .year(let count), .month(let count), .day(let count), .hour(let count),
+                .minute(let count), .second(let count), .nanosecond(let count):
+                count
         }
+    }
+
+    /// The same unit with another count.
+    func with(count: Int) -> MMDateComponent {
+        switch self {
+            case .year: .year(count)
+            case .month: .month(count)
+            case .day: .day(count)
+            case .hour: .hour(count)
+            case .minute: .minute(count)
+            case .second: .second(count)
+            case .nanosecond: .nanosecond(count)
+        }
+    }
+
+    /// The components that make up this one's negation, to be added in
+    /// turn: the negation itself, or, for a count of Int.min, whose
+    /// negation Int cannot hold, Int.max and then one more.
+    var negation: [MMDateComponent] {
+        count == .min ? [with(count: .max), with(count: 1)] : [with(count: -count)]
     }
 }
 
@@ -54,9 +71,15 @@ private func floorDivide(_ value: Int, _ divisor: Int) -> Int {
 // MARK: - MMDate
 
 extension MMDate {
+    /// The day numbers of 0000-01-01 and 9999-12-31, the ends of the wire
+    /// range.
+    static let dayNumbersInWireRange = -719_528...2_932_896
+
     /// The inverse of ``daysSinceEpoch`` (the civil-from-days algorithm);
     /// nil outside the wire range (year 0...9999).
     public static func date(daysSinceEpoch: Int) -> MMDate? {
+        // Checked first, so the arithmetic below cannot overflow for any Int.
+        guard dayNumbersInWireRange.contains(daysSinceEpoch) else { return nil }
         let z = daysSinceEpoch + 719_468
         let era = floorDivide(z, 146_097)
         let dayOfEra = z - era * 146_097
@@ -70,23 +93,30 @@ extension MMDate {
         return MMDate(year: year, month: month, day: day)
     }
 
-    /// Calendar addition; nil when the result leaves the wire range.
-    /// Month/year addition clamps the day to the target month's length
-    /// (Jan 31 + 1 month = Feb 28/29). Time components are a programmer
-    /// error on a calendar date.
+    /// Calendar addition; nil when the result leaves the wire range, for
+    /// any count up to Int's limits. Month/year addition clamps the day to
+    /// the target month's length (Jan 31 + 1 month = Feb 28/29). Time
+    /// components are a programmer error on a calendar date.
     public func adding(_ component: MMDateComponent) -> MMDate? {
         switch component {
             case .year(let count):
-                return self.adding(.month(count * 12))
+                let (months, overflow) = count.multipliedReportingOverflow(by: 12)
+                guard !overflow else { return nil }
+                return self.adding(.month(months))
             case .month(let count):
-                let total = self.year * 12 + (self.month - 1) + count
+                let monthsSinceYearZero = self.year * 12 + (self.month - 1)
+                let (total, overflow) = monthsSinceYearZero.addingReportingOverflow(count)
+                guard !overflow else { return nil }
                 let year = floorDivide(total, 12)
-                let month = total - year * 12 + 1
+                // Checked before multiplying back, which overflows near Int.min.
                 guard (0...9999).contains(year) else { return nil }
+                let month = total - year * 12 + 1
                 let day = min(self.day, MMDate.daysIn(month: month, year: year))
                 return MMDate(year: year, month: month, day: day)
             case .day(let count):
-                return MMDate.date(daysSinceEpoch: self.daysSinceEpoch + count)
+                let (days, overflow) = self.daysSinceEpoch.addingReportingOverflow(count)
+                guard !overflow else { return nil }
+                return MMDate.date(daysSinceEpoch: days)
             case .hour, .minute, .second, .nanosecond:
                 preconditionFailure(
                     "MMDate has no time: adding \(component) to a calendar date is a programmer error"
@@ -102,7 +132,10 @@ extension MMDate {
     }
 
     public static func - (date: MMDate, component: MMDateComponent) -> MMDate {
-        date + component.negated
+        guard let result = component.negation.reduce(Optional(date), { $0?.adding($1) }) else {
+            preconditionFailure("MMDate - \(component) leaves the wire range (year 0...9999)")
+        }
+        return result
     }
 
     /// The number of civil days from `rhs` to `lhs` (positive when `lhs`
@@ -131,16 +164,31 @@ extension MMDate: Strideable {
 
 extension MMDateTime {
     /// Shifts by exact elapsed time, carrying across minutes, hours, and
-    /// days; nil when the result leaves the wire range. Normalizes a leap
-    /// second.
+    /// days; nil when the result leaves the wire range, for any counts up
+    /// to Int's limits. Normalizes a leap second.
     func shifted(seconds: Int, nanoseconds: Int) -> MMDateTime? {
-        let totalNanoseconds = self.nanosecond + nanoseconds
-        let nanosecondCarry = floorDivide(totalNanoseconds, 1_000_000_000)
-        let nanosecond = totalNanoseconds - nanosecondCarry * 1_000_000_000
-        let totalSeconds = self.secondsSinceEpochAsUTC + seconds + nanosecondCarry
+        // Whole seconds come out of `nanoseconds` before anything is added,
+        // so the nanosecond sum stays below two seconds, and the second sums
+        // report overflow. The remainder comes from `%` rather than from
+        // multiplying the whole seconds back: rounded down, Int.min
+        // nanoseconds is more whole seconds than Int can hold in nanoseconds.
+        var wholeSeconds = nanoseconds / 1_000_000_000
+        var remainder = nanoseconds % 1_000_000_000
+        if remainder < 0 {
+            wholeSeconds -= 1
+            remainder += 1_000_000_000
+        }
+        let totalNanoseconds = self.nanosecond + remainder
+        let nanosecond = totalNanoseconds % 1_000_000_000
+        let carry = wholeSeconds + totalNanoseconds / 1_000_000_000
+        let (shift, shiftOverflow) = seconds.addingReportingOverflow(carry)
+        guard !shiftOverflow else { return nil }
+        let (totalSeconds, overflow) = self.secondsSinceEpochAsUTC.addingReportingOverflow(shift)
+        guard !overflow else { return nil }
         let days = floorDivide(totalSeconds, 86_400)
-        let secondOfDay = totalSeconds - days * 86_400
+        // Checked before multiplying back, which overflows near Int.min.
         guard let date = MMDate.date(daysSinceEpoch: days) else { return nil }
+        let secondOfDay = totalSeconds - days * 86_400
         return MMDateTime(
             date: date,
             hour: secondOfDay / 3600,
@@ -152,18 +200,27 @@ extension MMDateTime {
 
     /// Calendar addition: date components move the calendar date (day
     /// clamping and all, time preserved); time components are exact shifts
-    /// that carry across days. Nil when the result leaves the wire range.
+    /// that carry across days. Nil when the result leaves the wire range,
+    /// for any count up to Int's limits.
     public func adding(_ component: MMDateComponent) -> MMDateTime? {
         switch component {
             case .year, .month, .day:
                 guard let date = self.date.adding(component) else { return nil }
                 return MMDateTime(
-                    date: date, hour: self.hour, minute: self.minute,
-                    second: min(self.second, 59), nanosecond: self.nanosecond)
+                    date: date,
+                    hour: self.hour,
+                    minute: self.minute,
+                    second: min(self.second, 59),
+                    nanosecond: self.nanosecond
+                )
             case .hour(let count):
-                return self.shifted(seconds: count * 3600, nanoseconds: 0)
+                let (seconds, overflow) = count.multipliedReportingOverflow(by: 3600)
+                guard !overflow else { return nil }
+                return self.shifted(seconds: seconds, nanoseconds: 0)
             case .minute(let count):
-                return self.shifted(seconds: count * 60, nanoseconds: 0)
+                let (seconds, overflow) = count.multipliedReportingOverflow(by: 60)
+                guard !overflow else { return nil }
+                return self.shifted(seconds: seconds, nanoseconds: 0)
             case .second(let count):
                 return self.shifted(seconds: count, nanoseconds: 0)
             case .nanosecond(let count):
@@ -174,20 +231,29 @@ extension MMDateTime {
     public static func + (dateTime: MMDateTime, component: MMDateComponent) -> MMDateTime {
         guard let result = dateTime.adding(component) else {
             preconditionFailure(
-                "MMDateTime + \(component) leaves the wire range (year 0...9999)")
+                "MMDateTime + \(component) leaves the wire range (year 0...9999)"
+            )
         }
         return result
     }
 
     public static func - (dateTime: MMDateTime, component: MMDateComponent) -> MMDateTime {
-        dateTime + component.negated
+        guard let result = component.negation.reduce(Optional(dateTime), { $0?.adding($1) })
+        else {
+            preconditionFailure(
+                "MMDateTime - \(component) leaves the wire range (year 0...9999)"
+            )
+        }
+        return result
     }
 
     public static func + (dateTime: MMDateTime, duration: Duration) -> MMDateTime {
         let (seconds, attoseconds) = duration.components
         guard
             let result = dateTime.shifted(
-                seconds: Int(seconds), nanoseconds: Int(attoseconds / 1_000_000_000))
+                seconds: Int(seconds),
+                nanoseconds: Int(attoseconds / 1_000_000_000)
+            )
         else {
             preconditionFailure("MMDateTime + Duration leaves the wire range (year 0...9999)")
         }
@@ -220,13 +286,20 @@ extension MMTimestamp {
     public static func + (timestamp: MMTimestamp, component: MMDateComponent) -> MMTimestamp {
         guard let result = timestamp.adding(component) else {
             preconditionFailure(
-                "MMTimestamp + \(component) leaves the wire range (year 0...9999)")
+                "MMTimestamp + \(component) leaves the wire range (year 0...9999)"
+            )
         }
         return result
     }
 
     public static func - (timestamp: MMTimestamp, component: MMDateComponent) -> MMTimestamp {
-        timestamp + component.negated
+        guard let result = component.negation.reduce(Optional(timestamp), { $0?.adding($1) })
+        else {
+            preconditionFailure(
+                "MMTimestamp - \(component) leaves the wire range (year 0...9999)"
+            )
+        }
+        return result
     }
 
     /// Exact elapsed time. With a fixed offset, shifting the wall clock IS

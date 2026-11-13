@@ -254,52 +254,60 @@
         }
     }
 
-    /// Whether adding `count` of a component to the datetime lands inside
-    /// the wire range, worked out with overflow-reporting arithmetic so any
-    /// count has an answer. For the day number, whether `count` is one.
-    func landsInWireRange(
+    /// Where adding `count` of a component to the datetime lands, worked
+    /// out in Int128, where no Int count can overflow, and read in the unit
+    /// the component moves: months since 0000-01 for years and months, a
+    /// day number for days, nanoseconds since the epoch on the wall clock
+    /// for the clock components. Nil past the wire range. For the day
+    /// number, `count` itself when it is one.
+    func landing(
         _ fields: DateFields,
         days: Int,
-        adding count: Int,
+        adding count: Int128,
         of kind: ComponentKind
-    ) -> Bool {
-        func scaled(_ unit: Int) -> Int? {
-            let (product, overflow) = count.multipliedReportingOverflow(by: unit)
-            return overflow ? nil : product
-        }
-        func plus(_ left: Int, _ right: Int?) -> Int? {
-            guard let right else { return nil }
-            let (sum, overflow) = left.addingReportingOverflow(right)
-            return overflow ? nil : sum
-        }
+    ) -> Int128? {
+        let second: Int128 = 1_000_000_000
+        let wireDayNumbers = Int128(firstWireDay)...Int128(lastWireDay)
+        let target: Int128
+        let range: ClosedRange<Int128>
         switch kind {
             case .dayNumber:
-                return wireDays.contains(count)
+                (target, range) = (count, wireDayNumbers)
             case .year, .month:
-                let months = plus(
-                    fields.year * 12 + fields.month - 1,
-                    kind == .year ? scaled(12) : count
-                )
-                return months.map { (0...9999).contains($0 >= 0 ? $0 / 12 : -1) } ?? false
+                // Year 0...9999 is months 0...119_999 since 0000-01.
+                let months = Int128(fields.year * 12 + fields.month - 1)
+                (target, range) = (months + (kind == .year ? count * 12 : count), 0...119_999)
             case .day:
-                return plus(days, count).map(wireDays.contains) ?? false
+                (target, range) = (Int128(days) + count, wireDayNumbers)
             case .hour, .minute, .second, .nanosecond:
-                let clock = fields.hour * 3600 + fields.minute * 60 + fields.second
-                let shift: Int?
-                switch kind {
-                    case .hour: shift = scaled(3600)
-                    case .minute: shift = scaled(60)
-                    case .second: shift = count
-                    default:
-                        // Whole seconds, rounded down, of the nanoseconds after the shift.
-                        shift = plus(fields.nanosecond, count).map {
-                            $0 >= 0 ? $0 / 1_000_000_000 : -((-$0 - 1) / 1_000_000_000) - 1
-                        }
-                }
-                let seconds = plus(days * 86_400 + clock, shift)
-                return seconds.map {
-                    (firstWireDay * 86_400..<(lastWireDay + 1) * 86_400).contains($0)
-                } ?? false
+                let unit: Int128 =
+                    switch kind {
+                        case .hour: 3600 * second
+                        case .minute: 60 * second
+                        case .second: second
+                        default: 1
+                    }
+                let clock = Int128(fields.hour * 3600 + fields.minute * 60 + fields.second)
+                let start = (Int128(days) * 86_400 + clock) * second + Int128(fields.nanosecond)
+                let first = Int128(firstWireDay) * 86_400 * second
+                let last = Int128(lastWireDay + 1) * 86_400 * second - 1
+                (target, range) = (start + count * unit, first...last)
+        }
+        return range.contains(target) ? target : nil
+    }
+
+    /// A datetime read in the unit `landing` uses for the component.
+    func reading(_ dateTime: MMDateTime, as kind: ComponentKind) -> Int128 {
+        let date = dateTime.date
+        switch kind {
+            case .year, .month:
+                return Int128(date.year * 12 + date.month - 1)
+            case .day, .dayNumber:
+                return Int128(date.daysSinceEpoch)
+            case .hour, .minute, .second, .nanosecond:
+                let clock = Int128(dateTime.hour * 3600 + dateTime.minute * 60 + dateTime.second)
+                return (Int128(date.daysSinceEpoch) * 86_400 + clock) * 1_000_000_000
+                    + Int128(dateTime.nanosecond)
         }
     }
 
@@ -672,35 +680,73 @@
             }
         }
 
-        /// Adding any count of any component, up to Int's limits, gives nil
-        /// exactly when the result leaves the wire range, and never traps;
-        /// so does the date of any day number.
+        /// Adding any count of any component, up to Int's limits, gives the
+        /// value the calendar says, or nil exactly when that leaves the wire
+        /// range, and never traps; so does the date of any day number.
+        /// Subtracting any count, Int.min included, gives the value the
+        /// calendar says wherever that lands in the range. Values are read
+        /// in the unit the component moves, so a month added to 31 January
+        /// is checked to land in February, not on which day.
+        ///
+        /// Mutation check: dropping the range check on a day number,
+        /// multiplying an hour count without reporting overflow, leaving a
+        /// nanosecond remainder negative, subtracting by plain negation, or
+        /// subtracting Int.min as Int.max alone, fails here. Splitting a
+        /// month total before its range check fails at the nightly depth:
+        /// it overflows only from the first months of year 0 with a count
+        /// near Int.min.
         @Test
         func anyCountGivesAValueOrNil() throws {
             try property { tc in
                 let fields = try #draw(DateGenerators.validFields, from: tc)
+                // Nanoseconds get a branch of their own: they are the only
+                // component whose counts at Int's ends land inside the range.
                 let kind = try #draw(
-                    Gen<ComponentKind>.element(of: ComponentKind.allCases),
-                    from: tc
-                )
-                let count = try #draw(
-                    Gen<Int>.oneOf(
-                        .int(),
-                        .element(of: [.min, .max, .min + 1, .max - 1, -1, 0, 1])
+                    Gen<ComponentKind>.oneOf(
+                        .element(of: ComponentKind.allCases),
+                        .just(.nanosecond)
                     ),
                     from: tc
                 )
+                // Int's two ends get a branch of their own: they are what
+                // this property is for.
+                let count = try #draw(
+                    Gen<Int>.oneOf(
+                        .int(),
+                        .element(of: [.min, .max]),
+                        .element(of: [.min + 1, .max - 1, -1, 0, 1])
+                    ),
+                    from: tc
+                )
+                let subtractDrawn = try #draw(Gen<Bool>.bool(), from: tc)
+                let subtract = subtractDrawn && kind != .dayNumber
                 let dateTime = try #require(dateValue(of: fields, as: .dateTime))
                 guard case .dateTime(let dateTime) = dateTime else { return }
                 let days = dateTime.date.daysSinceEpoch
-                let lands = landsInWireRange(fields, days: days, adding: count, of: kind)
+                let wide = subtract ? -Int128(count) : Int128(count)
+                let expected = landing(fields, days: days, adding: wide, of: kind)
                 try tc.event(kind.rawValue)
-                try tc.event(lands ? "lands in the wire range" : "lands past it")
-                let landed =
+                try tc.event(subtract ? "subtracted" : "added")
+                try tc.event(expected != nil ? "lands in the wire range" : "lands past it")
+                if subtract && count == .min && expected != nil {
+                    try tc.event("Int.min subtracted, landing in the range")
+                }
+                let label = "\(dateTime) \(subtract ? "-" : "+") \(count) \(kind.rawValue)"
+                if subtract {
+                    // The operator traps past the range, as documented, so
+                    // it is tried only where the result lands.
+                    guard let expected else { return }
+                    #expect(
+                        reading(dateTime - kind.component(count), as: kind) == expected,
+                        "\(label)"
+                    )
+                    return
+                }
+                let result: Int128? =
                     kind == .dayNumber
-                    ? MMDate.date(daysSinceEpoch: count) != nil
-                    : dateTime.adding(kind.component(count)) != nil
-                #expect(landed == lands, "\(dateTime) + \(count) \(kind.rawValue)")
+                    ? MMDate.date(daysSinceEpoch: count).map { Int128($0.daysSinceEpoch) }
+                    : dateTime.adding(kind.component(count)).map { reading($0, as: kind) }
+                #expect(result == expected, "\(label)")
             }
         }
 
