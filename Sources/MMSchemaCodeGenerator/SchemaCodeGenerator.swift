@@ -1806,10 +1806,11 @@ private func nestedStructures(in fields: [ParsedField]) -> [(name: String, field
 /// through `MMPackEncoder`: a map of the fields that are present (nil
 /// optionals left out), each under its integer key, in declaration order. The
 /// decode accepts what synthesized `Decodable` accepts through
-/// `MMPackDecoder`: the whole map is walked and checked first, the first
-/// occurrence of a key wins, and a field is found under its integer key, else
-/// under its name. A `DecodingError` from a map or an external type names the
-/// coding path `Decodable` gives it (see `mmPackReadField`).
+/// `MMPackDecoder`, and fails where it fails with the same error: as if the
+/// whole map were walked and checked first, the first occurrence of a key
+/// won, and a field were found under its integer key, else under its name
+/// (see `mmPackDecodeFieldMap`). A `DecodingError` from a map or an external
+/// type names the coding path `Decodable` gives it (see `mmPackReadField`).
 private func mmPackStructMembers(_ keyed: [(field: ParsedField, key: Int)]) -> [String] {
     var lines: [String] = []
     lines.append("public func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {")
@@ -1828,10 +1829,13 @@ private func mmPackStructMembers(_ keyed: [(field: ParsedField, key: Int)]) -> [
         return lines
     }
     lines.append(
-        contentsOf: mmPackDecodeFieldMap(keyed, codingKeys: "CodingKeys") { _, field in
-            "self.\(field.name)"
-        }
-            .map { "    \($0)" })
+        contentsOf: mmPackDecodeFieldMap(
+            keyed,
+            codingKeys: "CodingKeys",
+            target: { _, field in "self.\(field.name)" },
+            finish: ["return"]
+        )
+        .map { "    \($0)" })
     lines.append("}")
     return lines
 }
@@ -1870,15 +1874,68 @@ private func mmPackEncodeFieldMap(
 }
 
 /// Reads the field map sitting at `depth` and leaves the reader just past
-/// it; `target` spells where field `index`'s value is stored, and
-/// `codingKeys` names the `CodingKey` type the map's `Codable` decodes its
-/// fields with. `keyed` is never empty.
+/// it; `target` spells where field `index`'s value is stored, `finish` ends
+/// the decode once every target holds its value, and `codingKeys` names the
+/// `CodingKey` type the map's `Codable` decodes its fields with. `keyed` is
+/// never empty.
+///
+/// The fields are first read where they sit, for a map whose keys come the
+/// way the encoder writes them: each field under its integer key, in
+/// declaration order, absent optionals left out, then only keys that name
+/// no field. That walks the map once. Any other map, and any map that path
+/// fails on, goes back to its start and takes `Decodable`'s path: walk and
+/// check the whole map, noting where each field's first occurrence sits,
+/// then read each field there. The first path reads exactly the values the
+/// second would, and leaves every failure to it, so a map decodes to the
+/// same value either way and fails with the same error.
 private func mmPackDecodeFieldMap(
     _ keyed: [(field: ParsedField, key: Int)],
     codingKeys: String,
-    target: (Int, ParsedField) -> String
+    target: (Int, ParsedField) -> String,
+    finish: [String]
 ) -> [String] {
     var lines: [String] = []
+    let readNextKey = "key = try reader.readMapKey(remaining: &remaining, depth: depth + 1)"
+    lines.append("let start = reader.position")
+    lines.append("inOrder: do {")
+    lines.append("    var remaining = try reader.readMapHeader(depth: depth)")
+    lines.append("    var \(readNextKey)")
+    for (field, key) in keyed {
+        let value = "\(field.name)Value"
+        let read = mmPackReadField(field, codingKeys: codingKeys)
+        if case .optional = field.type {
+            lines.append("    let \(value): \(swiftType(field.type))")
+            lines.append("    if case .int(\(key))? = key {")
+            lines.append("        \(value) = \(read)")
+            lines.append("        \(readNextKey)")
+            lines.append("    } else {")
+            lines.append("        \(value) = nil")
+            lines.append("    }")
+        } else {
+            lines.append("    guard case .int(\(key))? = key else { break inOrder }")
+            lines.append("    let \(value) = \(read)")
+            lines.append("    \(readNextKey)")
+        }
+    }
+    // A key naming a field this late is a field out of order, a repeat, or
+    // a field under its name: `Decodable`'s path sorts those out.
+    let fieldKeys =
+        keyed.map { ".int(\($0.key))" } + keyed.map { ".string(\(quoted($0.field.name)))" }
+    lines.append("    while let entry = key {")
+    lines.append("        switch entry {")
+    lines.append("            case \(fieldKeys.joined(separator: ", ")): break inOrder")
+    lines.append("            default: try reader.skipValue(depth: depth + 1)")
+    lines.append("        }")
+    lines.append("        \(readNextKey)")
+    lines.append("    }")
+    for (index, (field, _)) in keyed.enumerated() {
+        lines.append("    \(target(index, field)) = \(field.name)Value")
+    }
+    lines.append(contentsOf: finish.map { "    \($0)" })
+    lines.append("} catch {")
+    lines.append("    // Decodable's path fails on this map too, and with its own error.")
+    lines.append("}")
+    lines.append("reader.seek(to: start)")
     for (field, _) in keyed {
         lines.append("var \(field.name)AtKey: Int?")
         lines.append("var \(field.name)AtName: Int?")
@@ -2249,14 +2306,16 @@ private func mmPackUnionMembers(
         for (index, (field, _)) in keyed.enumerated() {
             lines.append("    let field\(index): \(swiftType(field.type))")
         }
+        let values = keyed.enumerated().map { index, entry in "\(entry.field.name): field\(index)" }
+        let construct = "return .`\(unionCase.name)`(\(values.joined(separator: ", ")))"
         let fieldMap = mmPackDecodeFieldMap(
             keyed,
             codingKeys: unionCase.codingKeysName,
-            target: { index, _ in "field\(index)" }
+            target: { index, _ in "field\(index)" },
+            finish: [construct]
         )
         lines.append(contentsOf: fieldMap.map { "    \($0)" })
-        let values = keyed.enumerated().map { index, entry in "\(entry.field.name): field\(index)" }
-        lines.append("    return .`\(unionCase.name)`(\(values.joined(separator: ", ")))")
+        lines.append("    \(construct)")
         lines.append("}")
     }
     return lines

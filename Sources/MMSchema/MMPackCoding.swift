@@ -185,6 +185,15 @@ extension MMPackReader {
         return elements
     }
 
+    /// Reads the next key of a map that has `remaining` entries left, and
+    /// counts it off; nil once none is left. The key sits at `depth`.
+    @inlinable
+    public mutating func readMapKey(remaining: inout Int, depth: Int) throws -> MMPackMapKey? {
+        guard remaining > 0 else { return nil }
+        remaining -= 1
+        return try self.readMapKey(depth: depth)
+    }
+
     /// Reads a value of an external type through its generated code.
     @inlinable
     public mutating func read<Value: MMPackDecodable>(
