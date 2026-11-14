@@ -112,7 +112,7 @@
         }
     }
 
-    @Suite("Generated MessagePack code agrees with Codable", .hegel)
+    @Suite("Generated MessagePack code agrees with Codable", .hegel, .offTheCooperativePool)
     struct GeneratedCodingProperties {
         /// The generated code writes exactly the bytes Codable writes, for a
         /// whole request and for one item.
@@ -121,7 +121,12 @@
         /// fails this once a value is above `Int64.max`.
         @Test
         func writesTheSameBytes() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(everyRun: [
+                    "a binary past bin8", "a collection past fixarray or fixmap",
+                    "a string past fixstr", "a string past str8",
+                ])
+            ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let generators = CatalogGenerators(shape)
                 let request = try #draw(generators.putRequest, from: tc)
@@ -136,7 +141,7 @@
         /// Codable's bytes, and both paths read it back, absent or present.
         @Test
         func optionalPayloads() throws {
-            try property { tc in
+            try property(reaching: reachClaims(everyRun: ["present"], deepRuns: ["absent"])) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let item = try #draw(.optional(CatalogGenerators(shape).item), from: tc)
                 try tc.event(item == nil ? "absent" : "present")
@@ -163,7 +168,15 @@
         /// this, and `optionalPayloads` too.
         @Test
         func decodesWhatItWrites() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: [
+                        "a binary past bin8", "a collection past fixarray or fixmap",
+                        "a string past fixstr", "a string past str8",
+                    ],
+                    deepRuns: ["flag holds an absent optional"]
+                )
+            ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)
                 try recordSizes(of: request, in: tc)
@@ -191,7 +204,7 @@
         /// on it with the same error.
         @Test
         func truncatedPayloadsFailTheSameWay() throws {
-            try property { tc in
+            try property(reaching: reachClaims(everyRun: ["failed with truncated"])) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)
                 let bytes = try encodedThroughCodable(request).get()
@@ -216,7 +229,15 @@
         /// removed to the same value, or fail on it with the same error.
         @Test
         func corruptedPayloadsDecodeOrFailTheSameWay() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: [],
+                    deepRuns: [
+                        "decoded", "failed with invalidUTF8", "failed with keyNotFound",
+                        "failed with truncated", "failed with typeMismatch",
+                    ]
+                )
+            ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)
                 let bytes = try Array(encodedThroughCodable(request).get().readableBytesView)
@@ -237,6 +258,66 @@
             }
         }
 
+        /// Both paths decode a request with other bytes in a place where the
+        /// generated code hands the value to `Codable` to the same value, or
+        /// fail on it with the same error: a `DecodingError` names the same
+        /// coding path. The place is an item's maps or external type, or a
+        /// held shipment's map or the structure holding its external type,
+        /// at any depth of splits. The bytes are most often what the
+        /// place's `Decodable` refuses with a `DecodingError`, which
+        /// `corruptedPayloadsDecodeOrFailTheSameWay` reaches in a few cases
+        /// in a thousand. An item's serials refuse with an `MMWireError`
+        /// instead: the coder reads their integer keys itself.
+        ///
+        /// Mutation check: `readField` leaving the coding path as it is or
+        /// putting the key at its end; generated code reading a union
+        /// case's fields without the union's `fields` key; or the generator
+        /// reading a map, an external type, a structure, a reference, an
+        /// array or an optional without `readField`, fails here.
+        @Test
+        func decodingErrorsNameTheSamePath() throws {
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["failed with decodingFailed"],
+                    deepRuns: CodableSlot.allCases.map(\.rawValue) + [
+                        "a held shipment under a split", "failed with keyNotFound",
+                        "failed with typeMismatch",
+                    ]
+                )
+            ) { tc in
+                // Sizes Hegel chooses: boundary sizes pick header formats,
+                // which name no path, and make the largest requests.
+                let shipmentDepth = try #draw(Gen<Int>.element(of: [0, 3, 32]), from: tc)
+                let generators = CatalogGenerators(
+                    CatalogShape(boundaryRate: 0, shipmentDepth: shipmentDepth)
+                )
+                let request = try #draw(generators.putRequest, from: tc)
+                // Half the time a slot whose `Decodable` can refuse with a
+                // `DecodingError`: the others' coder refuses first.
+                let slot = try #draw(
+                    Gen<CodableSlot>.oneOf(.allCases, .element(of: [.duties, .customs, .stamp])),
+                    from: tc
+                )
+                let replacement = try #draw(generators.slotBytes(for: slot), from: tc)
+                let replaced = try generators.replacing(slot, in: request, with: replacement, tc)
+                try tc.event(slot.rawValue)
+                if replaced.underSplit {
+                    try tc.event("a held shipment under a split")
+                }
+                let generated = decodedThroughGeneratedCode(
+                    Catalog.PutRequest.self,
+                    from: replaced.payload
+                )
+                try tc.event(outcome(generated))
+                #expect(
+                    generated.map(bitwise)
+                        == decodedThroughCodable(Catalog.PutRequest.self, from: replaced.payload)
+                        .map(bitwise),
+                    "\(hex(replaced.payload))"
+                )
+            }
+        }
+
         /// Under any container nesting limit, both paths decode a request to
         /// the same value or fail on it with the same error.
         ///
@@ -247,7 +328,14 @@
         /// which rejects any container past the limit first.
         @Test
         func nestingLimitsFailTheSameWay() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["decoded", "failed with nestingTooDeep"],
+                    deepRuns: [
+                        "limit at the request's depth", "limit one below the request's depth",
+                    ]
+                )
+            ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)
                 let bytes = try encodedThroughCodable(request).get()

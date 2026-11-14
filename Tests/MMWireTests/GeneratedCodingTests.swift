@@ -27,6 +27,18 @@ struct GeneratedCodingStamp: Codable, Hashable, Sendable, SchemaDescribable {
     }
 }
 
+/// A hand-written external type whose `Decodable` refuses some values: a raw
+/// value naming no case fails with a `DecodingError`, which carries the
+/// coding path down to it.
+enum GeneratedCodingSeal: String, CaseIterable, Codable, Hashable, Sendable, SchemaDescribable {
+    case intact
+    case broken
+
+    static var schema: TypeSchema {
+        .enumeration(cases: [.init(name: "intact"), .init(name: "broken")])
+    }
+}
+
 /// An external type with MessagePack code of its own, which records the path
 /// that decoded it: the bytes are the same either way.
 struct GeneratedCodingMarker: Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable {
@@ -103,6 +115,12 @@ private enum Catalog: MethodNamespace {
                 Field("parts", .array(.reference("Shipment")))
                 Field("box") {
                     Field("label", .string)
+                }
+            }
+            Case("held") {
+                Field("duties", .map(key: .int, value: .string))
+                Field("customs") {
+                    Field("seal", GeneratedCodingSeal.self)
                 }
             }
         }
@@ -298,6 +316,37 @@ struct GeneratedCodingTests {
             decodedThroughGeneratedCode(Catalog.Shipment.self, from: payloads[8])
                 == .failure(.keyNotFound(key: "1"))
         )
+    }
+
+    @Test("a DecodingError from a map or an external type names the same coding path")
+    func decodingErrorPaths() {
+        let held = [
+            // {0: "held", 1: {0: {"x": "a"}, 1: {0: "intact"}}}: a duties key
+            // that is not an integer, refused at fields, duties, "x".
+            "8200a468656c64" + "0182" + "0081a178a161" + "018100a6696e74616374",
+            // {0: "held", 1: {0: {}, 1: {0: "x"}}}: a seal naming no case,
+            // refused at fields, customs, seal.
+            "8200a468656c64" + "0182" + "0080" + "018100a178",
+        ]
+        for shipment in held {
+            // Alone, and under a split's parts:
+            // {0: "split", 1: {0: [shipment], 1: {0: "b"}}}.
+            let split = "8200a573706c6974" + "0182" + "0091" + shipment + "018100a162"
+            for payload in [shipment, split].map(mpBytes) {
+                let generated = decodedThroughGeneratedCode(Catalog.Shipment.self, from: payload)
+                #expect(generated == decodedThroughCodable(Catalog.Shipment.self, from: payload))
+                #expect(isDecodingFailed(generated), "\(generated)")
+            }
+            // Under a request's shipments: {0: [], 1: [], 3: [shipment]}.
+            let request = mpBytes("8300900190" + "0391" + shipment)
+            let generated = decodedThroughGeneratedCode(Catalog.PutRequest.self, from: request)
+            #expect(generated == decodedThroughCodable(Catalog.PutRequest.self, from: request))
+            #expect(isDecodingFailed(generated), "\(generated)")
+        }
+    }
+
+    private func isDecodingFailed<T>(_ result: Result<T, MMWireError>) -> Bool {
+        if case .failure(.decodingFailed) = result { true } else { false }
     }
 
     @Test("bytes: a bin on the wire; a str reads as its UTF-8 bytes")

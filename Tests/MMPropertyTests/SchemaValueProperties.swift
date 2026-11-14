@@ -5,7 +5,7 @@
     import MMSchema
     import Testing
 
-    @Suite("Schema value properties", .hegel)
+    @Suite("Schema value properties", .hegel, .offTheCooperativePool)
     struct SchemaValueProperties {
         /// Every generated value fits its schema: `validated` gives it back
         /// unchanged, strings by their bytes and doubles by bit pattern. So
@@ -29,7 +29,21 @@
         /// most of them and a 1,000-case run catches every one.
         @Test
         func generatedValuesValidateToThemselves() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["a shadowed definition", "an optional field left out"],
+                    deepRuns: [
+                        "a bool", "a date", "a datetime", "a double", "a float",
+                        "a later enumeration case", "a map keyed by strings", "a reference chain",
+                        "a string", "a timestamp", "a uint", "a union case with fields",
+                        "a union case without fields", "a value four levels deep",
+                        "an array with items", "an empty array", "an empty map",
+                        "an empty structure", "an int", "an optional field set to null",
+                        "an unknown slot", "bytes", "null in an optional slot",
+                        "the first enumeration case",
+                    ]
+                )
+            ) { tc in
                 let policy = try #draw(SchemaValueGenerators.policies(unknownSlots: true), from: tc)
                 let fitting = try #draw(SchemaValueGenerators.fitting(policy), from: tc)
                 for label in reachLabels(of: fitting).sorted() {
@@ -68,7 +82,15 @@
         /// catches most of them and a 1,000-case run catches every one.
         @Test
         func looseFormsValidateToTheCanonicalValue() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["members out of order"],
+                    deepRuns: [
+                        "a respelled map key", "an int given as a double",
+                        "union fields given for a case without any", "union members out of order",
+                    ]
+                )
+            ) { tc in
                 let policy = try #draw(SchemaValueGenerators.policies(unknownSlots: true), from: tc)
                 let fitting = try #draw(SchemaValueGenerators.fitting(policy), from: tc)
                 let looseRate = try #draw(Gen<Double>.element(of: [0.5, 1.0]), from: tc)
@@ -111,7 +133,14 @@
         /// the schema; that property is the check for them.
         @Test
         func validatedIsIdempotent() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["the input was refused"],
+                    deepRuns: [
+                        "accepted and rewritten", "accepted as it was", "the input was accepted",
+                    ]
+                )
+            ) { tc in
                 let policy = try #draw(SchemaValueGenerators.policies(unknownSlots: true), from: tc)
                 let fitting = try #draw(SchemaValueGenerators.fitting(policy), from: tc)
                 let looseRate = try #draw(Gen<Double>.element(of: [0.5, 1.0]), from: tc)

@@ -13,6 +13,7 @@ private let definitions = [
             .init(key: 0, name: "note", type: .string)
         ])),
     TypeDefinition(name: "ledger.Alias", schema: .reference("ledger.Meta")),
+    TypeDefinition(name: "ledger.Account", schema: .uint),
     TypeDefinition(name: "loop.A", schema: .reference("loop.B")),
     TypeDefinition(name: "loop.B", schema: .reference("loop.A")),
 ]
@@ -160,6 +161,109 @@ struct SchemaValueTests {
         ) {
             try SchemaValue.object([.init("5", .string("x")), .init("05", .string("y"))])
                 .validated(against: .map(key: .string, value: .string), resolver: resolver).get()
+        }
+    }
+
+    @Test("an unsigned-keyed map refuses a negative key, and no map takes a key past 64 bits")
+    func integerKeyRange() throws {
+        let unsigned = TypeSchema.map(key: .uint, value: .bool)
+        let signed = TypeSchema.map(key: .int, value: .bool)
+        for key in ["0", "-0", "+0", "9223372036854775807"] {
+            _ = try SchemaValue.object([.init(key, .bool(true))])
+                .validated(against: unsigned, resolver: resolver).get()
+        }
+        let negative = "key is negative, and the map's keys are unsigned"
+        let outOfRange = "key is out of range: a wire map key is a 64-bit signed integer"
+        let refused: [(TypeSchema, String, String)] = [
+            (unsigned, "-1", negative),
+            (unsigned, "-9223372036854775808", negative),
+            (unsigned, "9223372036854775808", outOfRange),
+            (unsigned, "18446744073709551615", outOfRange),
+            (signed, "-9223372036854775809", outOfRange),
+            (signed, "+9223372036854775808", outOfRange),
+            (signed, "1.0", "key is not an integer"),
+        ]
+        for (schema, key, problem) in refused {
+            switch SchemaValue.object([.init(key, .bool(true))])
+                .validated(against: schema, resolver: resolver)
+            {
+                case .success:
+                    Issue.record("the map took the key \(key)")
+                case .failure(let error):
+                    #expect(error.path == key && error.problem == problem)
+            }
+        }
+        // A refused key is no repeat: the first spelling of -1 is refused
+        // for its sign, not the second as the same integer.
+        expectFailure(
+            SchemaValue.object([.init("-1", .bool(false)), .init("-01", .bool(true))])
+                .validated(against: unsigned, resolver: resolver),
+            path: "-1"
+        )
+    }
+
+    @Test("a map's key schema resolves: a reference takes the keys of what it names")
+    func referenceKeys() throws {
+        // A reference to .uint takes unsigned integer keys, under .uint's rules.
+        let accounts = TypeSchema.map(key: .reference("ledger.Account"), value: .bool)
+        _ = try SchemaValue.object([.init("7", .bool(true))])
+            .validated(against: accounts, resolver: resolver).get()
+        let refused: [(TypeSchema, String, String)] = [
+            (accounts, "-1", "key is negative, and the map's keys are unsigned"),
+            (accounts, "x", "key is not an integer"),
+            (
+                .map(key: .reference("ledger.Kind"), value: .bool), "refund",
+                "key is not one of: credit, debit"
+            ),
+            (
+                .map(key: .reference("ledger.Meta"), value: .bool), "note",
+                "unsupported map key schema for dynamic values: a structure can't be a map key"
+            ),
+            (
+                .map(key: .bool, value: .bool), "true",
+                "unsupported map key schema for dynamic values: a bool can't be a map key"
+            ),
+            (
+                .map(key: .unknown, value: .bool), "x",
+                "unsupported map key schema for dynamic values: an unknown shape can't be a map key"
+            ),
+        ]
+        for (schema, key, problem) in refused {
+            switch SchemaValue.object([.init(key, .bool(true))])
+                .validated(against: schema, resolver: resolver)
+            {
+                case .success:
+                    Issue.record("the map took the key \(key)")
+                case .failure(let error):
+                    #expect(error.path == key && error.problem == problem)
+            }
+        }
+        expectFailure(
+            SchemaValue.object([.init("7", .bool(false)), .init("07", .bool(true))])
+                .validated(against: accounts, resolver: resolver),
+            path: "07"
+        )
+        // A reference to an enumeration takes its case names.
+        let kinds = SchemaValue.object([.init("credit", .bool(true)), .init("debit", .bool(false))])
+        #expect(
+            try kinds.validated(
+                against: .map(key: .reference("ledger.Kind"), value: .bool),
+                resolver: resolver
+            ).get() == kinds
+        )
+        // A key schema that resolves to nothing fails at the map.
+        switch SchemaValue.object([]).validated(
+            against: .map(key: .reference("ledger.Missing"), value: .bool),
+            resolver: resolver
+        )
+        {
+            case .success:
+                Issue.record("the map took an unresolved key schema")
+            case .failure(let error):
+                #expect(
+                    error.path == ""
+                        && error.problem == "unresolved type reference 'ledger.Missing'"
+                )
         }
     }
 

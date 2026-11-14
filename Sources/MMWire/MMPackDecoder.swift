@@ -100,6 +100,9 @@ func mpReadScalar<T>(_ type: T.Type, from buffer: inout ByteBuffer) throws -> T?
 /// Keyed containers index their map once (integer and string keys); the first
 /// occurrence of a duplicate key wins and unknown keys are skipped structurally.
 /// `ByteBuffer` targets decode `bin`/`str` payloads as zero-copy slices.
+/// A `Dictionary` keyed by an integer type or by a `String`- or integer-backed
+/// enum decodes from a map, each key read as a value of its type, where
+/// `Codable` would read an array of keys and values.
 /// Container nesting beyond `maxDepth` fails with `.nestingTooDeep`.
 public struct MMPackDecoder: Sendable {
     /// Maximum container nesting depth for both decoding and structural skipping.
@@ -283,8 +286,9 @@ final class MPDecodingState {
         return try self.decodeComposite(type, from: buffer, depth: depth, parent: parent, key: key)
     }
 
-    /// Decodes `type` through its own `init(from:)` over a new frame, which
-    /// opens the value's scope: everything pushed until it returns is popped then.
+    /// Decodes `type` over a new frame, through its own `init(from:)` or
+    /// ``mpDecode(_:from:)``, which opens the value's scope: everything pushed
+    /// until it returns is popped then.
     private func decodeComposite<T: Decodable>(
         _ type: T.Type,
         from buffer: ByteBuffer,
@@ -310,7 +314,7 @@ final class MPDecodingState {
             // Guarded force cast: the conformance cast above proves T.
             return try arrayType.decodeReservingCapacity(from: decoder) as! T
         }
-        return try T(from: decoder)
+        return try mpDecode(type, from: decoder)
     }
 
     func pushFrame(
@@ -704,7 +708,7 @@ extension MPDecoderImplementation: SingleValueDecodingContainer {
         if let value = try self.readValue({ try MPDecodingState.readDirectly(type, from: &$0) }) {
             return value
         }
-        return try T(from: self)
+        return try mpDecode(T.self, from: self)
     }
 }
 

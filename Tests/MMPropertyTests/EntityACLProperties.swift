@@ -108,7 +108,7 @@
         }
     }
 
-    @Suite("EntityACL properties", .hegel)
+    @Suite("EntityACL properties", .hegel, .offTheCooperativePool)
     struct EntityACLProperties {
         /// `permitted` agrees with the POSIX rule read from the `ls` form of
         /// the mode: the first class the peer matches decides alone, even
@@ -122,7 +122,16 @@
         /// masking the request to `rwx`, fails here.
         @Test
         func permittedFollowsTheFirstMatchingClass() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["denied", "granted"],
+                    deepRuns: [
+                        "denied though the other class would grant", "someone else",
+                        "the group, by a supplementary group", "the group, by primary gid",
+                        "the owner", "the owner, in the group too",
+                    ]
+                )
+            ) { tc in
                 let acl = try #draw(EntityACLGenerators.acls, from: tc)
                 let (peer, relation) = try #draw(EntityACLGenerators.peers(for: acl), from: tc)
                 let requested = try #draw(EntityACLGenerators.requests, from: tc)
@@ -150,7 +159,16 @@
         /// bits, rather than any part of them, fails here.
         @Test
         func permittedIsMonotonicInTheRequest() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["the union denied"],
+                    deepRuns: [
+                        "one part granted, the other denied", "someone else",
+                        "the group, by a supplementary group", "the group, by primary gid",
+                        "the owner", "the owner, in the group too", "the union granted",
+                    ]
+                )
+            ) { tc in
                 let acl = try #draw(EntityACLGenerators.acls, from: tc)
                 let (peer, relation) = try #draw(EntityACLGenerators.peers(for: acl), from: tc)
                 let first = try #draw(EntityACLGenerators.requests, from: tc)

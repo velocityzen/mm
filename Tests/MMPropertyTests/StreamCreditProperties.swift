@@ -32,35 +32,22 @@
         (try? MMPackEncoder().encode(value).get()) ?? ByteBuffer()
     }
 
-    /// How long a pipe waits for its tasks before calling them hung. A case
+    /// How long a pipe may go without a step of progress, or keep running
+    /// once its task is cancelled, before the case fails as hung: `Stalled`
+    /// or `StillRunning`, which Hegel shrinks with shorter limits. A case
     /// runs in well under a millisecond; a wakeup the code loses never comes.
-    let hangDeadline: Duration = .seconds(5)
+    let hangLimit: Duration = .seconds(5)
 
-    /// Whether every task finished before `hangDeadline`. A task that hangs
-    /// is left behind rather than awaited, so the case fails instead of the
-    /// whole run stalling.
-    func allFinish(_ tasks: [Task<Void, Never>]) async -> Bool {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            let pending = NIOLockedValueBox<CheckedContinuation<Bool, Never>?>(continuation)
-            let settle: @Sendable (Bool) -> Void = { finished in
-                let waiting = pending.withLockedValue { pending in
-                    let waiting = pending
-                    pending = nil
-                    return waiting
-                }
-                waiting?.resume(returning: finished)
-            }
-            let timer = Task {
-                guard (try? await Task.sleep(for: hangDeadline)) != nil else { return }
-                settle(false)
-            }
-            Task {
-                for task in tasks {
-                    await task.value
-                }
-                settle(true)
-                timer.cancel()
-            }
+    /// Kills a pipe's connection when its case ends before its tasks
+    /// settled: the case failed on a hang, or threw out early. Hegel fails
+    /// that case, yet its hung task stays hung, or spinning, for the rest of
+    /// the run; a cancelled sender that re-parks spins. Enough spinning
+    /// tasks fill the thread pool and starve Hegel's watchdog, which then
+    /// takes every late wakeup for a starved run instead of a hang, so the
+    /// run never ends. The connection's death ends each of those loops.
+    func releaseUnsettled(_ settled: Bool, _ die: () -> Void) {
+        if !settled {
+            die()
         }
     }
 
@@ -195,9 +182,9 @@
             self.update { $0.tasks.append(task) }
         }
 
-        /// Awaits every task spawned so far, and the ones they spawn. False
-        /// when one hangs.
-        func settle() async -> Bool {
+        /// Awaits every task spawned so far, and the ones they spawn, with a
+        /// beat as each one finishes.
+        func settle(_ heartbeat: Heartbeat) async {
             while true {
                 let tasks = self.update { state in
                     let tasks = state.tasks
@@ -205,9 +192,12 @@
                     return tasks
                 }
                 if tasks.isEmpty {
-                    return true
+                    return
                 }
-                guard await allFinish(tasks) else { return false }
+                for task in tasks {
+                    await task.value
+                    heartbeat.beat()
+                }
             }
         }
 
@@ -974,15 +964,39 @@
         /// this property found) or grants one too many, fails here.
         @Test
         func requestStreamStaysInsideTheServersCredit() async throws {
-            try await property { tc in
+            try await property(
+                reaching: reachClaims(
+                    everyRun: ["a send ended callEnded"],
+                    deepRuns: [
+                        "a cancel reached a parked sender",
+                        "a grant came with the sender out of credit",
+                        "a grant reached a parked sender", "a send ended connectionClosed",
+                        "a send ended peerStopped", "a terminal reached a parked sender",
+                        "an item reached a handler that stopped reading",
+                        "items went past the initial window", "several terminals were handed",
+                        "the client cancelled the call", "the client parked at zero credit",
+                        "the connection died", "the sender's own cancellation ended a send",
+                        "the sender's task was cancelled",
+                    ]
+                )
+            ) { tc in
                 let plan = try RequestPlan.draw(tc)
                 let pipe = RequestPipe(plan: plan)
-                defer { pipe.detach() }
+                // See `releaseUnsettled`.
+                var settled = false
+                defer {
+                    releaseUnsettled(settled, pipe.die)
+                    pipe.detach()
+                }
                 for _ in 0..<plan.awaitersBefore {
                     pipe.startAwaiter()
                 }
+                // A send that never returns fails the case as `Stalled`, or
+                // as `StillRunning` once its task is cancelled.
                 let run = try await tc.withRandomCancellation(
-                    checkpoints: 0...(2 * plan.items + plan.items / 4 + 2)
+                    checkpoints: 0...(2 * plan.items + plan.items / 4 + 2),
+                    endsWithin: hangLimit,
+                    stallsAfter: hangLimit
                 ) { cancellation in
                     pipe.record.arm(cancellation)
                     pipe.armInterruption()
@@ -996,22 +1010,25 @@
                     }
                     pipe.record.update { $0.sender = sender }
                     recorded.open()
-                    return await withTaskCancellationHandler {
-                        await allFinish([sender])
+                    await withTaskCancellationHandler {
+                        await sender.value
                     } onCancel: {
                         sender.cancel()
                     }
                 }
                 pipe.record.arm(nil)
-                #expect(run.value, "a send never returned")
-                if !run.value {
-                    pipe.die()
+                // The server or an awaiter that hangs fails the case as
+                // `Stalled`.
+                try await tc.withStallDetection(after: hangLimit) { heartbeat in
+                    // The client's END, when its sender didn't send one.
+                    await pipe.client.finish()
+                    await pipe.record.settle(heartbeat)
                 }
-                // The client's END, when its sender didn't send one.
-                await pipe.client.finish()
-                #expect(await pipe.record.settle(), "the server or an awaiter hung")
                 pipe.startAwaiter()
-                #expect(await pipe.record.settle(), "a late awaiter hung")
+                try await tc.withStallDetection(after: hangLimit) { heartbeat in
+                    await pipe.record.settle(heartbeat)
+                }
+                settled = true
 
                 let record = pipe.record.current
                 #expect(
@@ -1087,34 +1104,60 @@
         /// many, or a second terminal that overwrites the first, fails here.
         @Test
         func responseSinkStaysInsideTheClientsGrants() async throws {
-            try await property { tc in
+            try await property(
+                reaching: reachClaims(
+                    everyRun: [
+                        "several terminals were handed", "the handler's task was cancelled",
+                    ],
+                    deepRuns: [
+                        "a STOP released a watcher", "a grant came with the sender out of credit",
+                        "a send ended callEnded", "a send ended peerStopped",
+                        "a watcher returned on its own cancellation",
+                        "an item reached a client that stopped reading",
+                        "items went past the initial window", "the client's buffer filled",
+                        "the connection died",
+                    ]
+                )
+            ) { tc in
                 let plan = try ResponsePlan.draw(tc)
                 let pipe = ResponsePipe(plan: plan)
-                defer { pipe.detach() }
+                // See `releaseUnsettled`.
+                var settled = false
+                defer {
+                    releaseUnsettled(settled, pipe.die)
+                    pipe.detach()
+                }
                 for _ in 0..<plan.awaitersBefore {
                     pipe.startAwaiter()
                 }
+                // A handler that never returns fails the case as `Stalled`,
+                // or as `StillRunning` once its task is cancelled.
                 let run = try await tc.withRandomCancellation(
-                    checkpoints: 0...(2 * plan.items + plan.items / 8 + 2)
+                    checkpoints: 0...(2 * plan.items + plan.items / 8 + 2),
+                    endsWithin: hangLimit,
+                    stallsAfter: hangLimit
                 ) { cancellation in
                     pipe.record.arm(cancellation)
                     pipe.armInterruption()
                     pipe.record.spawn { await pipe.read() }
                     let handler = Task { await pipe.handle() }
-                    return await withTaskCancellationHandler {
-                        await allFinish([handler])
+                    await withTaskCancellationHandler {
+                        await handler.value
                     } onCancel: {
                         handler.cancel()
                     }
                 }
                 pipe.record.arm(nil)
-                #expect(run.value, "the handler never returned")
-                if !run.value {
-                    pipe.die()
+                // The reader or an awaiter that hangs fails the case as
+                // `Stalled`.
+                try await tc.withStallDetection(after: hangLimit) { heartbeat in
+                    await pipe.record.settle(heartbeat)
                 }
-                #expect(await pipe.record.settle(), "the reader or an awaiter hung")
                 pipe.startAwaiter()
-                #expect(await pipe.record.settle(), "a late awaiter hung")
+                try await tc.withStallDetection(after: hangLimit) { heartbeat in
+                    await pipe.record.settle(heartbeat)
+                }
+                settled = true
 
                 let record = pipe.record.current
                 #expect(

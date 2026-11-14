@@ -568,7 +568,7 @@
         }
     }
 
-    @Suite("SchemaFingerprint properties", .hegel)
+    @Suite("SchemaFingerprint properties", .hegel, .offTheCooperativePool)
     struct SchemaFingerprintProperties {
         /// Reordering the signatures and the type definitions, and
         /// rewriting or removing every description, leaves the fingerprint
@@ -579,7 +579,8 @@
         /// hashing an enum case's description, fails here.
         @Test
         func fingerprintIgnoresOrderAndDescriptions() throws {
-            try property { tc in
+            try property(reaching: reachClaims(everyRun: [], deepRuns: ["duplicate method names"]))
+            { tc in
                 let set = try #draw(FingerprintGenerators.sets(signatureCount: 0...6), from: tc)
                 let restated = try FingerprintGenerators.restated(set, tc)
                 try tc.event("signatures", value: Double(set.signatures.count))
@@ -601,7 +602,18 @@
         /// a request stream, fails here.
         @Test
         func fingerprintSeesEveryChange() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["the wire form changed"],
+                    deepRuns: [
+                        "a definition added", "a field added", "a field dropped",
+                        "a field key changed", "a field renamed", "a schema replaced",
+                        "a signature added", "access changed", "the request stream changed",
+                        "the response stream changed", "two enum cases swapped",
+                        "two fields swapped",
+                    ]
+                )
+            ) { tc in
                 let set = try #draw(FingerprintGenerators.sets(signatureCount: 1...6), from: tc)
                 let (changed, label) = try FingerprintGenerators.changed(set, tc)
                 let restated = try FingerprintGenerators.restated(changed, tc)

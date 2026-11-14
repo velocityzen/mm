@@ -518,7 +518,7 @@
         if case .failure(let error) = result { error } else { nil }
     }
 
-    @Suite("MessagePack reader properties", .hegel)
+    @Suite("MessagePack reader properties", .hegel, .offTheCooperativePool)
     struct MessagePackReaderProperties {
         /// Every reader, given any bytes at any reader index, returns a value
         /// or an `MMWireError`. A success consumes at least the format byte
@@ -529,7 +529,29 @@
         /// header when the bytes are not UTF-8 fails this.
         @Test
         func readersRestoreTheIndexOnFailure() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: [
+                        "readMessagePackRawValueSlice failed on its own format",
+                        "readMessagePackRawValueSlice read a value",
+                        "skipMessagePackValue failed on its own format",
+                        "skipMessagePackValue read a value",
+                    ],
+                    deepRuns: [
+                        "a corrupted value", "a strict prefix of a value",
+                        "a value and bytes after it", "a value with 0xc1 inserted", "a whole value",
+                        "any bytes", "readMessagePackArrayHeader read a value",
+                        "readMessagePackBinary failed on its own format",
+                        "readMessagePackBinary read a value", "readMessagePackDouble read a value",
+                        "readMessagePackFloat read a value",
+                        "readMessagePackInt failed on its own format",
+                        "readMessagePackInt read a value", "readMessagePackMapHeader read a value",
+                        "readMessagePackString failed on its own format",
+                        "readMessagePackUInt failed on its own format",
+                        "readMessagePackUInt read a value",
+                    ]
+                )
+            ) { tc in
                 let input = try #draw(PackGenerators.inputs, from: tc)
                 let alreadyRead = try #draw(Gen<[UInt8]>.bytes(), from: tc)
                 let maxDepth = try #draw(PackGenerators.nestingLimits, from: tc)
@@ -573,7 +595,17 @@
         /// the limit through.
         @Test
         func skipConsumesWhatReadingDoes() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["decoded"],
+                    deepRuns: [
+                        "a corrupted value", "a strict prefix of a value",
+                        "a value and bytes after it", "a value with 0xc1 inserted", "a whole value",
+                        "any bytes", "failed with invalidFormat", "failed with invalidUTF8",
+                        "failed with nestingTooDeep", "failed with truncated",
+                    ]
+                )
+            ) { tc in
                 let input = try #draw(PackGenerators.inputs, from: tc)
                 let alreadyRead = try #draw(Gen<[UInt8]>.bytes(), from: tc)
                 let maxDepth = try #draw(PackGenerators.nestingLimits, from: tc)
@@ -616,7 +648,18 @@
         /// 10,000 cases to be sure of meeting it.
         @Test
         func readValuesWriteBackCanonically() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["nothing read to write back", "written back as long"],
+                    deepRuns: [
+                        "a binary past bin8", "a container in a container", "a corrupted value",
+                        "a float32", "a strict prefix of a value", "a value and bytes after it",
+                        "a value with 0xc1 inserted", "a whole value", "an ext", "an ext past ext8",
+                        "an integer above Int64.max", "an integer at a format's edge", "any bytes",
+                        "written back shorter",
+                    ]
+                )
+            ) { tc in
                 let input = try #draw(PackGenerators.inputs, from: tc)
                 try tc.event(input.kind)
                 var reader = ByteBuffer(bytes: input.bytes)

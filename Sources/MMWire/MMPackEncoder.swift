@@ -38,7 +38,10 @@ func mpWriteBinaryShortcut<T: Encodable>(_ value: T, into buffer: inout ByteBuff
 /// Keyed containers encode as maps with integer keys taken from `CodingKeys.intValue`;
 /// keys without an `intValue` fall back to string keys. `ByteBuffer` values encode as
 /// `bin`; the wire time kinds (`MMDate`, `MMDateTime`, `MMTimestamp`) encode as `bin`
-/// holding their VPTS form.
+/// holding their VPTS form. A `Dictionary` keyed by an integer type or by a
+/// `String`- or integer-backed enum encodes as a map keyed by each key's own
+/// encoding, where `Codable` would write an array of keys and values; a key
+/// must fit `Int64`.
 ///
 /// Values stream straight into the output buffer: a container writes a one-byte
 /// header placeholder and patches it with the final count when it closes, so
@@ -150,7 +153,7 @@ final class MPEncodingState {
     func encodeRoot<T: Encodable>(_ value: T) -> Result<Void, MMWireError> {
         let root = self.pushSlot(key: nil)
         do {
-            try value.encode(to: MPEncoderImplementation(state: self, slot: root))
+            try mpEncode(value, to: MPEncoderImplementation(state: self, slot: root))
             try self.closeSlot(root)
         } catch let error as MMWireError {
             return .failure(error)
@@ -278,7 +281,7 @@ final class MPEncodingState {
     ) throws {
         let slot = self.pushSlot(key: key)
         do {
-            try value.encode(to: MPEncoderImplementation(state: self, slot: slot))
+            try mpEncode(value, to: MPEncoderImplementation(state: self, slot: slot))
             try self.closeSlot(slot)
         } catch {
             // A container already closed by misuse has nothing to restore; the
@@ -719,7 +722,7 @@ struct MPSingleValueEncoding: SingleValueEncodingContainer {
             try self.scalar { _ = mpWriteBinaryShortcut(value, into: &$0) }
             return
         }
-        try value.encode(to: MPEncoderImplementation(state: self.state, slot: self.slot))
+        try mpEncode(value, to: MPEncoderImplementation(state: self.state, slot: self.slot))
     }
 }
 

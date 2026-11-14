@@ -9,6 +9,16 @@
 #   HEGEL_DEFAULT_PROFILE=nightly swift test --filter MMPropertyTests
 #
 # Add HEGEL_STATISTICS=1 to see how often each reach event occurs.
+#
+# Reach claims (`property(reaching:)`) come in two sets; see
+# Tests/MMPropertyTests/ReachClaims.swift. The states every 100-case run
+# reaches reliably are claimed on every run. The rest are claimed only on
+# runs of 1,000 cases or more: this profile, or HEGEL_TEST_CASES=1000 and up.
+#
+# A suite of synchronous properties takes the `.offTheCooperativePool` trait
+# next to `.hegel`: a synchronous property holds its thread for its whole
+# run, and the async suites' tasks need the cooperative pool. See
+# Tests/MMPropertyTests/PropertyThreadPool.swift.
 
 [profiles.nightly]
 test_cases = 10_000

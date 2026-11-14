@@ -138,7 +138,7 @@
         }
     }
 
-    @Suite("EntityName properties", .hegel)
+    @Suite("EntityName properties", .hegel, .offTheCooperativePool)
     struct EntityNameProperties {
         /// `parse` succeeds exactly when the text keeps the documented rules,
         /// and otherwise names a rule it breaks. A parsed name keeps the text
@@ -150,7 +150,18 @@
         /// `{` is one of six neighbours of the alphabet's ranges.
         @Test
         func parsingFollowsTheRules() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: [
+                        "a character outside the alphabet", "a valid name",
+                        "failed with invalidCharacter", "parsed",
+                    ],
+                    deepRuns: [
+                        "a doubled dot", "a leading dot", "any text", "failed with emptySegment",
+                        "root", "the alphabet and its neighbours",
+                    ]
+                )
+            ) { tc in
                 let (text, kind) = try #draw(EntityNameGenerators.texts, from: tc)
                 let broken = brokenEntityNameRules(text)
                 try tc.event(kind)
@@ -196,7 +207,15 @@
         /// the outermost one, fails here.
         @Test
         func descentAgreesWithAncestors() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["descends", "does not descend", "the first is a name"],
+                    deepRuns: [
+                        "a descendant", "a sibling", "an unrelated name", "the first is root",
+                        "the last segment run on", "the same name",
+                    ]
+                )
+            ) { tc in
                 let (firstSegments, secondSegments, relation) = try #draw(
                     EntityNameGenerators.pairs,
                     from: tc

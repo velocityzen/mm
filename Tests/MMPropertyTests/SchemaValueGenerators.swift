@@ -23,6 +23,10 @@
     struct SchemaValuePolicy: Sendable {
         /// How many named types references can point at.
         var definitionCount: Int
+        /// How many more named types a map's key schema can point at: an
+        /// alias of `.string`, `.int` or `.uint`, an enumeration, or a chain
+        /// to an earlier one.
+        var keyDefinitionCount: Int
         /// Whether a later definition reuses an earlier one's name with a
         /// shape no value fits, which the resolver must ignore.
         var shadowedDefinition: Bool
@@ -142,10 +146,13 @@
             edged(floatEdges, .float(), rate: edgeRate)
         }
 
-        /// Map keys as text: any string, or an integer in its canonical
-        /// decimal form, which is what the dynamic decoder renders. An
-        /// unsigned key stays at or under `Int64.max`: `validated` reads map
-        /// keys as `Int64`, and a `CodingKey`'s integer is an `Int`.
+        /// Map keys as text for a resolved key schema: any string, an
+        /// integer in its canonical decimal form, which is what the dynamic
+        /// decoder renders, or an enumeration's case name. An unsigned key
+        /// stays in `0...Int64.max`: a wire map key is a 64-bit signed
+        /// integer, so `validated` refuses a negative key in an
+        /// unsigned-keyed map and any key past `Int64`. The keys it refuses
+        /// are `integerMapKeysPassExactlyWhenTheWireCarriesThem`'s.
         static func mapKeys(_ keySchema: TypeSchema, edgeRate: Double) -> Gen<String> {
             switch keySchema {
                 case .int:
@@ -157,6 +164,8 @@
                         rate: edgeRate
                     )
                     .map { String($0) }
+                case .enumeration(let cases) where !cases.isEmpty:
+                    return .element(of: cases.map(\.name))
                 default:
                     return names
             }
@@ -195,6 +204,7 @@
                     definitionCount: try tc.draw(
                         Gen<Int>.oneOf(.int(in: 0...4), .element(of: [0, 1, 4]))
                     ),
+                    keyDefinitionCount: try tc.draw(.int(in: 0...3)),
                     shadowedDefinition: try tc.draw(.bool()),
                     structureRoot: try tc.draw(.bool(probability: 0.75)),
                     schemaDepth: try tc.draw(.int(in: 0...4)),
@@ -223,7 +233,16 @@
                     tc,
                     count: policy.definitionCount...policy.definitionCount
                 )
-                let drawing = SchemaDrawing(policy: policy, definitionNames: names)
+                let keyNames = try SchemaDrawing.uniqueNames(
+                    tc,
+                    count: policy.keyDefinitionCount...policy.keyDefinitionCount,
+                    avoiding: names
+                )
+                let drawing = SchemaDrawing(
+                    policy: policy,
+                    definitionNames: names,
+                    keyDefinitionNames: keyNames
+                )
                 var definitions: [TypeDefinition] = []
                 for index in names.indices {
                     definitions.append(
@@ -233,8 +252,17 @@
                         )
                     )
                 }
-                if policy.shadowedDefinition, !names.isEmpty {
-                    let shadowed = names[try tc.draw(.int(in: 0..<names.count))]
+                for index in keyNames.indices {
+                    definitions.append(
+                        TypeDefinition(
+                            name: keyNames[index],
+                            schema: try drawing.keyDefinitionBody(tc, index: index)
+                        )
+                    )
+                }
+                let named = names + keyNames
+                if policy.shadowedDefinition, !named.isEmpty {
+                    let shadowed = named[try tc.draw(.int(in: 0..<named.count))]
                     definitions.append(
                         TypeDefinition(name: shadowed, schema: .enumeration(cases: []))
                     )
@@ -283,6 +311,9 @@
     struct SchemaDrawing: Sendable {
         let policy: SchemaValuePolicy
         let definitionNames: [String]
+        /// The definitions a map's key schema may reference, each one a key
+        /// kind: see ``keyDefinitionBody(_:index:)``.
+        var keyDefinitionNames: [String] = []
 
         enum BodyKind: Sendable {
             case structure, enumeration, union, chain
@@ -302,12 +333,16 @@
 
         /// A number of names from the pool, made distinct by priming repeats:
         /// field, case and definition names are unique in real schemas.
-        static func uniqueNames(_ tc: TestCase, count: ClosedRange<Int>) throws -> [String] {
+        static func uniqueNames(
+            _ tc: TestCase,
+            count: ClosedRange<Int>,
+            avoiding taken: [String] = []
+        ) throws -> [String] {
             let count = try Self.count(tc, in: count)
             var unique: [String] = []
             for name in try tc.draw(.array(of: SchemaValueGenerators.names, count: count...count)) {
                 var name = name
-                while unique.contains(name) { name += "'" }
+                while unique.contains(name) || taken.contains(name) { name += "'" }
                 unique.append(name)
             }
             return unique
@@ -333,8 +368,18 @@
                 case .array:
                     return .array(try schema(tc, depth: depth - 1, required: false, bound: all))
                 case .map:
+                    // A key kind written out, or as often a key definition
+                    // when there is one.
+                    let written: Gen<TypeSchema> = .element(of: [.string, .int, .uint])
                     return .map(
-                        key: try tc.draw(.element(of: [.string, .int, .uint])),
+                        key: try tc.draw(
+                            keyDefinitionNames.isEmpty
+                                ? written
+                                : .oneOf(
+                                    written,
+                                    .element(of: keyDefinitionNames.map { .reference($0) })
+                                )
+                        ),
                         value: try schema(tc, depth: depth - 1, required: false, bound: all)
                     )
                 case .structure:
@@ -354,6 +399,25 @@
                                 )
                             }
                     )
+            }
+        }
+
+        /// What key definition `index` names: an alias of `.string`, `.int`
+        /// or `.uint`, an enumeration of one case or more, whose case names
+        /// are the map's keys (twice as often as each alias), or a chain to
+        /// an earlier key definition.
+        func keyDefinitionBody(_ tc: TestCase, index: Int) throws -> TypeSchema {
+            switch try tc.draw(.int(in: 0...(index > 0 ? 5 : 4))) {
+                case 0: return .string
+                case 1: return .int
+                case 2: return .uint
+                case 3, 4:
+                    return .enumeration(
+                        cases: try Self.uniqueNames(tc, count: caseCounts(required: true))
+                            .map { TypeSchema.EnumCase(name: $0) }
+                    )
+                default:
+                    return .reference(keyDefinitionNames[try tc.draw(.int(in: 0..<index))])
             }
         }
 
@@ -536,7 +600,10 @@
                         )
                     )
                 case .map(let keySchema, let valueSchema):
-                    guard depth > 0, try table.holdsAValue(valueSchema) else {
+                    let resolvedKey = try table.resolve(keySchema)
+                    guard depth > 0, try table.holdsAValue(valueSchema),
+                        resolvedKey != .enumeration(cases: [])
+                    else {
                         return .object([])
                     }
                     let count = try SchemaDrawing.count(tc, in: 0...policy.maxItems)
@@ -544,7 +611,7 @@
                         .array(
                             of: Hegel.zip(
                                 SchemaValueGenerators.mapKeys(
-                                    keySchema,
+                                    resolvedKey,
                                     edgeRate: policy.edgeRate
                                 ),
                                 Gen { tc in
@@ -648,9 +715,10 @@
         var labels: Set<String> = []
 
         func keyKind(_ schema: TypeSchema) -> String {
-            switch schema {
+            switch (try? table.resolve(schema)) ?? schema {
                 case .int: return "integers"
                 case .uint: return "unsigned integers"
+                case .enumeration: return "enumeration cases"
                 default: return "strings"
             }
         }
@@ -702,6 +770,9 @@
                     labels.insert(
                         members.isEmpty ? "an empty map" : "a map keyed by \(keyKind(keySchema))"
                     )
+                    if !members.isEmpty, case .reference = keySchema {
+                        labels.insert("a map keyed by reference")
+                    }
                     if members.contains(where: { $0.name.hasPrefix("-") }) {
                         labels.insert("a negative map key")
                     }
@@ -782,7 +853,10 @@
                     var result = try members.map {
                         SchemaValue.Member($0.name, try repeating(tc, $0.value, valueSchema))
                     }
-                    if case .string = keySchema { return .object(result) }
+                    switch try values.table.resolve(keySchema) {
+                        case .int, .uint: break
+                        default: return .object(result)
+                    }
                     guard !members.isEmpty else { return .object(result) }
                     let index = eligible
                     eligible += 1
@@ -1008,7 +1082,7 @@
         mutating func respelled(_ tc: TestCase, _ key: String, _ keySchema: TypeSchema) throws
             -> String
         {
-            switch keySchema {
+            switch try table.resolve(keySchema) {
                 case .int, .uint:
                     guard try tc.draw(.bool(probability: rate)) else { return key }
                     labels.insert("a respelled map key")

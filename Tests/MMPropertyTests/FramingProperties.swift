@@ -207,7 +207,7 @@
         )
     }
 
-    @Suite("Frame codec properties", .hegel)
+    @Suite("Frame codec properties", .hegel, .offTheCooperativePool)
     struct FramingProperties {
         /// The encoder frames any payloads as the model does, and the decoder
         /// gives them back unchanged and in order however the wire is cut into
@@ -218,7 +218,12 @@
         /// limit fails this with one empty payload under a limit of 0.
         @Test
         func anyPayloadsInAnyChunksComeOutTheSame() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["a read ends inside a length prefix", "an empty payload"],
+                    deepRuns: ["the encoder's limit is the largest payload's length"]
+                )
+            ) { tc in
                 let payloadBuffers = try #draw(
                     .array(of: FramingGenerators.payloadBuffers),
                     from: tc
@@ -281,7 +286,12 @@
         /// are all emitted first.
         @Test
         func oversizedLengthIsRejectedBeforeItsBody() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(everyRun: [
+                    "a read ends inside a length prefix",
+                    "complete frames before the oversized one",
+                ])
+            ) { tc in
                 let maximumLength = try #draw(FramingGenerators.exceedableLimits, from: tc)
                 let declaredLength = try #draw(
                     FramingGenerators.atLeast(maximumLength + 1),
@@ -336,7 +346,11 @@
         /// as the model does, a payload exactly at the limit included.
         @Test
         func encoderRejectsExactlyThePayloadsOverTheLimit() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(everyRun: [
+                    "over the limit", "the payload's length is the limit",
+                ])
+            ) { tc in
                 let payloadBuffer = try #draw(FramingGenerators.payloadBuffers, from: tc)
                 let byteCount = UInt32(payloadBuffer.payload.count)
                 let maximumLength = try #draw(FramingGenerators.limits(around: byteCount), from: tc)
@@ -373,7 +387,14 @@
         /// clean when it stops on a frame boundary.
         @Test
         func endOfFileIsTruncatedExactlyInsideAFrame() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: [
+                        "a read ends inside a length prefix", "ends inside a length prefix",
+                    ],
+                    deepRuns: ["ends inside a body", "ends on a frame boundary"]
+                )
+            ) { tc in
                 let payloads = try #draw(FramingGenerators.payloads, from: tc)
                 let streamEnding = try #draw(FramingGenerators.streamEndings, from: tc)
                 let largestPayload = UInt32(payloads.map(\.count).max() ?? 0)
@@ -422,7 +443,15 @@
         /// prefix has arrived fails this with one byte of a prefix.
         @Test
         func removalHandsOnTheUnfinishedFrame() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: [
+                        "a read ends inside a length prefix", "ends inside a body",
+                        "ends inside a length prefix",
+                    ],
+                    deepRuns: ["ends on a frame boundary"]
+                )
+            ) { tc in
                 let payloads = try #draw(FramingGenerators.payloads, from: tc)
                 let streamEnding = try #draw(FramingGenerators.streamEndings, from: tc)
                 let largestPayload = UInt32(payloads.map(\.count).max() ?? 0)

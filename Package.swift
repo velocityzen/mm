@@ -31,7 +31,7 @@ let package = Package(
         .package(url: "https://github.com/velocityzen/ProgramStatus.git", from: "0.4.0"),
         // Property-based tests. Test targets only, so the package's users
         // never fetch it.
-        .package(url: "https://github.com/velocityzen/hegel-swift.git", from: "0.51.1"),
+        .package(url: "https://github.com/velocityzen/hegel-swift.git", from: "0.51.6"),
     ],
     targets: [
         .target(
@@ -260,6 +260,7 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(
                     name: "HegelTesting",

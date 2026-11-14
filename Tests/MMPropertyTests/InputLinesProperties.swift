@@ -39,7 +39,23 @@
         /// in a 100-case run.
         @Test
         func readBoundariesLeaveTheLinesAlone() async throws {
-            try await property { tc in
+            try await property(
+                reaching: reachClaims(
+                    everyRun: ["CRLF line break", "empty line", "not UTF-8", "several reads"],
+                    deepRuns: [
+                        "CRLF split between reads", "a byte per read",
+                        "carriage return inside a line", "empty input",
+                        "input ends in a carriage return", "limit 0", "limit at the top of Int",
+                        "line at the limit", "line at the limit, then a carriage return",
+                        "line far past the limit", "line one past the limit", "negative limit",
+                        "no lines", "one read", "read ends before a continuation byte",
+                        "read failure after a partial line one past the limit",
+                        "read failure after an over-long partial line",
+                        "read failure between lines", "read failure inside a line",
+                        "too long before its line break was read", "unterminated last line",
+                    ]
+                )
+            ) { tc in
                 let source = try InputLinesSource.draw(tc)
                 for label in source.labels.sorted() {
                     try tc.event(label)
@@ -68,7 +84,12 @@
         /// once interrupted fails only here, in a 100-case run.
         @Test
         func anInterruptEndsTheLinesAtOnce() async throws {
-            try await property { tc in
+            try await property(
+                reaching: reachClaims(everyRun: [
+                    "interrupted after the last line", "interrupted before the first line",
+                    "interrupted between lines",
+                ])
+            ) { tc in
                 let source = try InputLinesSource.draw(tc)
                 let taken = try #draw(Gen<Int>.int(in: 0...source.expected.count), from: tc)
                 if taken == 0 {

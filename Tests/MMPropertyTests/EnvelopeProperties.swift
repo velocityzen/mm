@@ -419,7 +419,7 @@
         }
     }
 
-    @Suite("Envelope properties", .hegel)
+    @Suite("Envelope properties", .hegel, .offTheCooperativePool)
     struct EnvelopeProperties {
         /// Every kind encodes to the layout the spec's table gives it, with
         /// each integer and header at its narrowest, and decodes back to
@@ -430,7 +430,15 @@
         /// this, though decoding still takes it back.
         @Test
         func everyKindRoundTrips() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: [],
+                    deepRuns: [
+                        "a nil slot that comes back absent", "cancel", "credit", "end", "item",
+                        "request", "response", "stop",
+                    ]
+                )
+            ) { tc in
                 let envelope = try #draw(EnvelopeGenerators.envelopes, from: tc)
                 try tc.event(kindNames[tag(of: envelope)])
                 if normalized(envelope) != envelope {
@@ -463,7 +471,23 @@
         /// instead of failing.
         @Test
         func decodingFollowsTheTable() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["decoded", "failed with invalidArity", "trailing elements"],
+                    deepRuns: [
+                        "a u32 field out of range", "an error with trailing or missing elements",
+                        "bytes after the envelope", "cancel", "cancel trailing elements tolerated",
+                        "credit", "end", "end trailing elements tolerated",
+                        "every element in any width", "failed with decodingFailed",
+                        "failed with numberOutOfRange", "failed with unknownEnvelope", "item",
+                        "item trailing elements rejected", "missing elements", "request",
+                        "request trailing elements rejected", "request trailing elements tolerated",
+                        "response", "response an error with trailing or missing elements tolerated",
+                        "response trailing elements rejected", "stop",
+                        "stop trailing elements rejected",
+                    ]
+                )
+            ) { tc in
                 let decodeCase = try #draw(EnvelopeGenerators.decodeCases, from: tc)
                 try tc.event(decodeCase.kind)
                 try tc.event(decodeCase.variation.label)
@@ -493,7 +517,17 @@
         /// through fails this.
         @Test
         func encodingValidatesRawSlots() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["a slot with bytes after its value", "failed with encodingFailed"],
+                    deepRuns: [
+                        "a corrupted value", "a strict prefix of a value",
+                        "a value and bytes after it", "a value with 0xc1 inserted", "a whole value",
+                        "any bytes", "decoded", "error payload", "failed with nestingTooDeep",
+                        "item", "params", "result",
+                    ]
+                )
+            ) { tc in
                 let slot = try #draw(PackGenerators.inputs, from: tc)
                 let place = try #draw(Gen<SlotPlace>.element(of: SlotPlace.allCases), from: tc)
                 let maxDepth = try #draw(PackGenerators.nestingLimits, from: tc)
@@ -547,7 +581,15 @@
         /// and a decoded envelope re-encodes to bytes that decode to it.
         @Test
         func decodedEnvelopesReencode() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: [
+                        "a corrupted envelope", "a strict prefix of an envelope",
+                        "failed with truncated", "failed with typeMismatch",
+                    ],
+                    deepRuns: ["any bytes", "decoded", "failed with unknownEnvelope"]
+                )
+            ) { tc in
                 let envelope = try #draw(EnvelopeGenerators.envelopes, from: tc)
                 let bytes = wireForm(of: envelope).narrowest
                 let input = try #draw(

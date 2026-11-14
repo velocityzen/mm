@@ -199,4 +199,49 @@ extension MMPackReader {
     public mutating func read<Value: Decodable>(_ type: Value.Type, depth: Int) throws -> Value {
         try self.readDecodable(type, depth: depth)
     }
+
+    /// Reads the value under `key` through `readValue`. A `DecodingError`
+    /// it throws gets `key` in front of its coding path, as through
+    /// `Decodable`, where each keyed container adds its key: so the error
+    /// names the fields leading to the failure from the decoded value
+    /// down. Only a `Decodable` conformance throws one, which reads with a
+    /// path starting at its own value; a read that succeeds costs nothing
+    /// more.
+    @inlinable
+    public mutating func readField<Key: CodingKey, Value>(
+        _ key: Key,
+        _ readValue: (inout Self) throws -> Value
+    ) throws -> Value {
+        do {
+            return try readValue(&self)
+        } catch let error as DecodingError {
+            throw error.underKey(key)
+        }
+    }
+}
+
+extension DecodingError {
+    /// The same error with `key` in front of its coding path.
+    @usableFromInline
+    func underKey(_ key: any CodingKey) -> DecodingError {
+        func underKey(_ context: Context) -> Context {
+            Context(
+                codingPath: [key] + context.codingPath,
+                debugDescription: context.debugDescription,
+                underlyingError: context.underlyingError
+            )
+        }
+        switch self {
+            case .typeMismatch(let type, let context):
+                return .typeMismatch(type, underKey(context))
+            case .valueNotFound(let type, let context):
+                return .valueNotFound(type, underKey(context))
+            case .keyNotFound(let missing, let context):
+                return .keyNotFound(missing, underKey(context))
+            case .dataCorrupted(let context):
+                return .dataCorrupted(underKey(context))
+            @unknown default:
+                return self
+        }
+    }
 }

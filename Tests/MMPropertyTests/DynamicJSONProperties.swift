@@ -7,7 +7,7 @@
     import MMSchema
     import Testing
 
-    @Suite("Dynamic JSON properties", .hegel)
+    @Suite("Dynamic JSON properties", .hegel, .offTheCooperativePool)
     struct DynamicJSONProperties {
         /// A canonical value rendered as JSON text, compact or pretty, parses
         /// and validates back to itself: bytes through base64, a whole double
@@ -30,7 +30,27 @@
         /// negative zero each turn up in only a few percent of cases.
         @Test
         func renderedValuesParseAndValidateBack() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: [
+                        "a field name beyond ASCII", "an optional field left out", "validated back",
+                    ],
+                    deepRuns: [
+                        "a bool", "a date", "a datetime", "a definition inside itself", "a double",
+                        "a double parsed as a double", "a field name with a control character",
+                        "a field name with a quote or a backslash", "a float",
+                        "a later enumeration case", "a map keyed by integers",
+                        "a map keyed by unsigned integers", "a negative map key",
+                        "a reference chain", "a string", "a timestamp", "a uint",
+                        "a union case with fields", "a union case without fields",
+                        "a value four levels deep", "an array with items", "an empty array",
+                        "an empty map", "an empty structure", "an enumeration case beyond ASCII",
+                        "an enumeration case with a control character", "an int",
+                        "an optional field set to null", "bytes", "null in an optional slot",
+                        "the first enumeration case",
+                    ]
+                )
+            ) { tc in
                 var policy = try #draw(
                     SchemaValueGenerators.policies(unknownSlots: false),
                     from: tc
@@ -105,7 +125,15 @@
             // What a parser might trim from the start of a string: a byte
             // order mark either way round, whitespace and NUL.
             let leading: [String] = ["\u{FEFF}", "\u{FFFE}", " ", "\t", "\u{0}"]
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["a control character"],
+                    deepRuns: [
+                        "a leading byte order mark", "a quote or a backslash",
+                        "a scalar past the Basic Multilingual Plane", "an empty string",
+                    ]
+                )
+            ) { tc in
                 var text = try #draw(
                     Gen<String>.oneOf(
                         Gen<[Unicode.Scalar]>.array(of: .element(of: awkward), count: 0...8)
@@ -168,7 +196,14 @@
         /// that need either.
         @Test
         func bytesRenderAsStandardBase64() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: [
+                        "length 0 past a multiple of three", "length 1 past a multiple of three",
+                    ],
+                    deepRuns: ["length 2 past a multiple of three"]
+                )
+            ) { tc in
                 let bytes = try #draw(Gen<[UInt8]>.bytes(), from: tc)
                 try tc.event("length \(bytes.count % 3) past a multiple of three")
                 #expect(

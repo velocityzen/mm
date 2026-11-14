@@ -562,7 +562,7 @@
         }
     }
 
-    @Suite("Date and time properties", .hegel)
+    @Suite("Date and time properties", .hegel, .offTheCooperativePool)
     struct DateProperties {
         /// Every date, datetime and timestamp renders as its canonical text
         /// (wire specification, section 6.4) and parses back to itself.
@@ -571,7 +571,12 @@
         /// or rejecting a +18:00 offset, fails here.
         @Test
         func everyValueRoundTripsThroughText() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["a date", "a timestamp"],
+                    deepRuns: ["a datetime", "a leap second", "offset +18:00", "offset -18:00"]
+                )
+            ) { tc in
                 let kind = try #draw(Gen<DateKind>.element(of: DateKind.allCases), from: tc)
                 let fields = try #draw(DateGenerators.validFields, from: tc)
                 try tc.event(kind.rawValue)
@@ -594,7 +599,19 @@
         /// here.
         @Test
         func parsingFollowsTheGrammar() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: [
+                        "a timestamp", "failed with invalidComponent", "failed with malformedText",
+                        "no break",
+                    ],
+                    deepRuns: [
+                        "a character after", "a character before", "a date", "a datetime",
+                        "a digit that is not ASCII", "a missing digit", "a separator dropped",
+                        "a separator swapped", "an extra digit", "parsed",
+                    ]
+                )
+            ) { tc in
                 let text = try #draw(DateGenerators.texts, from: tc)
                 let valid = isValid(text.fields, as: text.kind)
                 let parsed = parseDate(text.text, as: text.kind)
@@ -636,7 +653,12 @@
         /// `dayArithmeticInverts`.
         @Test
         func dayNumbersRoundTrip() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["a day number in the wire range"],
+                    deepRuns: ["a day number past it"]
+                )
+            ) { tc in
                 let fields = try #draw(DateGenerators.dates(in: 0...9999), from: tc)
                 let number = try #draw(DateGenerators.dayNumbers, from: tc)
                 let date = try #require(
@@ -661,7 +683,12 @@
         /// `d` back, and the result is later exactly when `n` is positive.
         @Test
         func dayArithmeticInverts() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["lands in the wire range"],
+                    deepRuns: ["lands past it"]
+                )
+            ) { tc in
                 let fields = try #draw(DateGenerators.dates(in: 0...9999), from: tc)
                 let date = try #require(
                     MMDate(year: fields.year, month: fields.month, day: fields.day)
@@ -697,7 +724,18 @@
         /// near Int.min.
         @Test
         func anyCountGivesAValueOrNil() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: [
+                        "added", "lands in the wire range", "lands past it", "nanosecond",
+                        "subtracted",
+                    ],
+                    deepRuns: [
+                        "Int.min subtracted, landing in the range", "day", "day number", "hour",
+                        "minute", "month", "second", "year",
+                    ]
+                )
+            ) { tc in
                 let fields = try #draw(DateGenerators.validFields, from: tc)
                 // Nanoseconds get a branch of their own: they are the only
                 // component whose counts at Int's ends land inside the range.
@@ -762,7 +800,16 @@
         /// (31 January plus a month) fails here.
         @Test
         func calendarAgreesWithFoundation() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: [],
+                    deepRuns: [
+                        "a date's day number", "adding days", "adding hours", "adding minutes",
+                        "adding months", "adding seconds", "adding years", "past 9999",
+                        "the date of a day number", "two timestamps' instants",
+                    ]
+                )
+            ) { tc in
                 let operation = try #draw(
                     Gen<CalendarOperation>.element(of: CalendarOperation.allCases),
                     from: tc

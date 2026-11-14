@@ -35,6 +35,20 @@
         }
     }
 
+    /// A hand-written external type whose `Decodable` refuses some values: a
+    /// raw value naming no case fails with a `DecodingError`, which carries
+    /// the coding path down to it.
+    enum GeneratedCodingSeal: String, CaseIterable, Codable, Hashable, Sendable,
+        SchemaDescribable
+    {
+        case intact
+        case broken
+
+        static var schema: TypeSchema {
+            .enumeration(cases: [.init(name: "intact"), .init(name: "broken")])
+        }
+    }
+
     /// Every field shape the macros generate code for, plus the two they hand to
     /// `Codable` (maps and external types).
     enum Catalog: MethodNamespace {
@@ -78,6 +92,12 @@
                     Field("parts", .array(.reference("Shipment")))
                     Field("box") {
                         Field("label", .string)
+                    }
+                }
+                Case("held") {
+                    Field("duties", .map(key: .int, value: .string))
+                    Field("customs") {
+                        Field("seal", GeneratedCodingSeal.self)
                     }
                 }
             }
@@ -158,6 +178,13 @@
             .element(of: [127, 128, 255, 256, 65_535, 65_536, 1 << 32])
         )
 
+        /// An unsigned wire map key goes up to `Int64.max`, the range of a
+        /// map key, and no further.
+        static let unsignedKey: Gen<UInt64> = .oneOf(
+            .integer(in: 0...UInt64(Int64.max)),
+            .element(of: [0, 127, 128, 255, 256, 65_535, 65_536, 1 << 32, UInt64(Int64.max)])
+        )
+
         /// A bin8 holds up to 255 bytes.
         var bytes: Gen<MMBytes> {
             self.sometimes(.bytes(count: 255...256), otherwise: Gen<[UInt8]>.bytes()).map {
@@ -226,7 +253,7 @@
                     note: tc.draw(.optional(self.text)),
                     grid: tc.draw(self.list(of: self.list(of: Gen<Int?>.optional(Self.integer)))),
                     lookup: tc.draw(self.map(keys: self.text, values: Self.integer)),
-                    serials: tc.draw(self.map(keys: Self.unsigned, values: self.text)),
+                    serials: tc.draw(self.map(keys: Self.unsignedKey, values: self.text)),
                     released: tc.draw(Self.date),
                     updated: tc.draw(.optional(Self.dateTime)),
                     stamped: tc.draw(.optional(Self.timestamp)),
@@ -256,7 +283,8 @@
                             tracking: tc.draw(.optional(self.bytes)),
                             condition: tc.draw(Self.condition)
                         )
-                    }
+                    },
+                    self.held
                 ),
                 branch: { parts in
                     Gen { tc in
@@ -267,6 +295,16 @@
                     }
                 }
             )
+        }
+
+        /// A held shipment: duties under any integer keys, and either seal.
+        var held: Gen<Catalog.Shipment> {
+            Gen { tc in
+                try .held(
+                    duties: tc.draw(self.map(keys: Self.integer, values: self.text)),
+                    customs: .init(seal: tc.draw(.allCases))
+                )
+            }
         }
 
         var putRequest: Gen<Catalog.PutRequest> {
@@ -330,6 +368,9 @@
                     for part in parts {
                         self.add(part, depth: depth + 1)
                     }
+                case .held(let duties, _):
+                    self.strings += duties.values.map(\.utf8.count)
+                    self.collections.append(duties.count)
                 default:
                     break
             }

@@ -59,17 +59,11 @@ extension SchemaValue {
         path: String = ""
     ) -> Result<SchemaValue, SchemaValueError> {
         let resolved: TypeSchema
-        switch resolver.resolve(schema) {
+        switch Self.resolved(schema, resolver: resolver, path: path) {
             case .success(let followed):
                 resolved = followed
-            case .failure(.unresolved(let name)):
-                return .failure(
-                    SchemaValueError(path: path, problem: "unresolved type reference '\(name)'")
-                )
-            case .failure(.cycle(let name)):
-                return .failure(
-                    SchemaValueError(path: path, problem: "cyclic type reference '\(name)'")
-                )
+            case .failure(let error):
+                return .failure(error)
         }
         switch resolved {
             case .optional(let wrapped):
@@ -137,9 +131,17 @@ extension SchemaValue {
                             against: element, resolver: resolver, path: "\(path)[\(index)]")
                     }
                     .map { .array($0) }
-            case .map(let keySchema, let valueSchema):
+            case .map(let declaredKeySchema, let valueSchema):
                 guard case .object(let members) = self else {
                     return self.mismatch(path, expected: "object (wire map)")
+                }
+                // The key schema resolves as the request encoder resolves it.
+                let keySchema: TypeSchema
+                switch Self.resolved(declaredKeySchema, resolver: resolver, path: path) {
+                    case .success(let followed):
+                        keySchema = followed
+                    case .failure(let error):
+                        return .failure(error)
                 }
                 if let duplicate = firstDuplicate(members.map(\.name)) {
                     return .failure(
@@ -317,8 +319,8 @@ extension SchemaValue {
     /// The first key of an integer-keyed map that names the same integer as
     /// an earlier one, with that earlier key. `"5"`, `"05"` and `"+5"` are
     /// distinct text but one wire key, and a wire map keeps only one entry
-    /// per key. Keys parse as `validateMapKey` reads them; a key that does
-    /// not parse is left for it to refuse.
+    /// per key. Only keys `integerMapKey` takes count; `validateMapKey`
+    /// refuses the rest.
     private static func firstRepeatedIntegerKey(
         _ names: [String],
         _ keySchema: TypeSchema
@@ -327,7 +329,9 @@ extension SchemaValue {
             case .int, .uint:
                 var seen: [Int64: String] = [:]
                 for name in names {
-                    guard let number = Int64(name) else { continue }
+                    guard case .number(let number) = integerMapKey(name, keySchema) else {
+                        continue
+                    }
                     if let earlier = seen[number] { return (name, earlier) }
                     seen[number] = name
                 }
@@ -337,8 +341,48 @@ extension SchemaValue {
         }
     }
 
+    /// An integer map key read from its decimal text: the wire integer it
+    /// names, or why it names none.
+    private enum IntegerMapKey {
+        case number(Int64)
+        case refused(problem: String)
+    }
+
+    /// Reads an `.int` or `.uint` map key. A wire map key is a 64-bit
+    /// signed integer: a `CodingKey`'s integer is an `Int`, and the decoder
+    /// skips an integer key past `Int64`. So an unsigned key goes up to
+    /// `Int64.max` only, and never below zero; `-0` is zero.
+    private static func integerMapKey(_ name: String, _ keySchema: TypeSchema) -> IntegerMapKey {
+        guard let number = Int64(name) else {
+            return .refused(
+                problem: isIntegerText(name)
+                    ? "key is out of range: a wire map key is a 64-bit signed integer"
+                    : "key is not an integer"
+            )
+        }
+        if keySchema == .uint && number < 0 {
+            return .refused(problem: "key is negative, and the map's keys are unsigned")
+        }
+        return .number(number)
+    }
+
+    /// Whether `text` has the form `Int64(_:)` reads, at any size: an
+    /// optional sign, then one or more ASCII digits.
+    private static func isIntegerText(_ text: String) -> Bool {
+        var digits = Substring(text).utf8
+        if let sign = digits.first, sign == UInt8(ascii: "+") || sign == UInt8(ascii: "-") {
+            digits = digits.dropFirst()
+        }
+        return !digits.isEmpty
+            && digits.allSatisfy { UInt8(ascii: "0") <= $0 && $0 <= UInt8(ascii: "9") }
+    }
+
     /// JSON keys are strings; integer-keyed wire maps take their keys as
     /// decimal text.
+    /// Validates one map key against the map's resolved key schema: any
+    /// text for `.string`, a decimal integer for `.int` and `.uint`, and a
+    /// case name for an enumeration. A key of any other kind has no wire map
+    /// key form, and under `.unknown` the key's form is unknown.
     private static func validateMapKey(
         _ name: String,
         against keySchema: TypeSchema,
@@ -348,13 +392,72 @@ extension SchemaValue {
             case .string:
                 return .success(())
             case .int, .uint:
-                return Int64(name) != nil
-                    ? .success(())
-                    : .failure(SchemaValueError(path: path, problem: "key is not an integer"))
+                switch integerMapKey(name, keySchema) {
+                    case .number:
+                        return .success(())
+                    case .refused(let problem):
+                        return .failure(SchemaValueError(path: path, problem: problem))
+                }
+            case .enumeration(let cases):
+                guard cases.contains(where: { $0.name == name }) else {
+                    let known = cases.map(\.name).joined(separator: ", ")
+                    return .failure(
+                        SchemaValueError(path: path, problem: "key is not one of: \(known)")
+                    )
+                }
+                return .success(())
             default:
                 return .failure(
                     SchemaValueError(
-                        path: path, problem: "unsupported map key schema for dynamic values")
+                        path: path,
+                        problem:
+                            "unsupported map key schema for dynamic values: \(Self.kindName(keySchema)) can't be a map key"
+                    )
+                )
+        }
+    }
+
+    /// A schema's kind in words, for a map key schema that has no wire map
+    /// key form.
+    private static func kindName(_ schema: TypeSchema) -> String {
+        switch schema {
+            case .bool: return "a bool"
+            case .int: return "an int"
+            case .uint: return "a uint"
+            case .float: return "a float"
+            case .double: return "a double"
+            case .string: return "a string"
+            case .bytes: return "bytes"
+            case .date: return "a date"
+            case .datetime: return "a datetime"
+            case .timestamp: return "a timestamp"
+            case .optional: return "an optional"
+            case .array: return "an array"
+            case .map: return "a map"
+            case .structure: return "a structure"
+            case .enumeration: return "an enumeration"
+            case .union: return "a union"
+            case .reference(let name): return "a reference to '\(name)'"
+            case .unknown: return "an unknown shape"
+        }
+    }
+
+    /// `schema` with references followed, or why it has no such form.
+    private static func resolved(
+        _ schema: TypeSchema,
+        resolver: TypeResolver,
+        path: String
+    ) -> Result<TypeSchema, SchemaValueError> {
+        switch resolver.resolve(schema) {
+            case .success(let followed):
+                return .success(followed)
+            case .failure(.unresolved(let name)):
+                return .failure(
+                    SchemaValueError(path: path, problem: "unresolved type reference '\(name)'")
+                )
+            case .failure(.cycle(let name)):
+                return .failure(
+                    SchemaValueError(path: path, problem: "cyclic type reference '\(name)'")
                 )
         }
     }

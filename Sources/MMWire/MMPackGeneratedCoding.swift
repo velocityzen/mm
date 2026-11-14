@@ -296,7 +296,9 @@ struct MPGeneratedReader: MMPackReader {
     }
 
     /// Decodes from the value's exact slice, as a keyed container hands one
-    /// to `Decodable`, so the conformance cannot read past its value.
+    /// to `Decodable`, so the conformance cannot read past its value. The
+    /// coding path of its errors starts at the value; generated code puts
+    /// the keys above it in front (`readField`).
     mutating func readDecodable<Value: Decodable>(_ type: Value.Type, depth: Int) throws -> Value {
         let slice = try self.buffer.sliceMessagePackValue(currentDepth: depth, cap: self.cap).get()
         return try MPDecodingState.decode(type, from: slice, depth: depth, cap: self.cap)

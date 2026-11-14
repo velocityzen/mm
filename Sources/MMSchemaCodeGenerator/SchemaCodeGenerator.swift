@@ -1808,7 +1808,8 @@ private func nestedStructures(in fields: [ParsedField]) -> [(name: String, field
 /// decode accepts what synthesized `Decodable` accepts through
 /// `MMPackDecoder`: the whole map is walked and checked first, the first
 /// occurrence of a key wins, and a field is found under its integer key, else
-/// under its name.
+/// under its name. A `DecodingError` from a map or an external type names the
+/// coding path `Decodable` gives it (see `mmPackReadField`).
 private func mmPackStructMembers(_ keyed: [(field: ParsedField, key: Int)]) -> [String] {
     var lines: [String] = []
     lines.append("public func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {")
@@ -1827,7 +1828,9 @@ private func mmPackStructMembers(_ keyed: [(field: ParsedField, key: Int)]) -> [
         return lines
     }
     lines.append(
-        contentsOf: mmPackDecodeFieldMap(keyed) { _, field in "self.\(field.name)" }
+        contentsOf: mmPackDecodeFieldMap(keyed, codingKeys: "CodingKeys") { _, field in
+            "self.\(field.name)"
+        }
             .map { "    \($0)" })
     lines.append("}")
     return lines
@@ -1867,10 +1870,12 @@ private func mmPackEncodeFieldMap(
 }
 
 /// Reads the field map sitting at `depth` and leaves the reader just past
-/// it; `target` spells where field `index`'s value is stored. `keyed` is
-/// never empty.
+/// it; `target` spells where field `index`'s value is stored, and
+/// `codingKeys` names the `CodingKey` type the map's `Codable` decodes its
+/// fields with. `keyed` is never empty.
 private func mmPackDecodeFieldMap(
     _ keyed: [(field: ParsedField, key: Int)],
+    codingKeys: String,
     target: (Int, ParsedField) -> String
 ) -> [String] {
     var lines: [String] = []
@@ -1901,17 +1906,46 @@ private func mmPackDecodeFieldMap(
         if case .optional = field.type {
             lines.append("if let position = \(position) {")
             lines.append("    reader.seek(to: position)")
-            lines.append("    \(target(index, field)) = \(mmPackRead(field.type, level: 1))")
+            lines.append(
+                "    \(target(index, field)) = \(mmPackReadField(field, codingKeys: codingKeys))"
+            )
             lines.append("} else {")
             lines.append("    \(target(index, field)) = nil")
             lines.append("}")
         } else {
             lines.append("try reader.seek(toRequiredField: \(position), key: \(key))")
-            lines.append("\(target(index, field)) = \(mmPackRead(field.type, level: 1))")
+            lines.append(
+                "\(target(index, field)) = \(mmPackReadField(field, codingKeys: codingKeys))"
+            )
         }
     }
     lines.append("reader.seek(to: end)")
     return lines
+}
+
+/// An expression reading `field`, a field of a map whose `Codable` decodes
+/// it under `codingKeys`. A read that can reach a `Decodable` conformance
+/// goes through `readField`, which puts the field's key in front of the
+/// coding path of a `DecodingError`, as the keyed container does through
+/// `Decodable`.
+private func mmPackReadField(_ field: ParsedField, codingKeys: String) -> String {
+    let read = mmPackRead(field.type, level: 1)
+    guard mmPackReadReachesDecodable(field.type) else { return read }
+    return "try reader.readField(\(codingKeys).\(field.name)) { reader in \(read) }"
+}
+
+/// Whether reading a value of `type` can reach a `Decodable` conformance,
+/// the only code that throws a `DecodingError`: maps and external types
+/// read through theirs, and a named type's fields can hold either.
+private func mmPackReadReachesDecodable(_ type: ParsedType) -> Bool {
+    switch type {
+        case .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp:
+            return false
+        case .optional(let wrapped), .array(let wrapped):
+            return mmPackReadReachesDecodable(wrapped)
+        case .map, .structure, .reference, .external:
+            return true
+    }
 }
 
 /// The members giving a generated enum its MessagePack code: its raw value as
@@ -2199,7 +2233,9 @@ private func mmPackUnionMembers(
             continue
         }
         lines.append("            try reader.seek(toRequiredField: fieldsAtKey ?? fieldsAtName, key: 1)")
-        lines.append("            self = try Self.mmPack\(capitalizedFirst(unionCase.name))(&reader, depth: depth + 1)")
+        lines.append(
+            "            self = try reader.readField(CodingKeys.fields) { reader in try Self.mmPack\(capitalizedFirst(unionCase.name))(&reader, depth: depth + 1) }"
+        )
     }
     lines.append("        default:")
     lines.append("            self = .unknown")
@@ -2213,9 +2249,12 @@ private func mmPackUnionMembers(
         for (index, (field, _)) in keyed.enumerated() {
             lines.append("    let field\(index): \(swiftType(field.type))")
         }
-        lines.append(
-            contentsOf: mmPackDecodeFieldMap(keyed) { index, _ in "field\(index)" }
-                .map { "    \($0)" })
+        let fieldMap = mmPackDecodeFieldMap(
+            keyed,
+            codingKeys: unionCase.codingKeysName,
+            target: { index, _ in "field\(index)" }
+        )
+        lines.append(contentsOf: fieldMap.map { "    \($0)" })
         let values = keyed.enumerated().map { index, entry in "\(entry.field.name): field\(index)" }
         lines.append("    return .`\(unionCase.name)`(\(values.joined(separator: ", ")))")
         lines.append("}")

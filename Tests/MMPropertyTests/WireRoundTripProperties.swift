@@ -162,12 +162,17 @@
         }
     }
 
-    @Suite("Wire round-trip properties", .hegel)
+    @Suite("Wire round-trip properties", .hegel, .offTheCooperativePool)
     struct WireRoundTripProperties {
         /// Any fixture decodes back to itself, float bits included.
         @Test
         func fixtureRoundTrips() throws {
-            try property { tc in
+            try property(
+                reaching: reachClaims(
+                    everyRun: ["a canonical integer key"],
+                    deepRuns: ["a non-canonical integer key"]
+                )
+            ) { tc in
                 let fixture = try #draw(WireGenerators.fixture, from: tc)
                 try recordIntegerLookingKeys(fixture.stringMap.keys, in: tc)
                 let encoded = try MMPackEncoder().encode(fixture).get()

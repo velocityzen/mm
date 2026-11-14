@@ -648,7 +648,29 @@
         /// that ignores its earlier cancellation, fails here.
         @Test
         func tableAgreesWithItsModel() async throws {
-            try await property { tc in
+            try await property(
+                reaching: reachClaims(
+                    everyRun: [
+                        "cancel: nothing to cancel", "closed a second time",
+                        "closed with callers suspended", "closed with live streams",
+                        "closed with reservations parked", "complete: dropped",
+                        "complete: retired a stream", "register: cancelled before suspending",
+                        "register: suspended", "reserve: refused at the cap",
+                        "reserve: refused, closed", "retire: retired a stream",
+                        "writer waiter: cancelled before registering", "writer waiter: parked",
+                    ],
+                    deepRuns: [
+                        "abandon: claimed a parked outcome", "abandon: removed a reservation",
+                        "cancel: removed a reservation", "cancel: resumed a caller",
+                        "closed with writer waiters parked", "complete: parked",
+                        "complete: resumed a caller", "install a stream: claimed a parked terminal",
+                        "install a stream: live", "register: claimed a parked outcome",
+                        "reserve: skipped live ids", "reserve: took UInt32.max",
+                        "writer waiter: cancelled while parked",
+                        "writer: installed with waiters parked",
+                    ]
+                )
+            ) { tc in
                 let start = try CallTableGenerators.start(tc)
                 var s = try await callTableMachine.run(tc, from: start)
                 try s.close(reason: .connectionClosed, tc)
