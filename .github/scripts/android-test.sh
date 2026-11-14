@@ -20,7 +20,11 @@ find "$bin" -maxdepth 1 \( -name '*-test-runner' -o -name '*.xctest' -o -name '*
     -exec cp -a {} "$stage" \;
 cp "$sdk/swift-resources/usr/lib/swift-$arch/android/"*.so "$stage"
 cp "$sdk/ndk-sysroot/usr/lib/$arch-linux-android/libc++_shared.so" "$stage"
-runners="$(cd "$stage" && ls -1 | grep -E -e '-test-runner$' -e '\.xctest$')"
+# MMPropertyTests is empty here (Hegel runs on macOS and Linux only; see
+# Package.swift), and a runner with no tests exits with
+# EXIT_NO_TESTS_FOUND, so it does not run.
+runners="$(cd "$stage" && ls -1 | grep -E -e '-test-runner$' -e '\.xctest$' |
+    grep -v -x 'MMPropertyTests-test-runner' || true)"
 if [ -z "$runners" ]; then
     echo "::error::No test runners in $bin."
     exit 1

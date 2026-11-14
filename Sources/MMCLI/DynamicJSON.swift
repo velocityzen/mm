@@ -37,25 +37,49 @@ extension MMCLIDynamicTree {
     /// yielded. Malformed input is a usage error, thrown as
     /// swift-argument-parser's `ValidationError`.
     public static func parse(jsonText: String) throws -> MMCLIDynamicTree {
+        let data = Data(jsonText.utf8)
         do {
-            return try JSONDecoder().decode(JSONTree.self, from: Data(jsonText.utf8)).tree
+            return try JSONDecoder().decode(JSONTree.self, from: data).tree
+        } catch let error as NumberOutOfRange {
+            throw ValidationError(error.message)
         } catch let error as DecodingError {
-            throw ValidationError(Self.reason(error))
+            throw ValidationError(Self.reason(error, in: data))
         }
     }
 
-    /// Why JSON text did not parse: the parser's own message, which names
-    /// the line and column, or the path of a number too large for a double.
-    private static func reason(_ error: DecodingError) -> String {
+    /// Why JSON text did not parse: the parser's own message, which says
+    /// where it stopped.
+    ///
+    /// Apple's Foundation keeps that message as the underlying error, and it
+    /// names the line and column. swift-foundation elsewhere drops it, so
+    /// there `JSONSerialization` reads the text again, only for its message,
+    /// which names the character offset.
+    private static func reason(_ error: DecodingError, in data: Data) -> String {
         guard case .dataCorrupted(let context) = error else {
             return String(describing: error)
         }
-        guard let underlying = context.underlyingError else {
-            return context.debugDescription
+        if let underlying = context.underlyingError {
+            return Self.message(underlying)
         }
-        return ((underlying as NSError).userInfo[NSDebugDescriptionErrorKey] as? String)
-            ?? String(describing: underlying)
+        do {
+            _ = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        } catch {
+            return Self.message(error)
+        }
+        return context.debugDescription
     }
+
+    /// A Foundation parse error's own message.
+    private static func message(_ error: any Error) -> String {
+        ((error as NSError).userInfo[NSDebugDescriptionErrorKey] as? String)
+            ?? String(describing: error)
+    }
+}
+
+/// A number too large for a double. It is not a `DecodingError`, so `parse`
+/// tells it apart from a syntax error.
+private struct NumberOutOfRange: Error {
+    let message: String
 }
 
 /// One JSON value as a loose tree, decoded by trying each JSON kind in
@@ -110,9 +134,8 @@ private struct JSONTree: Decodable {
             // Not null, a boolean or a string, and no double or integer
             // holds it: a number too large for a double.
             let at = Self.pathText(value.codingPath)
-            throw DecodingError.dataCorruptedError(
-                in: value,
-                debugDescription: at.isEmpty
+            throw NumberOutOfRange(
+                message: at.isEmpty
                     ? "Number is too large for a double."
                     : "Number at \(at) is too large for a double."
             )

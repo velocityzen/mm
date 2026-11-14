@@ -565,7 +565,14 @@ struct DynamicJSONParseTests {
                 _ = try MMCLIDynamicTree.parse(jsonText: bad)
             }
         }
-        expectParseFailure(#"{"a":}"#, messageContains: "line 1, column 6")
+        // The message says where parsing stopped: Apple's Foundation names
+        // the line and column, and elsewhere JSONSerialization's message
+        // names the character offset.
+        #if canImport(Darwin)
+            expectParseFailure(#"{"a":}"#, messageContains: "line 1, column 6")
+        #else
+            expectParseFailure(#"{"a":}"#, messageContains: "around character 5")
+        #endif
     }
 
     @Test("a number too large for a double is refused with its path")
