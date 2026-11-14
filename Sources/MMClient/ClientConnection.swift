@@ -44,7 +44,7 @@ import NIOPosix
 /// scope for v1: a closed connection stays closed, and retry policy belongs
 /// to the application, driven by ``stateUpdates()``.
 public actor MMClientConnection {
-    typealias Writer = NIOAsyncChannelOutboundWriter<ByteBuffer>
+    typealias Writer = BatchingFrameWriter
 
     /// The outcome of the hello exchange, fixed for the connection's lifetime.
     public nonisolated let server: ServerInfo
@@ -396,21 +396,31 @@ public actor MMClientConnection {
             // The four blessed seams: this is the NIOAsyncChannel data plane.
             // The per-connection do/catch below is the only one on the path.
             try await self.channel.executeThenClose { inbound, outbound in
-                let waiters = self.calls.withLockedValue { $0.installWriter(outbound) }
+                // Every call and stream frame goes through one batching
+                // writer: concurrent callers share writes, and its stand-by
+                // task, a sibling of the inbound loop, writes what a
+                // cancelled caller leaves mid-write.
+                let writer = BatchingFrameWriter(outbound: outbound)
+                let waiters = self.calls.withLockedValue { $0.installWriter(writer) }
                 for waiter in waiters {
-                    waiter.resume(returning: .success(outbound))
+                    waiter.resume(returning: .success(writer))
                 }
-                // The inbound loop and the automatic schema verification run
-                // as structured siblings: verification rides the normal call
-                // path, so it needs this loop routing responses concurrently.
-                // The defer cancels a verification still in flight when the
-                // loop ends first — its pending call resumes `.cancelled` and
-                // the verdict resolves as skipped, so the implicit
-                // group-exit await can never park on a response that will
-                // never arrive.
+                // The inbound loop, the automatic schema verification and the
+                // writer's stand-by task run as structured siblings:
+                // verification rides the normal call path, so it needs this
+                // loop routing responses concurrently.
+                // The defer ends the stand-by task and cancels a verification
+                // still in flight when the loop ends first — its pending call
+                // resumes `.cancelled` and the verdict resolves as skipped, so
+                // the implicit group-exit await can never park on a response
+                // that will never arrive.
                 try await withThrowingTaskGroup(of: Void.self) { verifier in
                     verifier.addTask { await self.performAutoVerification() }
-                    defer { verifier.cancelAll() }
+                    verifier.addTask { await writer.standBy() }
+                    defer {
+                        writer.finish()
+                        verifier.cancelAll()
+                    }
                     for try await frame in inbound {
                         if let violation = await self.handleFrame(frame) {
                             terminal = violation
@@ -767,31 +777,32 @@ public actor MMClientConnection {
         as _: Response.Type
     ) async -> Result<Response, MMCallError> {
         let start = ContinuousClock.now
-        do {
-            // Seam adapter: writer backpressure suspends here; a throw means
-            // the channel is gone — or the task was cancelled mid-write.
-            try await writer.write(frame)
-        } catch is CancellationError {
-            // The writer's yield resumes with CancellationError when the
-            // awaiting task is cancelled while suspended on outbound
-            // backpressure (or was already cancelled); the connection is
-            // still alive then, so honor the documented cancellation
-            // contract (.cancelled, never .connectionClosed). A parked
-            // response wins over the write failure, same as the
-            // `cancel(msgid:)` path.
-            return self.calls.withLockedValue { $0.abandon(msgid: msgid) }
-                .map { parked in self.resolve(parked, as: Response.self, start: start) }
-                ?? .failure(.cancelled)
-        } catch {
-            // Any other throw means the channel is gone — but the terminal
-            // transition belongs to finish(): run() observes the same death
-            // and drives it, and finish's ordering guarantees a caller never
-            // sees its failure while `state` still reads `.connected`. So
-            // don't invent a `.connectionClosed` here — fall through and
-            // park: `register` claims the already-parked close failure when
-            // finish won the race, and finish resumes the park (state
-            // first) when it hasn't run yet. Answering directly from this
-            // path lost exactly that race on loaded CI runners.
+        // Writer backpressure suspends here when this call is the one
+        // writing; a call that queues behind another returns at once.
+        switch await writer.write(frame) {
+            case .success:
+                break
+            case .failure(.cancelled):
+                // The awaiting task was cancelled before its frame was
+                // written (already cancelled, or while suspended on outbound
+                // backpressure); the connection is still alive then, so honor
+                // the documented cancellation contract (.cancelled, never
+                // .connectionClosed). A parked response wins over the write
+                // failure, same as the `cancel(msgid:)` path.
+                return self.calls.withLockedValue { $0.abandon(msgid: msgid) }
+                    .map { parked in self.resolve(parked, as: Response.self, start: start) }
+                    ?? .failure(.cancelled)
+            case .failure(.channelClosed):
+                // The channel is gone — but the terminal transition belongs
+                // to finish(): run() observes the same death and drives it,
+                // and finish's ordering guarantees a caller never sees its
+                // failure while `state` still reads `.connected`. So don't
+                // invent a `.connectionClosed` here — fall through and park:
+                // `register` claims the already-parked close failure when
+                // finish won the race, and finish resumes the park (state
+                // first) when it hasn't run yet. Answering directly from this
+                // path lost exactly that race on loaded CI runners.
+                break
         }
         let outcome: CallTable.Outcome = await withParkedContinuation(
             register: { continuation in
@@ -860,7 +871,8 @@ public actor MMClientConnection {
             return false
         }
 
-        return (try? await writer.write(frame)) != nil
+        guard case .success = await writer.write(frame) else { return false }
+        return true
     }
 
     /// Opens a streaming call: encodes and sends the opening request (the normal
@@ -932,40 +944,42 @@ public actor MMClientConnection {
         inbound _: Inbound.Type,
         response _: Response.Type
     ) async -> ClientStreamState {
-        do {
-            try await writer.write(frame)
-        } catch is CancellationError {
-            // The task was cancelled mid-write; the connection is still
-            // alive. Reclaim the reservation (claiming a parked terminal if
-            // one somehow raced) and fail the handle locally.
-            let parked = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
-            let reason: MMCallError
-            switch parked {
-                case .some(.success(let slots)) where slots.error != nil:
-                    // A terminal raced in before the write failed: honor it.
-                    reason = .from(error: slots.error!)
-                case .some(.failure(let closeReason)):
-                    // The connection closed and parked the reservation as a failure.
-                    reason = closeReason
-                case .some(.success), .none:
-                    reason = .cancelled
-            }
-            return self.failedStream(
-                hasResponseStream: hasResponseStream,
-                hasRequestStream: hasRequestStream,
-                inbound: Inbound.self,
-                response: Response.self,
-                error: reason
-            )
-        } catch {
-            // Any other throw means the channel is gone — but the terminal
-            // transition belongs to finish(): run() observes the same death
-            // and drives it, and finish's ordering guarantees no handle
-            // fails while `state` still reads `.connected`. Fall through:
-            // the install below claims the parked close failure when finish
-            // won the race, and finish fails the terminal (state first)
-            // when it hasn't run yet — same discipline as the unary write
-            // path.
+        switch await writer.write(frame) {
+            case .success:
+                break
+            case .failure(.cancelled):
+                // The task was cancelled before its frame was written; the
+                // connection is still alive. Reclaim the reservation
+                // (claiming a parked terminal if one somehow raced) and fail
+                // the handle locally.
+                let parked = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
+                let reason: MMCallError
+                switch parked {
+                    case .some(.success(let slots)) where slots.error != nil:
+                        // A terminal raced in before the write failed: honor it.
+                        reason = .from(error: slots.error!)
+                    case .some(.failure(let closeReason)):
+                        // The connection closed and parked the reservation as a failure.
+                        reason = closeReason
+                    case .some(.success), .none:
+                        reason = .cancelled
+                }
+                return self.failedStream(
+                    hasResponseStream: hasResponseStream,
+                    hasRequestStream: hasRequestStream,
+                    inbound: Inbound.self,
+                    response: Response.self,
+                    error: reason
+                )
+            case .failure(.channelClosed):
+                // The channel is gone — but the terminal transition belongs
+                // to finish(): run() observes the same death and drives it,
+                // and finish's ordering guarantees no handle fails while
+                // `state` still reads `.connected`. Fall through: the install
+                // below claims the parked close failure when finish won the
+                // race, and finish fails the terminal (state first) when it
+                // hasn't run yet — same discipline as the unary write path.
+                break
         }
 
         // The open request is on the wire. Build the state with its wire sinks,

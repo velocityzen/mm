@@ -79,7 +79,7 @@ struct ResponseSlots: Sendable, Equatable {
 struct CallTable: Sendable {
     typealias Outcome = Result<ResponseSlots, MMCallError>
     typealias Continuation = CheckedContinuation<Outcome, Never>
-    typealias Writer = NIOAsyncChannelOutboundWriter<ByteBuffer>
+    typealias Writer = BatchingFrameWriter
     typealias WriterContinuation = CheckedContinuation<Result<Writer, MMCallError>, Never>
 
     enum Entry {

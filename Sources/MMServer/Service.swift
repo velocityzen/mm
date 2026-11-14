@@ -895,12 +895,17 @@ package struct ServerRuntime: Sendable {
                 connectionID: connectionID
             )
 
+            // The writer's stand-by task runs beside the request loop and
+            // ends once every handler has returned.
+            async let standingBy: Void = writer.standBy()
             await self.requestLoop(
                 frames: frames,
                 writer: writer,
                 context: context,
                 logger: logger
             )
+            writer.finish()
+            await standingBy
             // executeThenClose closes the channel fully once this body
             // returns, and a full close discards what the kernel has not
             // taken yet: a slow reader would lose the tail of the last

@@ -413,7 +413,9 @@
                 cap: cap,
                 msgids: try tc.pool(of: UInt32.self),
                 waiterIDs: try tc.pool(of: UInt64.self),
-                writer: NIOAsyncChannelOutboundWriter<ByteBuffer>.makeTestingWriter().0,
+                writer: BatchingFrameWriter(
+                    outbound: NIOAsyncChannelOutboundWriter<ByteBuffer>.makeTestingWriter().0
+                ),
                 next: next
             )
             run.table.nextMsgid = next

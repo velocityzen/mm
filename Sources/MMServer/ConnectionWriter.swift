@@ -2,6 +2,7 @@ import FP
 import MMWire
 import Metrics
 import NIOCore
+import Synchronization
 
 /// The connection's single outbound funnel, abstracted so the stream runtime
 /// and its wire seams depend on a protocol rather than the concrete
@@ -17,25 +18,41 @@ protocol WriterFunnel: Sendable {
 
 /// The single outbound funnel for one connection: every frame the server sends
 /// after the hello — handler responses, `tooManyInFlight` rejections, and
-/// stream frames — goes through this actor.
+/// stream frames — goes through it.
 ///
-/// ## Why an actor over the `NIOAsyncChannel` outbound writer
+/// ## Batched writes
 ///
-/// Actor isolation serializes envelope writes (concurrent handler tasks can
-/// never interleave partially), and `NIOAsyncChannelOutboundWriter.write`
-/// suspends while the channel is unwritable, so the socket's backpressure
-/// propagates to every producer. Nothing here buffers unboundedly: each
-/// producer is suspended *inside* its own `send` call until the channel
-/// accepts the frame, and the number of concurrent producers is itself
-/// bounded by the per-connection in-flight cap.
-actor ConnectionWriter: WriterFunnel {
-    private let outbound: NIOAsyncChannelOutboundWriter<ByteBuffer>
+/// Frames go through a ``BatchingFrameWriter``: a handler that finds nobody
+/// writing writes its frame and every frame other handlers queue meanwhile,
+/// a batch to one `write(contentsOf:)`, so frames never interleave and the
+/// outbound writer's lock and the hop to the event loop are paid once per
+/// batch, not once per frame. A handler that finds a write at work queues
+/// its frame and returns. Only the writing handler waits on the channel's
+/// backpressure; what the others queue is bounded by the per-connection
+/// in-flight cap and the streams' credit.
+///
+/// The connection runs ``standBy()`` beside its request loop, for the
+/// frames a cancelled handler leaves mid-write, and ends it with
+/// ``finish()`` once every handler has returned.
+final class ConnectionWriter: WriterFunnel {
+    private let frames: BatchingFrameWriter
     private let framesOut: Counter
-    private var closed = false
+    private let closed = Atomic(false)
 
     init(outbound: NIOAsyncChannelOutboundWriter<ByteBuffer>, framesOut: Counter) {
-        self.outbound = outbound
+        self.frames = BatchingFrameWriter(outbound: outbound)
         self.framesOut = framesOut
+    }
+
+    /// Writes the frames a cancelled handler leaves mid-write, for the
+    /// connection's lifetime; see ``BatchingFrameWriter/standBy()``.
+    func standBy() async {
+        await self.frames.standBy()
+    }
+
+    /// Ends ``standBy()``.
+    func finish() {
+        self.frames.finish()
     }
 
     /// Encodes and writes one envelope. Encode failure never touches the
@@ -43,31 +60,29 @@ actor ConnectionWriter: WriterFunnel {
     /// short-circuit with `.connectionClosed` — unless the sender was
     /// cancelled, which fails only that send.
     func send(_ envelope: MMEnvelope) async -> Result<Void, ServerError> {
-        guard !self.closed else {
+        guard !self.closed.load(ordering: .relaxed) else {
             return .failure(.connectionClosed)
         }
 
         return await envelope.encoded()
             .mapError { ServerError.encodingFailed($0) }
-            .flatMapAsync { @Sendable buffer in await self.write(buffer) }
+            .flatMapAsync { buffer in await self.write(buffer) }
     }
 
-    /// Seam adapter: the writer's untyped throw splits in two. The NIO writer
-    /// throws `CancellationError` when the *sending task* is cancelled — a
-    /// handler torn down by a CANCEL or a stream violation, mid-write — and
-    /// then the frame was not written but the channel is fine, so only this
-    /// send fails. Any other throw means the channel is gone, and the closed
-    /// latch makes every later send short-circuit.
+    /// The batching writer's two failures: a cancelled sender fails only
+    /// its own send, and the channel is fine; any other failure means the
+    /// channel is gone, and the closed latch makes every later send
+    /// short-circuit.
     private func write(_ buffer: ByteBuffer) async -> Result<Void, ServerError> {
-        await Result.fromAsync { @Sendable in try await self.outbound.write(buffer) }
-            .tap { self.framesOut.increment() }
-            .mapError(Self.writeFailure)
-            .tapError { failure in
-                if failure == .connectionClosed { self.closed = true }
-            }
-    }
-
-    private static func writeFailure(_ error: any Error) -> ServerError {
-        error is CancellationError ? .cancelled : .connectionClosed
+        switch await self.frames.write(buffer) {
+            case .success:
+                self.framesOut.increment()
+                return .success(())
+            case .failure(.cancelled):
+                return .failure(.cancelled)
+            case .failure(.channelClosed):
+                self.closed.store(true, ordering: .relaxed)
+                return .failure(.connectionClosed)
+        }
     }
 }
