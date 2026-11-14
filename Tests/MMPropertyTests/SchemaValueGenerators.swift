@@ -79,11 +79,13 @@
     enum SchemaValueGenerators {
         /// Names from a small pool, so duplicates, numerals (which the wire
         /// coders' integer-key rule treats apart), a union value's own member
-        /// names and canonically equal spellings (`é` precomposed and
-        /// decomposed) come up, or any text.
+        /// names, canonically equal spellings (`é` precomposed and
+        /// decomposed) and what JSON text must escape (a quote, a backslash
+        /// and control characters) come up, or any text.
         static let names: Gen<String> = .oneOf(
             .element(of: [
                 "a", "b", "case", "fields", "0", "5", "05", "\u{E9}", "e\u{301}", "",
+                "\"\\/", "\u{0}\u{8}\t\n\u{C}\r\u{1F}\u{7F}",
             ]),
             .string()
         )
@@ -103,15 +105,19 @@
 
         static let int64Edges: [Int64] = [0, 1, -1, .min, .max]
 
+        /// Unsigned integers at the ends of the range and either side of
+        /// `Int64.max`, with 2^63 + 1, the first past it that a double
+        /// cannot hold.
         static let uint64Edges: [UInt64] = [
-            0, 1, UInt64(Int64.max), UInt64(Int64.max) + 1, .max,
+            0, 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64(Int64.max) + 2, .max,
         ]
 
         /// Doubles at the edges of the format, NaN and the infinities
-        /// included.
+        /// included, and where whole doubles stop being exact integers
+        /// (2^53) and stop fitting `Int64` (2^63).
         static let doubleEdges: [Double] = [
             0, -0.0, .nan, .infinity, -.infinity, .leastNonzeroMagnitude,
-            .greatestFiniteMagnitude, 9_007_199_254_740_992,
+            .greatestFiniteMagnitude, 9_007_199_254_740_992, 0x1p63,
         ]
 
         /// A float slot holds a `Float`: the same edges at single precision.

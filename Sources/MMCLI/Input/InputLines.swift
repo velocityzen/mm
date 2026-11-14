@@ -44,8 +44,12 @@ public struct MMCLIInputLines: AsyncSequence, Sendable {
                     guard let line = self.remainder() else { return nil }
                     return self.checked(line)
                 }
-                // No line break yet: the pending line may still end in `\r`.
-                if self.buffer.count - self.start > self.maximumLength + 1 {
+                // No line break yet: the pending line may still end in `\r`,
+                // so it is too long once past `maximumLength + 1` bytes
+                // (written so that `Int.max` cannot overflow). No pending
+                // byte is no line, so nothing to refuse.
+                let pending = self.buffer.count - self.start
+                if pending > 0 && pending - 1 > self.maximumLength {
                     return self.fail(.lineTooLong(limit: self.maximumLength))
                 }
                 switch await self.base.next() {

@@ -106,7 +106,27 @@ private func expectValidationFailure(
     }
 }
 
-/// `JSONSerialization` yields object members in arbitrary order (documented
+private func expectParseFailure(
+    _ jsonText: String,
+    messageContains fragment: String,
+    sourceLocation: SourceLocation = #_sourceLocation
+) {
+    do {
+        let tree = try MMCLIDynamicTree.parse(jsonText: jsonText)
+        Issue.record(
+            "\(jsonText) parsed as \(tree), not a ValidationError containing '\(fragment)'",
+            sourceLocation: sourceLocation)
+    } catch let error as ValidationError {
+        #expect(
+            error.message.contains(fragment),
+            "got: \(error.message)",
+            sourceLocation: sourceLocation)
+    } catch {
+        Issue.record("expected ValidationError, got \(error)", sourceLocation: sourceLocation)
+    }
+}
+
+/// The parser yields object members in arbitrary order (documented
 /// on ``MMCLIDynamicTree/parse(jsonText:)``), so parse assertions compare
 /// with members sorted by name.
 private func normalized(_ tree: MMCLIDynamicTree) -> MMCLIDynamicTree {
@@ -467,6 +487,27 @@ struct DynamicJSONParseTests {
                 ]))
     }
 
+    @Test("a negative zero stays a negative double")
+    func negativeZero() throws {
+        for text in ["-0", "-0.0", "-0e0", "-0.000"] {
+            guard case .double(let number) = try MMCLIDynamicTree.parse(jsonText: text) else {
+                Issue.record("\(text) did not parse as a double")
+                continue
+            }
+            #expect(number == 0 && number.sign == .minus, "\(text) parsed as \(number)")
+        }
+        #expect(try MMCLIDynamicTree.parse(jsonText: "0") == .int(0))
+        let schema = TypeSchema.structure(fields: [.init(key: 0, name: "x", type: .double)])
+        let canonical = try MMCLIDynamicTree.parse(jsonText: #"{"x":-0.0}"#)
+            .validated(against: schema, resolver: TypeResolver([])).get()
+        guard case .object(let members) = canonical, case .double(let x)? = members.first?.value
+        else {
+            Issue.record("expected {x: double}, got \(canonical)")
+            return
+        }
+        #expect(x.sign == .minus)
+    }
+
     @Test("number kinds map to Int64, then UInt64, then Double")
     func numberKinds() throws {
         #expect(try MMCLIDynamicTree.parse(jsonText: "-2") == .int(-2))
@@ -497,13 +538,47 @@ struct DynamicJSONParseTests {
                 ]))
     }
 
+    @Test("a leading U+FEFF stays in strings and keys, escaped or not")
+    func leadingByteOrderMark() throws {
+        for text in [#""\ufeffx""#, "\"\u{FEFF}x\"", #""\ufeff\ufeffx""#] {
+            guard case .string(let back) = try MMCLIDynamicTree.parse(jsonText: text) else {
+                Issue.record("\(text) did not parse as a string")
+                continue
+            }
+            #expect(
+                back.unicodeScalars.first == "\u{FEFF}",
+                "\(text) parsed as \(back.debugDescription)")
+        }
+        #expect(
+            try MMCLIDynamicTree.parse(jsonText: #"{"\ufeffk":1}"#)
+                == .object([.init("\u{FEFF}k", .int(1))]))
+        // One before the document is not part of any string.
+        #expect(
+            try MMCLIDynamicTree.parse(jsonText: "\u{FEFF}{\"k\":1}")
+                == .object([.init("k", .int(1))]))
+    }
+
     @Test("malformed JSON is a ValidationError")
     func malformed() {
-        for bad in ["{", "tru", "1 2", #"{"a":}"#, #"{"a" 1}"#, "\"\\q\"", "01x", ""] {
+        for bad in ["{", "tru", "1 2", #"{"a":}"#, #"{"a" 1}"#, "\"\\q\"", "01x", "", "NaN"] {
             #expect(throws: ValidationError.self, "input: \(bad)") {
                 _ = try MMCLIDynamicTree.parse(jsonText: bad)
             }
         }
+        expectParseFailure(#"{"a":}"#, messageContains: "line 1, column 6")
+    }
+
+    @Test("a number too large for a double is refused with its path")
+    func numberOutOfRange() throws {
+        expectParseFailure("1e400", messageContains: "Number is too large for a double.")
+        expectParseFailure(
+            #"{"a":[1,-1e400]}"#,
+            messageContains: "Number at a[1] is too large for a double.")
+        expectParseFailure(
+            #"{"b":{"c":1e999}}"#,
+            messageContains: "Number at b.c is too large for a double.")
+        // One too small for a double rounds to zero.
+        #expect(try MMCLIDynamicTree.parse(jsonText: "1e-400") == .int(0))
     }
 
     @Test("Foundation's documented leniency: array trailing commas parse")

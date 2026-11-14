@@ -13,83 +13,119 @@ import MMSchema
 public typealias MMCLIDynamicTree = SchemaValue
 
 extension MMCLIDynamicTree {
-    /// Parses JSON text into a loose tree via `JSONSerialization`.
+    /// Parses JSON text into a loose tree via `JSONDecoder`.
     ///
     /// Looseness is fine because validation is schema-directed: the schema,
-    /// not the input syntax, decides every kind downstream. Two properties
+    /// not the input syntax, decides every kind downstream. Three properties
     /// still matter here:
     ///
-    /// - Booleans must not collapse into numbers. On Darwin
-    ///   `JSONSerialization` yields `NSNumber` for both, so booleans are
-    ///   detected via `CFGetTypeID(number) == CFBooleanGetTypeID()` (the
-    ///   toll-free-bridged `CFBoolean` check). corelibs-foundation does not
-    ///   expose CoreFoundation; there a boolean `NSNumber` is the one whose
-    ///   `objCType` is `"c"` (its JSON parser never produces another `"c"`
-    ///   number), with a plain `Bool` pattern as the fallback shape.
-    /// - Number kinds are best-effort exact: `Int64(exactly:)` first, then
-    ///   `UInt64(exactly:)` for the positive overflow band, else double.
-    ///   A whole-valued float literal (`1e3`) therefore parses as an integer;
-    ///   `validated` turns it back into `1000.0` wherever the schema says
-    ///   double.
+    /// - Booleans stay booleans: `JSONDecoder` decodes a `Bool` only from
+    ///   `true` or `false`, never from a number.
+    /// - Number kinds are best-effort exact: `Int64` first, then `UInt64`
+    ///   for the positive overflow band, else double. A whole-valued float
+    ///   literal (`1e3`) therefore parses as an integer; `validated` turns
+    ///   it back into `1000.0` wherever the schema says double. A negative
+    ///   zero (`-0`, `-0.0`) stays a double, keeping its sign. A number too
+    ///   large for a double (`1e400`) is refused, and one too small for it
+    ///   (`1e-400`) parses as 0.
+    /// - Strings and object keys keep every character, a leading U+FEFF
+    ///   included, which `JSONSerialization` drops on Darwin.
     ///
-    /// Dictionaries lose member order (Foundation's domain); `validated`
-    /// canonicalizes objects to schema field order, so ordering only stays
-    /// arbitrary for `.unknown`-slot objects, which render in whatever order
-    /// Foundation yielded. Malformed input is a usage error, thrown as
+    /// Object member order is not kept; `validated` canonicalizes objects to
+    /// schema field order, so ordering only stays arbitrary for
+    /// `.unknown`-slot objects, which render in whatever order the decoder
+    /// yielded. Malformed input is a usage error, thrown as
     /// swift-argument-parser's `ValidationError`.
     public static func parse(jsonText: String) throws -> MMCLIDynamicTree {
-        let object: Any
         do {
-            object = try JSONSerialization.jsonObject(
-                with: Data(jsonText.utf8),
-                options: [.fragmentsAllowed]
-            )
-        } catch {
-            let detail =
-                ((error as NSError).userInfo[NSDebugDescriptionErrorKey] as? String)
-                ?? String(describing: error)
-            throw ValidationError(detail)
+            return try JSONDecoder().decode(JSONTree.self, from: Data(jsonText.utf8)).tree
+        } catch let error as DecodingError {
+            throw ValidationError(Self.reason(error))
         }
-        return try Self.fromFoundation(object)
     }
 
-    /// Whether this `NSNumber` is JSON `true`/`false` rather than a number.
-    private static func isJSONBoolean(_ number: NSNumber) -> Bool {
-        #if canImport(Darwin)
-        return CFGetTypeID(number as CFTypeRef) == CFBooleanGetTypeID()
-        #else
-        return String(cString: number.objCType) == "c"
-        #endif
+    /// Why JSON text did not parse: the parser's own message, which names
+    /// the line and column, or the path of a number too large for a double.
+    private static func reason(_ error: DecodingError) -> String {
+        guard case .dataCorrupted(let context) = error else {
+            return String(describing: error)
+        }
+        guard let underlying = context.underlyingError else {
+            return context.debugDescription
+        }
+        return ((underlying as NSError).userInfo[NSDebugDescriptionErrorKey] as? String)
+            ?? String(describing: underlying)
+    }
+}
+
+/// One JSON value as a loose tree, decoded by trying each JSON kind in
+/// turn: an object, an array, then null, a boolean, a number and a string.
+private struct JSONTree: Decodable {
+    let tree: MMCLIDynamicTree
+
+    private struct Key: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+        init(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
     }
 
-    private static func fromFoundation(_ object: Any) throws -> MMCLIDynamicTree {
-        switch object {
-            case is NSNull:
-                return .null
-            case let number as NSNumber:
-                if Self.isJSONBoolean(number) {
-                    return .bool(number.boolValue)
+    init(from decoder: any Decoder) throws {
+        if let object = try? decoder.container(keyedBy: Key.self) {
+            tree = .object(
+                try object.allKeys.map { key in
+                    SchemaValue.Member(
+                        key.stringValue,
+                        try object.decode(JSONTree.self, forKey: key).tree
+                    )
                 }
-                if let value = Int64(exactly: number) { return .int(value) }
-                if let value = UInt64(exactly: number) { return .uint(value) }
-                return .double(number.doubleValue)
-            case let flag as Bool:
-                // corelibs-foundation may surface JSON booleans as plain
-                // `Bool`; on Darwin the NSNumber case above always wins.
-                return .bool(flag)
-            case let text as String:
-                return .string(text)
-            case let items as [Any]:
-                return .array(try items.map(Self.fromFoundation))
-            case let entries as [String: Any]:
-                return .object(
-                    try entries.map { Member($0.key, try Self.fromFoundation($0.value)) })
-            default:
-                // Unreachable for JSONSerialization output; kept honest.
-                throw ValidationError("unsupported JSON value")
+            )
+            return
+        }
+        if var items = try? decoder.unkeyedContainer() {
+            var trees: [MMCLIDynamicTree] = []
+            while !items.isAtEnd {
+                trees.append(try items.decode(JSONTree.self).tree)
+            }
+            tree = .array(trees)
+            return
+        }
+        let value = try decoder.singleValueContainer()
+        if value.decodeNil() {
+            tree = .null
+        } else if let flag = try? value.decode(Bool.self) {
+            tree = .bool(flag)
+        } else if let number = try? value.decode(Double.self), number == 0, number.sign == .minus {
+            // `Int64` takes a negative zero as 0, which would drop its sign.
+            tree = .double(number)
+        } else if let number = try? value.decode(Int64.self) {
+            tree = .int(number)
+        } else if let number = try? value.decode(UInt64.self) {
+            tree = .uint(number)
+        } else if let number = try? value.decode(Double.self) {
+            tree = .double(number)
+        } else if let text = try? value.decode(String.self) {
+            tree = .string(text)
+        } else {
+            // Not null, a boolean or a string, and no double or integer
+            // holds it: a number too large for a double.
+            let at = Self.pathText(value.codingPath)
+            throw DecodingError.dataCorruptedError(
+                in: value,
+                debugDescription: at.isEmpty
+                    ? "Number is too large for a double."
+                    : "Number at \(at) is too large for a double."
+            )
         }
     }
 
+    /// A coding path written the way validation writes one: `a.b[1]`.
+    private static func pathText(_ codingPath: [any CodingKey]) -> String {
+        codingPath.reduce("") { path, key in
+            if let index = key.intValue { return "\(path)[\(index)]" }
+            return path.isEmpty ? key.stringValue : "\(path).\(key.stringValue)"
+        }
+    }
 }
 
 // MARK: - JSON text rendering

@@ -38,6 +38,22 @@ struct InputTests {
         #expect(await texts(unterminated) == ["! input line longer than 3 bytes"])
     }
 
+    @Test("a limit of Int.max sets no limit, and a limit of 0 takes only empty lines")
+    func lineLimitEdges() async {
+        let unlimited = MMCLIInput(text: "abc\r\ndef").lines(maximumLength: .max)
+        #expect(await texts(unlimited) == ["abc", "def"])
+        let empty = MMCLIInput(text: "\n\r\nx").lines(maximumLength: 0)
+        #expect(await texts(empty) == ["", "", "! input line longer than 0 bytes"])
+    }
+
+    @Test("a negative limit refuses every line, yet an input with no lines has nothing to refuse")
+    func negativeLineLimit() async {
+        #expect(await texts(MMCLIInput(text: "").lines(maximumLength: -2)) == [])
+        #expect(await texts(MMCLIInput(text: "").lines(maximumLength: .min)) == [])
+        let refused = MMCLIInput(text: "\nabc").lines(maximumLength: -1)
+        #expect(await texts(refused) == ["! input line longer than -1 bytes"])
+    }
+
     @Test("a file reads in chunks, with lines spanning chunk boundaries")
     func fileAcrossChunks() async throws {
         let expected = (0..<30_000).map { "line \($0)" }

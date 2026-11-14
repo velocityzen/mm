@@ -29,6 +29,7 @@ public struct MMCLIInput: AsyncSequence, Sendable {
 
     enum Storage: Sendable {
         case bytes([UInt8])
+        case reads([Result<[UInt8], MMCLIError>])
         case descriptor(CInt, name: String)
     }
 
@@ -56,6 +57,13 @@ public struct MMCLIInput: AsyncSequence, Sendable {
         self.init(storage: .descriptor(descriptor, name: name))
     }
 
+    /// An input that delivers these elements in order, as reads from a
+    /// descriptor would (a test seam: a pipe cannot pin down where one read
+    /// ends and the next begins).
+    init(reads: [Result<[UInt8], MMCLIError>]) {
+        self.init(storage: .reads(reads))
+    }
+
     /// Standard input, which is never closed.
     static var standardInput: MMCLIInput {
         MMCLIInput(descriptor: STDIN_FILENO, name: "stdin")
@@ -79,6 +87,7 @@ public struct MMCLIInput: AsyncSequence, Sendable {
     /// are kept, and a last line with no line break still counts. A line
     /// longer than `maximumLength` bytes arrives as
     /// ``MMCLIError/lineTooLong(limit:)``, and the lines end there.
+    /// `Int.max` sets no limit, and a negative limit refuses every line.
     public func lines(maximumLength: Int) -> MMCLIInputLines {
         MMCLIInputLines(input: self, maximumLength: maximumLength)
     }
@@ -105,6 +114,8 @@ public struct MMCLIInput: AsyncSequence, Sendable {
         switch self.storage {
             case .bytes(let bytes):
                 return AsyncIterator(state: bytes.isEmpty ? .finished : .bytes(bytes), reader: self.reader)
+            case .reads(let reads):
+                return AsyncIterator(state: .reads(reads[...]), reader: self.reader)
             case .descriptor(let descriptor, let name):
                 return AsyncIterator(state: .descriptor(descriptor, name: name), reader: self.reader)
         }
@@ -115,6 +126,7 @@ public struct MMCLIInput: AsyncSequence, Sendable {
 
         enum State {
             case bytes([UInt8])
+            case reads(ArraySlice<Result<[UInt8], MMCLIError>>)
             case descriptor(CInt, name: String)
             case finished
         }
@@ -139,6 +151,13 @@ public struct MMCLIInput: AsyncSequence, Sendable {
                 case .bytes(let bytes):
                     self.state = .finished
                     return .success(bytes)
+                case .reads(let reads):
+                    guard let read = reads.first else {
+                        self.state = .finished
+                        return nil
+                    }
+                    self.state = .reads(reads.dropFirst())
+                    return read
                 case .descriptor(let descriptor, let name):
                     switch await self.reader.nextChunk(from: descriptor) {
                         case .chunk(let bytes):
