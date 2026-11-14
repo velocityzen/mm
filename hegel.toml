@@ -3,22 +3,35 @@
 # Local runs use libhegel's development profile: 100 test cases per
 # property, and a failure database under .hegel/. CI derandomizes, so it sees
 # the same inputs every run. New inputs come from local runs and from the
-# nightly profile, which runs on a schedule and once before a property is
-# called done:
+# nightly profile, which .github/workflows/nightly.yml runs every night and
+# which runs once before a property is called done:
 #
 #   HEGEL_DEFAULT_PROFILE=nightly swift test --filter MMPropertyTests
 #
 # Add HEGEL_STATISTICS=1 to see how often each reach event occurs.
 #
-# Reach claims (`property(reaching:)`) come in two sets; see
-# Tests/MMPropertyTests/ReachClaims.swift. The states every 100-case run
-# reaches reliably are claimed on every run. The rest are claimed only on
-# runs of 1,000 cases or more: this profile, or HEGEL_TEST_CASES=1000 and up.
+# Reach claims come in two sets. A 100-case run reaches a state in a share of
+# its cases that varies far more from run to run than the average suggests:
+# one run may make no case at all down a branch Hegel takes a quarter of the
+# time on average, and a claim on a state behind that branch then fails with
+# nothing wrong. So `property(reaching:)` holds only the states that every
+# one of nine 100-case statistics runs reached in a fifth of its cases or
+# more, and every 1,000-case run in a tenth or more. `reachingAfter:` holds
+# the states every one of four 1,000-case statistics runs reached in 3% of
+# its cases or more, the rare boundary states among them, each with 1,000:
+# a run judges them once 1,000 generated cases have passed, however its
+# count was set (this profile, HEGEL_TEST_CASES or HEGEL_TEST_CASES_SCALE).
+# Rarer events are recorded for the statistics but not claimed.
 #
 # A suite of synchronous properties takes the `.offTheCooperativePool` trait
 # next to `.hegel`: a synchronous property holds its thread for its whole
 # run, and the async suites' tasks need the cooperative pool. See
 # Tests/MMPropertyTests/PropertyThreadPool.swift.
 
+# This profile's count applies only to properties without their own
+# `.hegel(testCases:)`; HEGEL_TEST_CASES_SCALE deepens those too. On a CI
+# server it extends libhegel's derandomized `ci` profile, so it turns
+# derandomization off: a scheduled run is for new inputs.
 [profiles.nightly]
 test_cases = 10_000
+derandomize = false

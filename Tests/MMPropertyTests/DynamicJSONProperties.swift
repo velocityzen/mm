@@ -31,25 +31,26 @@
         @Test
         func renderedValuesParseAndValidateBack() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "a field name beyond ASCII", "an optional field left out", "validated back",
-                    ],
-                    deepRuns: [
-                        "a bool", "a date", "a datetime", "a definition inside itself", "a double",
-                        "a double parsed as a double", "a field name with a control character",
-                        "a field name with a quote or a backslash", "a float",
-                        "a later enumeration case", "a map keyed by integers",
-                        "a map keyed by unsigned integers", "a negative map key",
-                        "a reference chain", "a string", "a timestamp", "a uint",
-                        "a union case with fields", "a union case without fields",
-                        "a value four levels deep", "an array with items", "an empty array",
-                        "an empty map", "an empty structure", "an enumeration case beyond ASCII",
-                        "an enumeration case with a control character", "an int",
-                        "an optional field set to null", "bytes", "null in an optional slot",
-                        "the first enumeration case",
-                    ]
-                )
+                reaching: [
+                    "a field name beyond ASCII", "an optional field left out", "validated back",
+                ],
+                reachingAfter: [
+                    "a bool": 1_000, "a date": 1_000, "a datetime": 1_000,
+                    "a definition inside itself": 1_000, "a double": 1_000,
+                    "a double parsed as a double": 1_000,
+                    "a field name with a control character": 1_000,
+                    "a field name with a quote or a backslash": 1_000, "a float": 1_000,
+                    "a later enumeration case": 1_000, "a map keyed by integers": 1_000,
+                    "a map keyed by unsigned integers": 1_000, "a negative map key": 1_000,
+                    "a reference chain": 1_000, "a string": 1_000, "a timestamp": 1_000,
+                    "a uint": 1_000, "a union case with fields": 1_000,
+                    "a union case without fields": 1_000, "a value four levels deep": 1_000,
+                    "an array with items": 1_000, "an empty array": 1_000, "an empty map": 1_000,
+                    "an empty structure": 1_000, "an enumeration case beyond ASCII": 1_000,
+                    "an enumeration case with a control character": 1_000, "an int": 1_000,
+                    "an optional field set to null": 1_000, "bytes": 1_000,
+                    "null in an optional slot": 1_000, "the first enumeration case": 1_000,
+                ]
             ) { tc in
                 var policy = try #draw(
                     SchemaValueGenerators.policies(unknownSlots: false),
@@ -126,13 +127,11 @@
             // order mark either way round, whitespace and NUL.
             let leading: [String] = ["\u{FEFF}", "\u{FFFE}", " ", "\t", "\u{0}"]
             try property(
-                reaching: reachClaims(
-                    everyRun: ["a control character"],
-                    deepRuns: [
-                        "a leading byte order mark", "a quote or a backslash",
-                        "a scalar past the Basic Multilingual Plane", "an empty string",
-                    ]
-                )
+                reaching: ["a control character"],
+                reachingAfter: [
+                    "a leading byte order mark": 1_000, "a quote or a backslash": 1_000,
+                    "a scalar past the Basic Multilingual Plane": 1_000, "an empty string": 1_000,
+                ]
             ) { tc in
                 var text = try #draw(
                     Gen<String>.oneOf(
@@ -197,12 +196,10 @@
         @Test
         func bytesRenderAsStandardBase64() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "length 0 past a multiple of three", "length 1 past a multiple of three",
-                    ],
-                    deepRuns: ["length 2 past a multiple of three"]
-                )
+                reaching: [
+                    "length 0 past a multiple of three", "length 1 past a multiple of three",
+                ],
+                reachingAfter: ["length 2 past a multiple of three": 1_000]
             ) { tc in
                 let bytes = try #draw(Gen<[UInt8]>.bytes(), from: tc)
                 try tc.event("length \(bytes.count % 3) past a multiple of three")

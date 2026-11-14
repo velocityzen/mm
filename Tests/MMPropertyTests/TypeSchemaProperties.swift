@@ -22,21 +22,22 @@
         @Test
         func schemasEncodeAsDocumented() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["a reference", "an array"],
-                    deepRuns: [
-                        "a case name beyond ASCII", "a documented case", "a documented field",
-                        "a field key at an end of Int", "a field name beyond ASCII",
-                        "a field with no key", "a map", "a negative field key", "a node three deep",
-                        "a reference name beyond ASCII", "a scalar, tag 0", "a scalar, tag 1",
-                        "a scalar, tag 13", "a scalar, tag 14", "a scalar, tag 15",
-                        "a scalar, tag 2", "a scalar, tag 3", "a scalar, tag 4", "a scalar, tag 5",
-                        "a scalar, tag 6", "a structure", "a union", "a union case without fields",
-                        "an empty case name", "an empty enumeration", "an empty field name",
-                        "an empty reference name", "an empty structure", "an empty union",
-                        "an enumeration", "an optional", "unknown",
-                    ]
-                )
+                reaching: ["a reference", "an array"],
+                reachingAfter: [
+                    "a case name beyond ASCII": 1_000, "a documented case": 1_000,
+                    "a documented field": 1_000, "a field key at an end of Int": 1_000,
+                    "a field name beyond ASCII": 1_000, "a field with no key": 1_000,
+                    "a map": 1_000, "a negative field key": 1_000, "a node three deep": 1_000,
+                    "a reference name beyond ASCII": 1_000, "a scalar, tag 0": 1_000,
+                    "a scalar, tag 1": 1_000, "a scalar, tag 13": 1_000, "a scalar, tag 14": 1_000,
+                    "a scalar, tag 15": 1_000, "a scalar, tag 2": 1_000, "a scalar, tag 3": 1_000,
+                    "a scalar, tag 4": 1_000, "a scalar, tag 5": 1_000, "a scalar, tag 6": 1_000,
+                    "a structure": 1_000, "a union": 1_000, "a union case without fields": 1_000,
+                    "an empty case name": 1_000, "an empty enumeration": 1_000,
+                    "an empty field name": 1_000, "an empty reference name": 1_000,
+                    "an empty structure": 1_000, "an empty union": 1_000, "an enumeration": 1_000,
+                    "an optional": 1_000, "unknown": 1_000,
+                ]
             ) { tc in
                 let schema = try #draw(FingerprintGenerators.schemas, from: tc)
                 for label in kindLabels(of: schema).sorted() {
@@ -58,21 +59,22 @@
         @Test
         func schemasDecodeToThemselves() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["a documented case", "a reference"],
-                    deepRuns: [
-                        "a case name beyond ASCII", "a documented field",
-                        "a field key at an end of Int", "a field name beyond ASCII",
-                        "a field with no key", "a map", "a negative field key", "a node three deep",
-                        "a reference name beyond ASCII", "a scalar, tag 0", "a scalar, tag 1",
-                        "a scalar, tag 13", "a scalar, tag 14", "a scalar, tag 15",
-                        "a scalar, tag 2", "a scalar, tag 3", "a scalar, tag 4", "a scalar, tag 5",
-                        "a scalar, tag 6", "a structure", "a union", "a union case without fields",
-                        "an array", "an empty case name", "an empty enumeration",
-                        "an empty field name", "an empty reference name", "an empty structure",
-                        "an empty union", "an enumeration", "an optional", "unknown",
-                    ]
-                )
+                reaching: ["a documented case", "a reference"],
+                reachingAfter: [
+                    "a case name beyond ASCII": 1_000, "a documented field": 1_000,
+                    "a field key at an end of Int": 1_000, "a field name beyond ASCII": 1_000,
+                    "a field with no key": 1_000, "a map": 1_000, "a negative field key": 1_000,
+                    "a node three deep": 1_000, "a reference name beyond ASCII": 1_000,
+                    "a scalar, tag 0": 1_000, "a scalar, tag 1": 1_000, "a scalar, tag 13": 1_000,
+                    "a scalar, tag 14": 1_000, "a scalar, tag 15": 1_000, "a scalar, tag 2": 1_000,
+                    "a scalar, tag 3": 1_000, "a scalar, tag 4": 1_000, "a scalar, tag 5": 1_000,
+                    "a scalar, tag 6": 1_000, "a structure": 1_000, "a union": 1_000,
+                    "a union case without fields": 1_000, "an array": 1_000,
+                    "an empty case name": 1_000, "an empty enumeration": 1_000,
+                    "an empty field name": 1_000, "an empty reference name": 1_000,
+                    "an empty structure": 1_000, "an empty union": 1_000, "an enumeration": 1_000,
+                    "an optional": 1_000, "unknown": 1_000,
+                ]
             ) { tc in
                 let definition = try #draw(FingerprintGenerators.definitions, from: tc)
                 for label in kindLabels(of: definition.schema).sorted() {
@@ -109,14 +111,13 @@
         @Test
         func damagedNodesDecodeAsUnknown() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["a node below the root"],
-                    deepRuns: [
-                        "a key the layout does not use", "a payload left out",
-                        "a payload of the wrong kind", "a second tag", "a tag that is not a byte",
-                        "a tag the table does not have", "no map", "no tag",
-                    ]
-                )
+                reaching: ["a node below the root"],
+                reachingAfter: [
+                    "a key the layout does not use": 1_000, "a payload left out": 1_000,
+                    "a payload of the wrong kind": 1_000, "a second tag": 1_000,
+                    "a tag that is not a byte": 1_000, "a tag the table does not have": 1_000,
+                    "no map": 1_000, "no tag": 1_000,
+                ]
             ) { tc in
                 let schema = try #draw(FingerprintGenerators.schemas, from: tc)
                 let places = nodes(of: schema)
@@ -151,7 +152,7 @@
         /// 100 cases.
         @Test
         func foldRebuildsTheOriginal() throws {
-            try property(reaching: reachClaims(everyRun: ["a reference", "no reference"])) { tc in
+            try property(reaching: ["a reference", "no reference"]) { tc in
                 let schema = try #draw(FingerprintGenerators.schemas, from: tc)
                 let references = referenceNames(in: schema)
                 try tc.event(references.isEmpty ? "no reference" : "a reference")
@@ -187,14 +188,12 @@
         @Test
         func foldInlinesWhatResolves() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["a reference inlined"],
-                    deepRuns: [
-                        "a cycle cut", "a definition that is a reference",
-                        "a reference inside an inlined one", "an unresolved reference",
-                        "two definitions with one name",
-                    ]
-                )
+                reaching: ["a reference inlined"],
+                reachingAfter: [
+                    "a cycle cut": 1_000, "a definition that is a reference": 1_000,
+                    "a reference inside an inlined one": 1_000, "an unresolved reference": 1_000,
+                    "two definitions with one name": 1_000,
+                ]
             ) { tc in
                 var schema = try #draw(FingerprintGenerators.schemas, from: tc)
                 var bodies = try #draw(

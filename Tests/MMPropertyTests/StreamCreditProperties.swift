@@ -965,20 +965,20 @@
         @Test
         func requestStreamStaysInsideTheServersCredit() async throws {
             try await property(
-                reaching: reachClaims(
-                    everyRun: ["a send ended callEnded"],
-                    deepRuns: [
-                        "a cancel reached a parked sender",
-                        "a grant came with the sender out of credit",
-                        "a grant reached a parked sender", "a send ended connectionClosed",
-                        "a send ended peerStopped", "a terminal reached a parked sender",
-                        "an item reached a handler that stopped reading",
-                        "items went past the initial window", "several terminals were handed",
-                        "the client cancelled the call", "the client parked at zero credit",
-                        "the connection died", "the sender's own cancellation ended a send",
-                        "the sender's task was cancelled",
-                    ]
-                )
+                reaching: ["a send ended callEnded"],
+                reachingAfter: [
+                    "a cancel reached a parked sender": 1_000,
+                    "a grant came with the sender out of credit": 1_000,
+                    "a grant reached a parked sender": 1_000,
+                    "a send ended connectionClosed": 1_000, "a send ended peerStopped": 1_000,
+                    "a terminal reached a parked sender": 1_000,
+                    "an item reached a handler that stopped reading": 1_000,
+                    "items went past the initial window": 1_000,
+                    "several terminals were handed": 1_000, "the client cancelled the call": 1_000,
+                    "the client parked at zero credit": 1_000, "the connection died": 1_000,
+                    "the sender's own cancellation ended a send": 1_000,
+                    "the sender's task was cancelled": 1_000,
+                ]
             ) { tc in
                 let plan = try RequestPlan.draw(tc)
                 let pipe = RequestPipe(plan: plan)
@@ -1105,19 +1105,16 @@
         @Test
         func responseSinkStaysInsideTheClientsGrants() async throws {
             try await property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "several terminals were handed", "the handler's task was cancelled",
-                    ],
-                    deepRuns: [
-                        "a STOP released a watcher", "a grant came with the sender out of credit",
-                        "a send ended callEnded", "a send ended peerStopped",
-                        "a watcher returned on its own cancellation",
-                        "an item reached a client that stopped reading",
-                        "items went past the initial window", "the client's buffer filled",
-                        "the connection died",
-                    ]
-                )
+                reaching: ["several terminals were handed", "the handler's task was cancelled"],
+                reachingAfter: [
+                    "a STOP released a watcher": 1_000,
+                    "a grant came with the sender out of credit": 1_000,
+                    "a send ended callEnded": 1_000, "a send ended peerStopped": 1_000,
+                    "a watcher returned on its own cancellation": 1_000,
+                    "an item reached a client that stopped reading": 1_000,
+                    "items went past the initial window": 1_000,
+                    "the client's buffer filled": 1_000, "the connection died": 1_000,
+                ]
             ) { tc in
                 let plan = try ResponsePlan.draw(tc)
                 let pipe = ResponsePipe(plan: plan)

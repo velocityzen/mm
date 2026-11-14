@@ -123,14 +123,13 @@
         @Test
         func permittedFollowsTheFirstMatchingClass() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["denied", "granted"],
-                    deepRuns: [
-                        "denied though the other class would grant", "someone else",
-                        "the group, by a supplementary group", "the group, by primary gid",
-                        "the owner", "the owner, in the group too",
-                    ]
-                )
+                reaching: ["denied", "granted"],
+                reachingAfter: [
+                    "denied though the other class would grant": 1_000, "someone else": 1_000,
+                    "the group, by a supplementary group": 1_000,
+                    "the group, by primary gid": 1_000, "the owner": 1_000,
+                    "the owner, in the group too": 1_000,
+                ]
             ) { tc in
                 let acl = try #draw(EntityACLGenerators.acls, from: tc)
                 let (peer, relation) = try #draw(EntityACLGenerators.peers(for: acl), from: tc)
@@ -160,14 +159,13 @@
         @Test
         func permittedIsMonotonicInTheRequest() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["the union denied"],
-                    deepRuns: [
-                        "one part granted, the other denied", "someone else",
-                        "the group, by a supplementary group", "the group, by primary gid",
-                        "the owner", "the owner, in the group too", "the union granted",
-                    ]
-                )
+                reaching: ["the union denied"],
+                reachingAfter: [
+                    "one part granted, the other denied": 1_000, "someone else": 1_000,
+                    "the group, by a supplementary group": 1_000,
+                    "the group, by primary gid": 1_000, "the owner": 1_000,
+                    "the owner, in the group too": 1_000, "the union granted": 1_000,
+                ]
             ) { tc in
                 let acl = try #draw(EntityACLGenerators.acls, from: tc)
                 let (peer, relation) = try #draw(EntityACLGenerators.peers(for: acl), from: tc)

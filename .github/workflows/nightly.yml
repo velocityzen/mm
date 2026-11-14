@@ -1,0 +1,41 @@
+name: Nightly properties
+
+# The property tests under hegel.toml's nightly profile: 10,000 cases per
+# property, with fresh inputs every night where CI's runs repeat the same
+# derandomized ones. A deep run also judges the reach claims a property
+# passes in `reachingAfter:`. A failure prints the counterexample and the
+# command that reproduces it.
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+# The job only reads the repository; it needs no write token.
+permissions:
+  contents: read
+
+jobs:
+  properties:
+    name: Property tests, nightly profile
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: swift:6.4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test the properties
+        env:
+          HEGEL_DEFAULT_PROFILE: nightly
+          HEGEL_STATISTICS: "1"
+        run: swift test --filter MMPropertyTests

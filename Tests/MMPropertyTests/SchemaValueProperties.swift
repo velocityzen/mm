@@ -30,19 +30,19 @@
         @Test
         func generatedValuesValidateToThemselves() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["a shadowed definition", "an optional field left out"],
-                    deepRuns: [
-                        "a bool", "a date", "a datetime", "a double", "a float",
-                        "a later enumeration case", "a map keyed by strings", "a reference chain",
-                        "a string", "a timestamp", "a uint", "a union case with fields",
-                        "a union case without fields", "a value four levels deep",
-                        "an array with items", "an empty array", "an empty map",
-                        "an empty structure", "an int", "an optional field set to null",
-                        "an unknown slot", "bytes", "null in an optional slot",
-                        "the first enumeration case",
-                    ]
-                )
+                reaching: ["a shadowed definition", "an optional field left out"],
+                reachingAfter: [
+                    "a bool": 1_000, "a date": 1_000, "a datetime": 1_000, "a double": 1_000,
+                    "a float": 1_000, "a later enumeration case": 1_000,
+                    "a map keyed by strings": 1_000, "a reference chain": 1_000, "a string": 1_000,
+                    "a timestamp": 1_000, "a uint": 1_000, "a union case with fields": 1_000,
+                    "a union case without fields": 1_000, "a value four levels deep": 1_000,
+                    "an array with items": 1_000, "an empty array": 1_000, "an empty map": 1_000,
+                    "an empty structure": 1_000, "an int": 1_000,
+                    "an optional field set to null": 1_000, "an unknown slot": 1_000,
+                    "bytes": 1_000, "null in an optional slot": 1_000,
+                    "the first enumeration case": 1_000,
+                ]
             ) { tc in
                 let policy = try #draw(SchemaValueGenerators.policies(unknownSlots: true), from: tc)
                 let fitting = try #draw(SchemaValueGenerators.fitting(policy), from: tc)
@@ -83,13 +83,12 @@
         @Test
         func looseFormsValidateToTheCanonicalValue() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["members out of order"],
-                    deepRuns: [
-                        "a respelled map key", "an int given as a double",
-                        "union fields given for a case without any", "union members out of order",
-                    ]
-                )
+                reaching: ["members out of order"],
+                reachingAfter: [
+                    "a respelled map key": 1_000, "an int given as a double": 1_000,
+                    "union fields given for a case without any": 1_000,
+                    "union members out of order": 1_000,
+                ]
             ) { tc in
                 let policy = try #draw(SchemaValueGenerators.policies(unknownSlots: true), from: tc)
                 let fitting = try #draw(SchemaValueGenerators.fitting(policy), from: tc)
@@ -134,12 +133,11 @@
         @Test
         func validatedIsIdempotent() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["the input was refused"],
-                    deepRuns: [
-                        "accepted and rewritten", "accepted as it was", "the input was accepted",
-                    ]
-                )
+                reaching: ["the input was refused"],
+                reachingAfter: [
+                    "accepted and rewritten": 1_000, "accepted as it was": 1_000,
+                    "the input was accepted": 1_000,
+                ]
             ) { tc in
                 let policy = try #draw(SchemaValueGenerators.policies(unknownSlots: true), from: tc)
                 let fitting = try #draw(SchemaValueGenerators.fitting(policy), from: tc)

@@ -219,10 +219,8 @@
         @Test
         func anyPayloadsInAnyChunksComeOutTheSame() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["a read ends inside a length prefix", "an empty payload"],
-                    deepRuns: ["the encoder's limit is the largest payload's length"]
-                )
+                reaching: ["a read ends inside a length prefix", "an empty payload"],
+                reachingAfter: ["the encoder's limit is the largest payload's length": 1_000]
             ) { tc in
                 let payloadBuffers = try #draw(
                     .array(of: FramingGenerators.payloadBuffers),
@@ -287,10 +285,10 @@
         @Test
         func oversizedLengthIsRejectedBeforeItsBody() throws {
             try property(
-                reaching: reachClaims(everyRun: [
+                reaching: [
                     "a read ends inside a length prefix",
                     "complete frames before the oversized one",
-                ])
+                ]
             ) { tc in
                 let maximumLength = try #draw(FramingGenerators.exceedableLimits, from: tc)
                 let declaredLength = try #draw(
@@ -347,9 +345,7 @@
         @Test
         func encoderRejectsExactlyThePayloadsOverTheLimit() throws {
             try property(
-                reaching: reachClaims(everyRun: [
-                    "over the limit", "the payload's length is the limit",
-                ])
+                reaching: ["over the limit", "the payload's length is the limit"]
             ) { tc in
                 let payloadBuffer = try #draw(FramingGenerators.payloadBuffers, from: tc)
                 let byteCount = UInt32(payloadBuffer.payload.count)
@@ -388,12 +384,8 @@
         @Test
         func endOfFileIsTruncatedExactlyInsideAFrame() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "a read ends inside a length prefix", "ends inside a length prefix",
-                    ],
-                    deepRuns: ["ends inside a body", "ends on a frame boundary"]
-                )
+                reaching: ["a read ends inside a length prefix", "ends inside a length prefix"],
+                reachingAfter: ["ends inside a body": 1_000, "ends on a frame boundary": 1_000]
             ) { tc in
                 let payloads = try #draw(FramingGenerators.payloads, from: tc)
                 let streamEnding = try #draw(FramingGenerators.streamEndings, from: tc)
@@ -444,13 +436,11 @@
         @Test
         func removalHandsOnTheUnfinishedFrame() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "a read ends inside a length prefix", "ends inside a body",
-                        "ends inside a length prefix",
-                    ],
-                    deepRuns: ["ends on a frame boundary"]
-                )
+                reaching: [
+                    "a read ends inside a length prefix", "ends inside a body",
+                    "ends inside a length prefix",
+                ],
+                reachingAfter: ["ends on a frame boundary": 1_000]
             ) { tc in
                 let payloads = try #draw(FramingGenerators.payloads, from: tc)
                 let streamEnding = try #draw(FramingGenerators.streamEndings, from: tc)

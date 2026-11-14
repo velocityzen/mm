@@ -122,10 +122,10 @@
         @Test
         func writesTheSameBytes() throws {
             try property(
-                reaching: reachClaims(everyRun: [
+                reaching: [
                     "a binary past bin8", "a collection past fixarray or fixmap",
                     "a string past fixstr", "a string past str8",
-                ])
+                ]
             ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let generators = CatalogGenerators(shape)
@@ -141,7 +141,7 @@
         /// Codable's bytes, and both paths read it back, absent or present.
         @Test
         func optionalPayloads() throws {
-            try property(reaching: reachClaims(everyRun: ["present"], deepRuns: ["absent"])) { tc in
+            try property(reaching: ["present"], reachingAfter: ["absent": 1_000]) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let item = try #draw(.optional(CatalogGenerators(shape).item), from: tc)
                 try tc.event(item == nil ? "absent" : "present")
@@ -169,13 +169,11 @@
         @Test
         func decodesWhatItWrites() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "a binary past bin8", "a collection past fixarray or fixmap",
-                        "a string past fixstr", "a string past str8",
-                    ],
-                    deepRuns: ["flag holds an absent optional"]
-                )
+                reaching: [
+                    "a binary past bin8", "a collection past fixarray or fixmap",
+                    "a string past fixstr", "a string past str8",
+                ],
+                reachingAfter: ["flag holds an absent optional": 1_000]
             ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)
@@ -204,7 +202,7 @@
         /// on it with the same error.
         @Test
         func truncatedPayloadsFailTheSameWay() throws {
-            try property(reaching: reachClaims(everyRun: ["failed with truncated"])) { tc in
+            try property(reaching: ["failed with truncated"]) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)
                 let bytes = try encodedThroughCodable(request).get()
@@ -230,13 +228,11 @@
         @Test
         func corruptedPayloadsDecodeOrFailTheSameWay() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [],
-                    deepRuns: [
-                        "decoded", "failed with invalidUTF8", "failed with keyNotFound",
-                        "failed with truncated", "failed with typeMismatch",
-                    ]
-                )
+                reachingAfter: [
+                    "decoded": 1_000, "failed with invalidUTF8": 1_000,
+                    "failed with keyNotFound": 1_000, "failed with truncated": 1_000,
+                    "failed with typeMismatch": 1_000,
+                ]
             ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)
@@ -277,12 +273,13 @@
         @Test
         func decodingErrorsNameTheSamePath() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["failed with decodingFailed"],
-                    deepRuns: CodableSlot.allCases.map(\.rawValue) + [
+                reaching: ["failed with decodingFailed"],
+                reachingAfter: Dictionary(
+                    uniqueKeysWithValues: (CodableSlot.allCases.map(\.rawValue) + [
                         "a held shipment under a split", "failed with keyNotFound",
                         "failed with typeMismatch",
-                    ]
+                    ])
+                    .map { ($0, 1_000) }
                 )
             ) { tc in
                 // Sizes Hegel chooses: boundary sizes pick header formats,
@@ -329,12 +326,11 @@
         @Test
         func nestingLimitsFailTheSameWay() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["decoded", "failed with nestingTooDeep"],
-                    deepRuns: [
-                        "limit at the request's depth", "limit one below the request's depth",
-                    ]
-                )
+                reaching: ["decoded", "failed with nestingTooDeep"],
+                reachingAfter: [
+                    "limit at the request's depth": 1_000,
+                    "limit one below the request's depth": 1_000,
+                ]
             ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)

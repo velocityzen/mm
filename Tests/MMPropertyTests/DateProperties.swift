@@ -572,10 +572,11 @@
         @Test
         func everyValueRoundTripsThroughText() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["a date", "a timestamp"],
-                    deepRuns: ["a datetime", "a leap second", "offset +18:00", "offset -18:00"]
-                )
+                reaching: ["a date", "a timestamp"],
+                reachingAfter: [
+                    "a datetime": 1_000, "a leap second": 1_000, "offset +18:00": 1_000,
+                    "offset -18:00": 1_000,
+                ]
             ) { tc in
                 let kind = try #draw(Gen<DateKind>.element(of: DateKind.allCases), from: tc)
                 let fields = try #draw(DateGenerators.validFields, from: tc)
@@ -600,17 +601,16 @@
         @Test
         func parsingFollowsTheGrammar() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "a timestamp", "failed with invalidComponent", "failed with malformedText",
-                        "no break",
-                    ],
-                    deepRuns: [
-                        "a character after", "a character before", "a date", "a datetime",
-                        "a digit that is not ASCII", "a missing digit", "a separator dropped",
-                        "a separator swapped", "an extra digit", "parsed",
-                    ]
-                )
+                reaching: [
+                    "a timestamp", "failed with invalidComponent", "failed with malformedText",
+                    "no break",
+                ],
+                reachingAfter: [
+                    "a character after": 1_000, "a character before": 1_000, "a date": 1_000,
+                    "a datetime": 1_000, "a digit that is not ASCII": 1_000,
+                    "a missing digit": 1_000, "a separator dropped": 1_000,
+                    "a separator swapped": 1_000, "an extra digit": 1_000, "parsed": 1_000,
+                ]
             ) { tc in
                 let text = try #draw(DateGenerators.texts, from: tc)
                 let valid = isValid(text.fields, as: text.kind)
@@ -654,10 +654,8 @@
         @Test
         func dayNumbersRoundTrip() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["a day number in the wire range"],
-                    deepRuns: ["a day number past it"]
-                )
+                reaching: ["a day number in the wire range"],
+                reachingAfter: ["a day number past it": 1_000]
             ) { tc in
                 let fields = try #draw(DateGenerators.dates(in: 0...9999), from: tc)
                 let number = try #draw(DateGenerators.dayNumbers, from: tc)
@@ -684,10 +682,8 @@
         @Test
         func dayArithmeticInverts() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["lands in the wire range"],
-                    deepRuns: ["lands past it"]
-                )
+                reaching: ["lands in the wire range"],
+                reachingAfter: ["lands past it": 1_000]
             ) { tc in
                 let fields = try #draw(DateGenerators.dates(in: 0...9999), from: tc)
                 let date = try #require(
@@ -725,16 +721,14 @@
         @Test
         func anyCountGivesAValueOrNil() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "added", "lands in the wire range", "lands past it", "nanosecond",
-                        "subtracted",
-                    ],
-                    deepRuns: [
-                        "Int.min subtracted, landing in the range", "day", "day number", "hour",
-                        "minute", "month", "second", "year",
-                    ]
-                )
+                reaching: [
+                    "added", "lands in the wire range", "lands past it", "nanosecond", "subtracted",
+                ],
+                reachingAfter: [
+                    "Int.min subtracted, landing in the range": 1_000, "day": 1_000,
+                    "day number": 1_000, "hour": 1_000, "minute": 1_000, "month": 1_000,
+                    "second": 1_000, "year": 1_000,
+                ]
             ) { tc in
                 let fields = try #draw(DateGenerators.validFields, from: tc)
                 // Nanoseconds get a branch of their own: they are the only
@@ -801,14 +795,12 @@
         @Test
         func calendarAgreesWithFoundation() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [],
-                    deepRuns: [
-                        "a date's day number", "adding days", "adding hours", "adding minutes",
-                        "adding months", "adding seconds", "adding years", "past 9999",
-                        "the date of a day number", "two timestamps' instants",
-                    ]
-                )
+                reachingAfter: [
+                    "a date's day number": 1_000, "adding days": 1_000, "adding hours": 1_000,
+                    "adding minutes": 1_000, "adding months": 1_000, "adding seconds": 1_000,
+                    "adding years": 1_000, "past 9999": 1_000, "the date of a day number": 1_000,
+                    "two timestamps' instants": 1_000,
+                ]
             ) { tc in
                 let operation = try #draw(
                     Gen<CalendarOperation>.element(of: CalendarOperation.allCases),

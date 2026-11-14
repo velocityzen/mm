@@ -36,27 +36,28 @@
         @Test
         func requestsDecodeToTheCanonicalValue() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "an optional field left out", "sent and read back",
-                        "validated refuses the input",
-                    ],
-                    deepRuns: [
-                        "a bool", "a date", "a datetime", "a definition inside itself", "a double",
-                        "a float", "a later enumeration case", "a map keyed by integers",
-                        "a map keyed by reference", "a map keyed by strings",
-                        "a map keyed by unsigned integers",
-                        "a negative map key", "a reference chain", "a respelled map key",
-                        "a root that is not a structure", "a string", "a timestamp", "a uint",
-                        "a union case with fields", "a union case without fields",
-                        "a value four levels deep", "an array with items", "an empty array",
-                        "an empty map", "an empty structure", "an explicit null left out", "an int",
-                        "an int given as a double", "an optional field set to null",
-                        "an optional of an optional", "bytes", "members out of order",
-                        "null in an optional slot", "one node replaced",
-                        "the first enumeration case", "union members out of order",
-                    ]
-                )
+                reaching: [
+                    "an optional field left out", "sent and read back",
+                    "validated refuses the input",
+                ],
+                reachingAfter: [
+                    "a bool": 1_000, "a date": 1_000, "a datetime": 1_000,
+                    "a definition inside itself": 1_000, "a double": 1_000, "a float": 1_000,
+                    "a later enumeration case": 1_000, "a map keyed by integers": 1_000,
+                    "a map keyed by reference": 1_000, "a map keyed by strings": 1_000,
+                    "a map keyed by unsigned integers": 1_000, "a negative map key": 1_000,
+                    "a reference chain": 1_000, "a respelled map key": 1_000,
+                    "a root that is not a structure": 1_000, "a string": 1_000,
+                    "a timestamp": 1_000, "a uint": 1_000, "a union case with fields": 1_000,
+                    "a union case without fields": 1_000, "a value four levels deep": 1_000,
+                    "an array with items": 1_000, "an empty array": 1_000, "an empty map": 1_000,
+                    "an empty structure": 1_000, "an explicit null left out": 1_000,
+                    "an int": 1_000, "an int given as a double": 1_000,
+                    "an optional field set to null": 1_000, "an optional of an optional": 1_000,
+                    "bytes": 1_000, "members out of order": 1_000,
+                    "null in an optional slot": 1_000, "one node replaced": 1_000,
+                    "the first enumeration case": 1_000, "union members out of order": 1_000,
+                ]
             ) { tc in
                 let unknownSlots = try #draw(Gen<Bool>.bool(probability: 0.4), from: tc)
                 var policy = try #draw(
@@ -219,22 +220,22 @@
         @Test
         func integerMapKeysPassExactlyWhenTheWireCarriesThem() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "a key schema by reference", "a key that is not an integer",
-                        "a uint-keyed map", "accepted and sent", "an int-keyed map",
-                    ],
-                    deepRuns: [
-                        "a key at Int64.max", "a key of 20 digits or more",
-                        "a key one past Int64.max", "a leading zero", "a minus sign",
-                        "a negative key in a uint-keyed map", "a negative key in an int-keyed map",
-                        "a plus sign", "minus zero", "refused for a repeated integer",
-                        "refused: duplicate key",
-                        "refused: key is negative, and the map's keys are unsigned",
-                        "refused: key is not an integer",
-                        "refused: key is out of range: a wire map key is a 64-bit signed integer",
-                    ]
-                )
+                reaching: [
+                    "a key schema by reference", "a key that is not an integer", "a uint-keyed map",
+                    "accepted and sent", "an int-keyed map",
+                ],
+                reachingAfter: [
+                    "a key at Int64.max": 1_000, "a key of 20 digits or more": 1_000,
+                    "a key one past Int64.max": 1_000, "a leading zero": 1_000,
+                    "a minus sign": 1_000, "a negative key in a uint-keyed map": 1_000,
+                    "a negative key in an int-keyed map": 1_000, "a plus sign": 1_000,
+                    "minus zero": 1_000, "refused for a repeated integer": 1_000,
+                    "refused: duplicate key": 1_000,
+                    "refused: key is negative, and the map's keys are unsigned": 1_000,
+                    "refused: key is not an integer": 1_000,
+                    "refused: key is out of range: a wire map key is a 64-bit signed integer":
+                        1_000,
+                ]
             ) { tc in
                 // The key schema as written, or a reference to it, direct or
                 // through a chain.

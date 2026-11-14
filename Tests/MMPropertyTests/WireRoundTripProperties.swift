@@ -168,10 +168,8 @@
         @Test
         func fixtureRoundTrips() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["a canonical integer key"],
-                    deepRuns: ["a non-canonical integer key"]
-                )
+                reaching: ["a canonical integer key"],
+                reachingAfter: ["a non-canonical integer key": 1_000]
             ) { tc in
                 let fixture = try #draw(WireGenerators.fixture, from: tc)
                 try recordIntegerLookingKeys(fixture.stringMap.keys, in: tc)

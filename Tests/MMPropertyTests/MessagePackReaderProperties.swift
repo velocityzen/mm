@@ -530,27 +530,28 @@
         @Test
         func readersRestoreTheIndexOnFailure() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "readMessagePackRawValueSlice failed on its own format",
-                        "readMessagePackRawValueSlice read a value",
-                        "skipMessagePackValue failed on its own format",
-                        "skipMessagePackValue read a value",
-                    ],
-                    deepRuns: [
-                        "a corrupted value", "a strict prefix of a value",
-                        "a value and bytes after it", "a value with 0xc1 inserted", "a whole value",
-                        "any bytes", "readMessagePackArrayHeader read a value",
-                        "readMessagePackBinary failed on its own format",
-                        "readMessagePackBinary read a value", "readMessagePackDouble read a value",
-                        "readMessagePackFloat read a value",
-                        "readMessagePackInt failed on its own format",
-                        "readMessagePackInt read a value", "readMessagePackMapHeader read a value",
-                        "readMessagePackString failed on its own format",
-                        "readMessagePackUInt failed on its own format",
-                        "readMessagePackUInt read a value",
-                    ]
-                )
+                reaching: [
+                    "readMessagePackRawValueSlice failed on its own format",
+                    "readMessagePackRawValueSlice read a value",
+                    "skipMessagePackValue failed on its own format",
+                    "skipMessagePackValue read a value",
+                ],
+                reachingAfter: [
+                    "a corrupted value": 1_000, "a strict prefix of a value": 1_000,
+                    "a value and bytes after it": 1_000, "a value with 0xc1 inserted": 1_000,
+                    "a whole value": 1_000, "any bytes": 1_000,
+                    "readMessagePackArrayHeader read a value": 1_000,
+                    "readMessagePackBinary failed on its own format": 1_000,
+                    "readMessagePackBinary read a value": 1_000,
+                    "readMessagePackDouble read a value": 1_000,
+                    "readMessagePackFloat read a value": 1_000,
+                    "readMessagePackInt failed on its own format": 1_000,
+                    "readMessagePackInt read a value": 1_000,
+                    "readMessagePackMapHeader read a value": 1_000,
+                    "readMessagePackString failed on its own format": 1_000,
+                    "readMessagePackUInt failed on its own format": 1_000,
+                    "readMessagePackUInt read a value": 1_000,
+                ]
             ) { tc in
                 let input = try #draw(PackGenerators.inputs, from: tc)
                 let alreadyRead = try #draw(Gen<[UInt8]>.bytes(), from: tc)
@@ -596,15 +597,14 @@
         @Test
         func skipConsumesWhatReadingDoes() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["decoded"],
-                    deepRuns: [
-                        "a corrupted value", "a strict prefix of a value",
-                        "a value and bytes after it", "a value with 0xc1 inserted", "a whole value",
-                        "any bytes", "failed with invalidFormat", "failed with invalidUTF8",
-                        "failed with nestingTooDeep", "failed with truncated",
-                    ]
-                )
+                reaching: ["decoded"],
+                reachingAfter: [
+                    "a corrupted value": 1_000, "a strict prefix of a value": 1_000,
+                    "a value and bytes after it": 1_000, "a value with 0xc1 inserted": 1_000,
+                    "a whole value": 1_000, "any bytes": 1_000, "failed with invalidFormat": 1_000,
+                    "failed with invalidUTF8": 1_000, "failed with nestingTooDeep": 1_000,
+                    "failed with truncated": 1_000,
+                ]
             ) { tc in
                 let input = try #draw(PackGenerators.inputs, from: tc)
                 let alreadyRead = try #draw(Gen<[UInt8]>.bytes(), from: tc)
@@ -649,16 +649,16 @@
         @Test
         func readValuesWriteBackCanonically() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["nothing read to write back", "written back as long"],
-                    deepRuns: [
-                        "a binary past bin8", "a container in a container", "a corrupted value",
-                        "a float32", "a strict prefix of a value", "a value and bytes after it",
-                        "a value with 0xc1 inserted", "a whole value", "an ext", "an ext past ext8",
-                        "an integer above Int64.max", "an integer at a format's edge", "any bytes",
-                        "written back shorter",
-                    ]
-                )
+                reaching: ["nothing read to write back", "written back as long"],
+                reachingAfter: [
+                    "a binary past bin8": 1_000, "a container in a container": 1_000,
+                    "a corrupted value": 1_000, "a float32": 1_000,
+                    "a strict prefix of a value": 1_000, "a value and bytes after it": 1_000,
+                    "a value with 0xc1 inserted": 1_000, "a whole value": 1_000, "an ext": 1_000,
+                    "an ext past ext8": 1_000, "an integer above Int64.max": 1_000,
+                    "an integer at a format's edge": 1_000, "any bytes": 1_000,
+                    "written back shorter": 1_000,
+                ]
             ) { tc in
                 let input = try #draw(PackGenerators.inputs, from: tc)
                 try tc.event(input.kind)

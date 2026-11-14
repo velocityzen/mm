@@ -428,16 +428,13 @@
         @Test
         func everyCallIsAnsweredOnce() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "a cancel answers a stream",
-                        "a handler returns after its call was answered",
-                        "an item on a stream: deliver", "an item on a stream: drop",
-                        "an item on a stream: violation", "an item with no credit left",
-                        "an open on a live msgid", "an open reusing an answered msgid",
-                    ],
-                    deepRuns: ["a handler returns after its msgid was reused"]
-                )
+                reaching: [
+                    "a cancel answers a stream", "a handler returns after its call was answered",
+                    "an item on a stream: deliver", "an item on a stream: drop",
+                    "an item on a stream: violation", "an item with no credit left",
+                    "an open on a live msgid", "an open reusing an answered msgid",
+                ],
+                reachingAfter: ["a handler returns after its msgid was reused": 1_000]
             ) { tc in
                 var s = try streamTableMachine.run(tc, from: StreamTableModel(handlers: tc.pool()))
                 while !s.handlers.isEmpty {

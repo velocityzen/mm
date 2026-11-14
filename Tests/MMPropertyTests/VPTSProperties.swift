@@ -644,7 +644,7 @@
         /// -32768 goes WIDE) or dropping the WIDE year's bias fails here.
         @Test
         func everyValueRoundTrips() throws {
-            try property(reaching: reachClaims(everyRun: ["narrow", "wide"])) { tc in
+            try property(reaching: ["narrow", "wide"]) { tc in
                 let components = try #draw(VPTSGenerators.anyValidComponents, from: tc)
                 let value = try #require(components.value, "\(components)")
                 try tc.event("fields", value: Double(components.fields.compactMap { $0 }.count))
@@ -669,14 +669,13 @@
         @Test
         func initKeepsTheRules() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [],
-                    deepRuns: [
-                        "a day out of range", "a fraction out of range", "a gap in the fields",
-                        "a minute out of range", "a second out of range", "an offset out of range",
-                        "an offset without an hour", "keeps every rule", "no date or time field",
-                    ]
-                )
+                reachingAfter: [
+                    "a day out of range": 1_000, "a fraction out of range": 1_000,
+                    "a gap in the fields": 1_000, "a minute out of range": 1_000,
+                    "a second out of range": 1_000, "an offset out of range": 1_000,
+                    "an offset without an hour": 1_000, "keeps every rule": 1_000,
+                    "no date or time field": 1_000,
+                ]
             ) { tc in
                 let components = try #draw(VPTSGenerators.anyComponents, from: tc)
                 let rule = brokenRule(components)
@@ -696,17 +695,17 @@
         @Test
         func decodingFollowsTheRules() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["decoded"],
-                    deepRuns: [
-                        "WIDE input re-encoded narrow", "a WIDE encoding", "a canonical encoding",
-                        "a corrupted encoding", "a header from the menu, laid out", "any bytes",
-                        "any components, laid out", "any header, laid out",
-                        "failed with invalidComponent", "failed with nonContiguousMask",
-                        "failed with offsetWithoutHour", "failed with reservedExtensionBits",
-                        "failed with trailingBytes", "failed with truncated",
-                    ]
-                )
+                reaching: ["decoded"],
+                reachingAfter: [
+                    "WIDE input re-encoded narrow": 1_000, "a WIDE encoding": 1_000,
+                    "a canonical encoding": 1_000, "a corrupted encoding": 1_000,
+                    "a header from the menu, laid out": 1_000, "any bytes": 1_000,
+                    "any components, laid out": 1_000, "any header, laid out": 1_000,
+                    "failed with invalidComponent": 1_000, "failed with nonContiguousMask": 1_000,
+                    "failed with offsetWithoutHour": 1_000,
+                    "failed with reservedExtensionBits": 1_000, "failed with trailingBytes": 1_000,
+                    "failed with truncated": 1_000,
+                ]
             ) { tc in
                 let input = try #draw(VPTSGenerators.decodeInputs, from: tc)
                 try tc.event(input.kind)
@@ -747,10 +746,8 @@
         @Test
         func byteOrderIsChronological() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["narrow", "the same", "wide"],
-                    deepRuns: ["earlier", "later"]
-                )
+                reaching: ["narrow", "the same", "wide"],
+                reachingAfter: ["earlier": 1_000, "later": 1_000]
             ) { tc in
                 let (first, second) = try #draw(VPTSGenerators.sameHeaderPairs, from: tc)
                 let firstBytes = try #require(first.value).encoded()

@@ -431,13 +431,10 @@
         @Test
         func everyKindRoundTrips() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [],
-                    deepRuns: [
-                        "a nil slot that comes back absent", "cancel", "credit", "end", "item",
-                        "request", "response", "stop",
-                    ]
-                )
+                reachingAfter: [
+                    "a nil slot that comes back absent": 1_000, "cancel": 1_000, "credit": 1_000,
+                    "end": 1_000, "item": 1_000, "request": 1_000, "response": 1_000, "stop": 1_000,
+                ]
             ) { tc in
                 let envelope = try #draw(EnvelopeGenerators.envelopes, from: tc)
                 try tc.event(kindNames[tag(of: envelope)])
@@ -472,21 +469,22 @@
         @Test
         func decodingFollowsTheTable() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["decoded", "failed with invalidArity", "trailing elements"],
-                    deepRuns: [
-                        "a u32 field out of range", "an error with trailing or missing elements",
-                        "bytes after the envelope", "cancel", "cancel trailing elements tolerated",
-                        "credit", "end", "end trailing elements tolerated",
-                        "every element in any width", "failed with decodingFailed",
-                        "failed with numberOutOfRange", "failed with unknownEnvelope", "item",
-                        "item trailing elements rejected", "missing elements", "request",
-                        "request trailing elements rejected", "request trailing elements tolerated",
-                        "response", "response an error with trailing or missing elements tolerated",
-                        "response trailing elements rejected", "stop",
-                        "stop trailing elements rejected",
-                    ]
-                )
+                reaching: ["decoded", "failed with invalidArity", "trailing elements"],
+                reachingAfter: [
+                    "a u32 field out of range": 1_000,
+                    "an error with trailing or missing elements": 1_000,
+                    "bytes after the envelope": 1_000, "cancel": 1_000,
+                    "cancel trailing elements tolerated": 1_000, "credit": 1_000, "end": 1_000,
+                    "end trailing elements tolerated": 1_000, "every element in any width": 1_000,
+                    "failed with decodingFailed": 1_000, "failed with numberOutOfRange": 1_000,
+                    "failed with unknownEnvelope": 1_000, "item": 1_000,
+                    "item trailing elements rejected": 1_000, "missing elements": 1_000,
+                    "request": 1_000, "request trailing elements rejected": 1_000,
+                    "request trailing elements tolerated": 1_000, "response": 1_000,
+                    "response an error with trailing or missing elements tolerated": 1_000,
+                    "response trailing elements rejected": 1_000, "stop": 1_000,
+                    "stop trailing elements rejected": 1_000,
+                ]
             ) { tc in
                 let decodeCase = try #draw(EnvelopeGenerators.decodeCases, from: tc)
                 try tc.event(decodeCase.kind)
@@ -518,15 +516,14 @@
         @Test
         func encodingValidatesRawSlots() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["a slot with bytes after its value", "failed with encodingFailed"],
-                    deepRuns: [
-                        "a corrupted value", "a strict prefix of a value",
-                        "a value and bytes after it", "a value with 0xc1 inserted", "a whole value",
-                        "any bytes", "decoded", "error payload", "failed with nestingTooDeep",
-                        "item", "params", "result",
-                    ]
-                )
+                reaching: ["a slot with bytes after its value", "failed with encodingFailed"],
+                reachingAfter: [
+                    "a corrupted value": 1_000, "a strict prefix of a value": 1_000,
+                    "a value and bytes after it": 1_000, "a value with 0xc1 inserted": 1_000,
+                    "a whole value": 1_000, "any bytes": 1_000, "decoded": 1_000,
+                    "error payload": 1_000, "failed with nestingTooDeep": 1_000, "item": 1_000,
+                    "params": 1_000, "result": 1_000,
+                ]
             ) { tc in
                 let slot = try #draw(PackGenerators.inputs, from: tc)
                 let place = try #draw(Gen<SlotPlace>.element(of: SlotPlace.allCases), from: tc)
@@ -582,13 +579,13 @@
         @Test
         func decodedEnvelopesReencode() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "a corrupted envelope", "a strict prefix of an envelope",
-                        "failed with truncated", "failed with typeMismatch",
-                    ],
-                    deepRuns: ["any bytes", "decoded", "failed with unknownEnvelope"]
-                )
+                reaching: [
+                    "a corrupted envelope", "a strict prefix of an envelope",
+                    "failed with truncated", "failed with typeMismatch",
+                ],
+                reachingAfter: [
+                    "any bytes": 1_000, "decoded": 1_000, "failed with unknownEnvelope": 1_000,
+                ]
             ) { tc in
                 let envelope = try #draw(EnvelopeGenerators.envelopes, from: tc)
                 let bytes = wireForm(of: envelope).narrowest

@@ -151,16 +151,15 @@
         @Test
         func parsingFollowsTheRules() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "a character outside the alphabet", "a valid name",
-                        "failed with invalidCharacter", "parsed",
-                    ],
-                    deepRuns: [
-                        "a doubled dot", "a leading dot", "any text", "failed with emptySegment",
-                        "root", "the alphabet and its neighbours",
-                    ]
-                )
+                reaching: [
+                    "a character outside the alphabet", "a valid name",
+                    "failed with invalidCharacter", "parsed",
+                ],
+                reachingAfter: [
+                    "a doubled dot": 1_000, "a leading dot": 1_000, "any text": 1_000,
+                    "failed with emptySegment": 1_000, "root": 1_000,
+                    "the alphabet and its neighbours": 1_000,
+                ]
             ) { tc in
                 let (text, kind) = try #draw(EntityNameGenerators.texts, from: tc)
                 let broken = brokenEntityNameRules(text)
@@ -208,13 +207,12 @@
         @Test
         func descentAgreesWithAncestors() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["descends", "does not descend", "the first is a name"],
-                    deepRuns: [
-                        "a descendant", "a sibling", "an unrelated name", "the first is root",
-                        "the last segment run on", "the same name",
-                    ]
-                )
+                reaching: ["descends", "does not descend", "the first is a name"],
+                reachingAfter: [
+                    "a descendant": 1_000, "a sibling": 1_000, "an unrelated name": 1_000,
+                    "the first is root": 1_000, "the last segment run on": 1_000,
+                    "the same name": 1_000,
+                ]
             ) { tc in
                 let (firstSegments, secondSegments, relation) = try #draw(
                     EntityNameGenerators.pairs,

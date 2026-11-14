@@ -579,8 +579,7 @@
         /// hashing an enum case's description, fails here.
         @Test
         func fingerprintIgnoresOrderAndDescriptions() throws {
-            try property(reaching: reachClaims(everyRun: [], deepRuns: ["duplicate method names"]))
-            { tc in
+            try property(reachingAfter: ["duplicate method names": 1_000]) { tc in
                 let set = try #draw(FingerprintGenerators.sets(signatureCount: 0...6), from: tc)
                 let restated = try FingerprintGenerators.restated(set, tc)
                 try tc.event("signatures", value: Double(set.signatures.count))
@@ -603,16 +602,14 @@
         @Test
         func fingerprintSeesEveryChange() throws {
             try property(
-                reaching: reachClaims(
-                    everyRun: ["the wire form changed"],
-                    deepRuns: [
-                        "a definition added", "a field added", "a field dropped",
-                        "a field key changed", "a field renamed", "a schema replaced",
-                        "a signature added", "access changed", "the request stream changed",
-                        "the response stream changed", "two enum cases swapped",
-                        "two fields swapped",
-                    ]
-                )
+                reaching: ["the wire form changed"],
+                reachingAfter: [
+                    "a definition added": 1_000, "a field added": 1_000, "a field dropped": 1_000,
+                    "a field key changed": 1_000, "a field renamed": 1_000,
+                    "a schema replaced": 1_000, "a signature added": 1_000, "access changed": 1_000,
+                    "the request stream changed": 1_000, "the response stream changed": 1_000,
+                    "two enum cases swapped": 1_000, "two fields swapped": 1_000,
+                ]
             ) { tc in
                 let set = try #draw(FingerprintGenerators.sets(signatureCount: 1...6), from: tc)
                 let (changed, label) = try FingerprintGenerators.changed(set, tc)

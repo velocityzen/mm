@@ -127,17 +127,15 @@
             #expect(try TypeSchema.of(KeyedMaps.self).get() == KeyedMaps.schema)
             let resolver = TypeResolver(Catalog.types)
             try property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "a condition key", "a key at Int64.max", "a key at Int64.min",
-                        "a map the decoder hashes", "a negative key", "an empty map",
-                        "sent by the CLI and read in Swift", "sent from Swift and read by the CLI",
-                    ],
-                    deepRuns: [
-                        "an unknown condition key, which the CLI refuses",
-                        "an unsigned key past Int64.max, refused on both sides",
-                    ]
-                )
+                reaching: [
+                    "a condition key", "a key at Int64.max", "a key at Int64.min",
+                    "a map the decoder hashes", "a negative key", "an empty map",
+                    "sent by the CLI and read in Swift", "sent from Swift and read by the CLI",
+                ],
+                reachingAfter: [
+                    "an unknown condition key, which the CLI refuses": 1_000,
+                    "an unsigned key past Int64.max, refused on both sides": 1_000,
+                ]
             ) { tc in
                 let maps = try #draw(MapKeyGenerators.keyedMaps, from: tc)
                 if maps.unsigned.keys.contains(UInt64(Int64.max))

@@ -649,27 +649,26 @@
         @Test
         func tableAgreesWithItsModel() async throws {
             try await property(
-                reaching: reachClaims(
-                    everyRun: [
-                        "cancel: nothing to cancel", "closed a second time",
-                        "closed with callers suspended", "closed with live streams",
-                        "closed with reservations parked", "complete: dropped",
-                        "complete: retired a stream", "register: cancelled before suspending",
-                        "register: suspended", "reserve: refused at the cap",
-                        "reserve: refused, closed", "retire: retired a stream",
-                        "writer waiter: cancelled before registering", "writer waiter: parked",
-                    ],
-                    deepRuns: [
-                        "abandon: claimed a parked outcome", "abandon: removed a reservation",
-                        "cancel: removed a reservation", "cancel: resumed a caller",
-                        "closed with writer waiters parked", "complete: parked",
-                        "complete: resumed a caller", "install a stream: claimed a parked terminal",
-                        "install a stream: live", "register: claimed a parked outcome",
-                        "reserve: skipped live ids", "reserve: took UInt32.max",
-                        "writer waiter: cancelled while parked",
-                        "writer: installed with waiters parked",
-                    ]
-                )
+                reaching: [
+                    "cancel: nothing to cancel", "closed a second time",
+                    "closed with callers suspended", "closed with live streams",
+                    "closed with reservations parked", "complete: dropped",
+                    "complete: retired a stream", "register: cancelled before suspending",
+                    "register: suspended", "reserve: refused at the cap",
+                    "reserve: refused, closed", "retire: retired a stream",
+                    "writer waiter: cancelled before registering", "writer waiter: parked",
+                ],
+                reachingAfter: [
+                    "abandon: claimed a parked outcome": 1_000,
+                    "abandon: removed a reservation": 1_000, "cancel: removed a reservation": 1_000,
+                    "cancel: resumed a caller": 1_000, "closed with writer waiters parked": 1_000,
+                    "complete: parked": 1_000, "complete: resumed a caller": 1_000,
+                    "install a stream: claimed a parked terminal": 1_000,
+                    "install a stream: live": 1_000, "register: claimed a parked outcome": 1_000,
+                    "reserve: skipped live ids": 1_000, "reserve: took UInt32.max": 1_000,
+                    "writer waiter: cancelled while parked": 1_000,
+                    "writer: installed with waiters parked": 1_000,
+                ]
             ) { tc in
                 let start = try CallTableGenerators.start(tc)
                 var s = try await callTableMachine.run(tc, from: start)

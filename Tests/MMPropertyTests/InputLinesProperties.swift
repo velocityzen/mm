@@ -40,21 +40,22 @@
         @Test
         func readBoundariesLeaveTheLinesAlone() async throws {
             try await property(
-                reaching: reachClaims(
-                    everyRun: ["CRLF line break", "empty line", "not UTF-8", "several reads"],
-                    deepRuns: [
-                        "CRLF split between reads", "a byte per read",
-                        "carriage return inside a line", "empty input",
-                        "input ends in a carriage return", "limit 0", "limit at the top of Int",
-                        "line at the limit", "line at the limit, then a carriage return",
-                        "line far past the limit", "line one past the limit", "negative limit",
-                        "no lines", "one read", "read ends before a continuation byte",
-                        "read failure after a partial line one past the limit",
-                        "read failure after an over-long partial line",
-                        "read failure between lines", "read failure inside a line",
-                        "too long before its line break was read", "unterminated last line",
-                    ]
-                )
+                reaching: ["CRLF line break", "empty line", "not UTF-8", "several reads"],
+                reachingAfter: [
+                    "CRLF split between reads": 1_000, "a byte per read": 1_000,
+                    "carriage return inside a line": 1_000, "empty input": 1_000,
+                    "input ends in a carriage return": 1_000, "limit 0": 1_000,
+                    "limit at the top of Int": 1_000, "line at the limit": 1_000,
+                    "line at the limit, then a carriage return": 1_000,
+                    "line far past the limit": 1_000, "line one past the limit": 1_000,
+                    "negative limit": 1_000, "no lines": 1_000, "one read": 1_000,
+                    "read ends before a continuation byte": 1_000,
+                    "read failure after a partial line one past the limit": 1_000,
+                    "read failure after an over-long partial line": 1_000,
+                    "read failure between lines": 1_000, "read failure inside a line": 1_000,
+                    "too long before its line break was read": 1_000,
+                    "unterminated last line": 1_000,
+                ]
             ) { tc in
                 let source = try InputLinesSource.draw(tc)
                 for label in source.labels.sorted() {
@@ -85,10 +86,10 @@
         @Test
         func anInterruptEndsTheLinesAtOnce() async throws {
             try await property(
-                reaching: reachClaims(everyRun: [
+                reaching: [
                     "interrupted after the last line", "interrupted before the first line",
                     "interrupted between lines",
-                ])
+                ]
             ) { tc in
                 let source = try InputLinesSource.draw(tc)
                 let taken = try #draw(Gen<Int>.int(in: 0...source.expected.count), from: tc)
