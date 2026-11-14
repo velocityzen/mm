@@ -1089,6 +1089,11 @@ package struct ServerRuntime: Sendable {
                 }
                 handlers.addTask {
                     let response = await self.router.dispatch(envelope: envelope, context: context)
+                    // Free the slot before the response can reach the client: a
+                    // client that waits for it before its next call would
+                    // otherwise race the decrement, and be refused while within
+                    // the cap.
+                    inFlight.withLockedValue { $0 -= 1 }
                     // Retire the unary call; suppress the terminal if a stream frame
                     // already answered it with a code-6 (the misaddressed-frame
                     // guard). By then the client may have reused the msgid for a
@@ -1096,7 +1101,6 @@ package struct ServerRuntime: Sendable {
                     if streams.shouldSendUnaryTerminal(msgid: msgid, call: call), let response {
                         _ = await writer.send(response)
                     }
-                    inFlight.withLockedValue { $0 -= 1 }
                 }
 
             case .credit, .item, .end, .stop, .cancel:

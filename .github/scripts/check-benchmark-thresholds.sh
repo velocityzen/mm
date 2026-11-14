@@ -10,6 +10,10 @@
 set -uo pipefail
 thresholds=$1
 
+# MMThroughputBenchmarks times messages per second: its counts depend on the
+# scheduler and the socket, so it has no thresholds to hold.
+skip=(--skip-target MMThroughputBenchmarks)
+
 # `thresholds check` passes a benchmark that has no saved thresholds, so a
 # new benchmark would go unchecked: every benchmark needs its file.
 complete=true
@@ -23,17 +27,17 @@ while IFS= read -r line; do
         echo "::error::$target $line has no thresholds in $thresholds."
         complete=false
     fi
-done < <(swift package --package-path Benchmarks benchmark list)
+done < <(swift package --package-path Benchmarks benchmark list "${skip[@]}")
 
 if $complete && swift package --package-path Benchmarks benchmark thresholds check \
-    --path "$thresholds" --no-progress; then
+    "${skip[@]}" --path "$thresholds" --no-progress; then
     exit 0
 fi
 
 echo "::error::The benchmark counts do not match $thresholds. The measured counts follow."
 mkdir -p "$thresholds"
 swift package --package-path Benchmarks --allow-writing-to-package-directory \
-    benchmark thresholds update --path "$thresholds" --no-progress || exit 1
+    benchmark thresholds update "${skip[@]}" --path "$thresholds" --no-progress || exit 1
 # The checkout belongs to another user in a container, which git refuses
 # without the safe.directory exception.
 git -c safe.directory="$PWD" add --intent-to-add "$thresholds"

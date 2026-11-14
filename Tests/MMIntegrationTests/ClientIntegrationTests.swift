@@ -278,6 +278,70 @@ struct ClientIntegrationTests {
         }
     }
 
+    @Test("a client within the server's in-flight cap is never refused for it")
+    func callsAtTheCapAreAdmitted() async throws {
+        // As many lanes as the shared default cap, each awaiting its call
+        // before the next, so the client never holds more than the cap. The
+        // server frees a call's slot before its response can reach the
+        // client: freed only once the response was written, a lane's next
+        // call could arrive first and be refused with tooManyInFlight. The
+        // race needs a busy server, so several clients run their lanes at
+        // once; the cap is per connection.
+        let cap = MMServerConfiguration.defaultMaxInFlightRequestsPerConnection
+        let clientCount = 4
+        let callsPerLane = 250
+        #expect(MMClientConfiguration().maxInFlightCalls == cap)
+        try await withTempSocketPath { path in
+            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
+            try await withRunningServer(server) { _ in
+                try await withThrowingTaskGroup(of: Void.self) { clients in
+                    for client in 0..<clientCount {
+                        clients.addTask {
+                            _ = try await withConnectedClient(unixPath: path) { connection in
+                                await callInLanes(
+                                    client: client,
+                                    lanes: cap,
+                                    callsPerLane: callsPerLane,
+                                    through: connection
+                                )
+                            }
+                        }
+                    }
+                    try await clients.waitForAll()
+                }
+            }
+        }
+    }
+
+    /// `lanes` tasks each making `callsPerLane` echo calls through
+    /// `connection`, one after another; records the first unexpected reply
+    /// of each lane.
+    private func callInLanes(
+        client: Int,
+        lanes: Int,
+        callsPerLane: Int,
+        through connection: MMClientConnection
+    ) async {
+        await withTaskGroup(of: Void.self) { group in
+            for lane in 0..<lanes {
+                group.addTask {
+                    for call in 0..<callsPerLane {
+                        let value = (lane * callsPerLane + call) * 10 + client
+                        let reply = await connection.call(
+                            TestMethods.echo,
+                            on: entity("box.item"),
+                            EchoRequest(entity: entity("box.item"), value: value)
+                        )
+                        guard reply == .success(EchoResponse(value: value)) else {
+                            Issue.record("client \(client), lane \(lane), call \(call): \(reply)")
+                            return
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     @Test("authorization and application failures surface as their typed call errors")
     func errorMapping() async throws {
         try await withTempSocketPath { path in

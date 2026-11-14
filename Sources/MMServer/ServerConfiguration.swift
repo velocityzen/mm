@@ -24,6 +24,9 @@ public struct MMServerConfiguration: Sendable {
     /// Maximum requests a single connection may have running concurrently.
     /// A request arriving with the cap reached is answered immediately with
     /// `MMErrorCode.tooManyInFlight`. Requests are never queued beyond the cap.
+    /// A request stops counting when its handler returns, before its response
+    /// is sent, so a client that awaits each response is never refused while
+    /// it keeps no more calls than the cap.
     public var maxInFlightRequestsPerConnection: Int
 
     /// Maximum concurrently open streams on one connection, counted separately
