@@ -558,21 +558,24 @@ struct DynamicJSONParseTests {
                 == .object([.init("k", .int(1))]))
     }
 
-    @Test("malformed JSON is a ValidationError")
+    @Test("malformed JSON is a ValidationError that says where, the same on every platform")
     func malformed() {
-        for bad in ["{", "tru", "1 2", #"{"a":}"#, #"{"a" 1}"#, "\"\\q\"", "01x", "", "NaN"] {
-            #expect(throws: ValidationError.self, "input: \(bad)") {
-                _ = try MMCLIDynamicTree.parse(jsonText: bad)
-            }
+        let messages = [
+            "{": "Expected a quoted key or '}', found the end of the text at line 1, column 2.",
+            "tru": "Expected 'true', found the end of the text at line 1, column 4.",
+            "1 2": "Expected the end of the text, found '2' at line 1, column 3.",
+            #"{"a":}"#: "Expected a value, found '}' at line 1, column 6.",
+            #"{"a" 1}"#: "Expected ':', found '1' at line 1, column 6.",
+            "\"\\q\"": "Invalid escape sequence '\\q' at line 1, column 2.",
+            "\"\\ud800\"": "Unpaired high surrogate '\\uD800' at line 1, column 2.",
+            "01x": "Number with a leading zero at line 1, column 1.",
+            "": "Expected a value, found the end of the text at line 1, column 1.",
+            "NaN": "Expected a value, found 'N' at line 1, column 1.",
+            "[1,\n 2,\n x]": "Expected a value or ']', found 'x' at line 3, column 2.",
+        ]
+        for (bad, message) in messages {
+            expectParseFailure(bad, messageContains: message)
         }
-        // The message says where parsing stopped: Apple's Foundation names
-        // the line and column, and elsewhere JSONSerialization's message
-        // names the character offset.
-        #if canImport(Darwin)
-            expectParseFailure(#"{"a":}"#, messageContains: "line 1, column 6")
-        #else
-            expectParseFailure(#"{"a":}"#, messageContains: "around character 5")
-        #endif
     }
 
     @Test("a number too large for a double is refused with its path")
@@ -586,6 +589,18 @@ struct DynamicJSONParseTests {
             messageContains: "Number at b.c is too large for a double.")
         // One too small for a double rounds to zero.
         #expect(try MMCLIDynamicTree.parse(jsonText: "1e-400") == .int(0))
+    }
+
+    @Test("nesting deeper than 128 is refused before it can overflow the stack")
+    func nestingTooDeep() throws {
+        func objects(_ depth: Int) -> String {
+            String(repeating: #"{"a":"#, count: depth) + "1" + String(repeating: "}", count: depth)
+        }
+        _ = try MMCLIDynamicTree.parse(jsonText: objects(128))
+        // JSONDecoder allows 512, and 433 nested objects overflowed the 512 KB
+        // stack of a task's thread in a release build.
+        let refusal = "More than 128 arrays and objects nested in each other at line 1, column 641."
+        expectParseFailure(objects(433), messageContains: refusal)
     }
 
     @Test("Foundation's documented leniency: array trailing commas parse")
