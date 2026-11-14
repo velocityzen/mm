@@ -26,24 +26,13 @@ private func encodedInt(_ value: Int) -> ByteBuffer {
 
 private func makeSource(
     _ recorder: FrameRecorder
-) -> (MMRequestStreamSource<Int>, MMRequestStream<Int>) {
-    let source = MMRequestStreamSource<Int>(
+) -> (MMRequestStreamSource, MMRequestStream<Int>) {
+    MMRequestStream<Int>.make(
         msgid: 1,
-        decode: MMPackDecoder().decoding(Int.self),
+        decoding: MMPackDecoder().decoding(Int.self),
         frameSink: { await recorder.sink($0) },
         metrics: MMStreamMetrics()
     )
-    let made = MMRequestStream<Int>.Base.makeSequence(
-        elementType: Int.self,
-        backPressureStrategy: .init(
-            lowWatermark: MMStreamFlowControl.lowWatermark,
-            highWatermark: Int(MMStreamFlowControl.initialWindow)
-        ),
-        finishOnDeinit: false,
-        delegate: source
-    )
-    source.adopt(source: made.source)
-    return (source, MMRequestStream(base: made.sequence, source: source))
 }
 
 @Suite("Request stream source: credit + delivery")

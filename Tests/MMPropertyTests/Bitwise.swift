@@ -10,4 +10,6 @@
         var floatBits: [UInt64]
     }
 
+    extension Bitwise: Sendable where Value: Sendable {}
+
 #endif

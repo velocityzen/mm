@@ -42,12 +42,11 @@ public struct InboundStreamHandle<
     OutboundElement: Codable & Sendable,
     Response: Codable & Sendable
 >: AsyncSequence, Sendable {
-    typealias State = ClientStreamState<Element, OutboundElement, Response>
-    let state: State
+    let state: ClientStreamState
 
     public struct AsyncIterator: AsyncIteratorProtocol {
-        let state: State
-        var base: State.Producer.AsyncIterator
+        let state: ClientStreamState
+        var base: ClientStreamState.Producer.AsyncIterator
 
         /// The next response element, or `nil` once the server ended the stream
         /// (END or terminal) and the buffer is drained, or once the consuming
@@ -67,11 +66,16 @@ public struct InboundStreamHandle<
         /// `Sendable`, so it is only ever advanced off the caller's actor.
         @concurrent
         public mutating func next() async -> Element? {
-            let element = await self.base.next()
-            if element != nil, let credits = self.state.creditToGrantAfterConsume() {
+            guard let element = await self.base.next() else { return nil }
+            if let credits = self.state.creditToGrantAfterConsume() {
                 await self.state.grantConsumed(credits)
             }
-            return element
+            // The state's producer carries `any Sendable`; its decoder only
+            // ever yields an `Element`.
+            guard let typed = element as? Element else {
+                preconditionFailure("stream \(self.state.msgid): element is not \(Element.self)")
+            }
+            return typed
         }
     }
 
@@ -83,7 +87,7 @@ public struct InboundStreamHandle<
     /// sequence ends or concurrently with iteration; resolves exactly once
     /// (shared with the outbound half, when the call has one).
     public func result() async -> Result<Response, MMCallError> {
-        await self.state.result()
+        await self.state.result(as: Response.self)
     }
 
     /// Sends STOP (kind 5, graceful): asks the server to finish its response
@@ -186,13 +190,30 @@ public struct OutboundStreamHandle<
     InboundElement: Codable & Sendable,
     Response: Codable & Sendable
 >: Sendable {
-    typealias State = ClientStreamState<InboundElement, Element, Response>
-    let state: State
+    let state: ClientStreamState
+    /// The element coder, picked once when the handle is made: through the
+    /// generated code when the type has some, through `Codable` otherwise.
+    let encode: @Sendable (Element) -> Result<ByteBuffer, MMWireError>
+
+    init(state: ClientStreamState) {
+        self.state = state
+        self.encode = MMPackEncoder().encoding(Element.self)
+    }
 
     /// Sends one request element, credit-gated (suspends at zero credit until a
     /// grant). See ``StreamSendOutcome`` for the four graceful outcomes.
     public func send(_ element: Element) async -> StreamSendOutcome {
-        await self.state.send(element)
+        // Encode before the credit gate.
+        switch self.encode(element) {
+            case .failure:
+                // A local encode failure on an outbound element: treat as call
+                // ended rather than inventing a new outcome — the caller cannot
+                // send this element. (Element types are validated at open by the
+                // schema probe, so this is not expected in practice.)
+                return .callEnded
+            case .success(let item):
+                return await self.state.send(item)
+        }
     }
 
     /// Sends END (kind 4): finishes the client's request direction gracefully.
@@ -205,7 +226,7 @@ public struct OutboundStreamHandle<
     /// The call's terminal `Result<Response, MMCallError>`. Resolves exactly
     /// once (shared with the inbound half, when the call has one).
     public func result() async -> Result<Response, MMCallError> {
-        await self.state.result()
+        await self.state.result(as: Response.self)
     }
 
     /// Sends CANCEL (kind 6): abandons the whole call. Idempotent.
@@ -235,8 +256,6 @@ public struct BidirectionalStreamHandle<
     ResponseElement: Codable & Sendable,
     Response: Codable & Sendable
 >: Sendable {
-    typealias State = ClientStreamState<ResponseElement, RequestElement, Response>
-
     /// The inbound (server → client) response-element sequence plus stop/cancel
     /// and the shared terminal.
     public let inbound: InboundStreamHandle<ResponseElement, RequestElement, Response>
@@ -244,7 +263,7 @@ public struct BidirectionalStreamHandle<
     /// and the shared terminal.
     public let outbound: OutboundStreamHandle<RequestElement, ResponseElement, Response>
 
-    init(state: State) {
+    init(state: ClientStreamState) {
         self.inbound = InboundStreamHandle(state: state)
         self.outbound = OutboundStreamHandle(state: state)
     }

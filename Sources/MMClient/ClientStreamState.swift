@@ -48,17 +48,23 @@ import NIOCore
 ///   in the one mutation that transitions `terminalState` from `.pending` to
 ///   `.resolved`; late awaiters read the cached `.resolved` value and resume
 ///   themselves immediately.
-final class ClientStreamState<
-    Inbound: Codable & Sendable,
-    Outbound: Codable & Sendable,
-    Response: Codable & Sendable
->: Sendable {
-    typealias TerminalOutcome = Result<Response, MMCallError>
+///
+/// ## Not generic
+///
+/// The state carries each decoded element, and the decoded terminal, as
+/// `any Sendable`; the typed handles cast them back. Outbound elements reach
+/// it already encoded. A state generic over the call's types is not
+/// specialized across modules, so every lock, yield and `next()` looked its
+/// type metadata up at run time; this one's types are fixed. The generic
+/// step is ``make(msgid:hasResponseStream:hasRequestStream:inbound:response:sinks:logger:metrics:)``,
+/// once per stream.
+final class ClientStreamState: Sendable {
+    typealias TerminalOutcome = Result<any Sendable, MMCallError>
 
     typealias Producer = NIOAsyncSequenceProducer<
-        Inbound,
+        any Sendable,
         NIOAsyncSequenceProducerBackPressureStrategies.HighLowWatermark,
-        ClientStreamState<Inbound, Outbound, Response>
+        ClientStreamState
     >
     typealias Source = Producer.Source
 
@@ -125,18 +131,21 @@ final class ClientStreamState<
     private let sinks: ClientStreamSinks
     private let logger: Logger
     private let metrics: ClientMetrics
-    /// The item coders, picked once when the stream opens: through the
-    /// generated code when the type has some, through `Codable` otherwise.
-    private let decodeInbound: @Sendable (ByteBuffer) -> Result<Inbound, MMWireError>
-    private let encodeOutbound: @Sendable (Outbound) -> Result<ByteBuffer, MMWireError>
+    /// The item and terminal decoders, picked once when the stream opens
+    /// (through the generated code when the type has some, through `Codable`
+    /// otherwise), each returning its value erased to `any Sendable`.
+    private let decodeInbound: @Sendable (ByteBuffer) -> Result<any Sendable, MMWireError>
+    private let decodeResponse: @Sendable (ResponseSlots) -> TerminalOutcome
 
-    init(
+    private init(
         msgid: UInt32,
         hasResponseStream: Bool,
         hasRequestStream: Bool,
         sinks: ClientStreamSinks,
         logger: Logger,
-        metrics: ClientMetrics
+        metrics: ClientMetrics,
+        decodeInbound: @escaping @Sendable (ByteBuffer) -> Result<any Sendable, MMWireError>,
+        decodeResponse: @escaping @Sendable (ResponseSlots) -> TerminalOutcome
     ) {
         self.msgid = msgid
         self.hasResponseStream = hasResponseStream
@@ -149,15 +158,62 @@ final class ClientStreamState<
         self.sinks = sinks
         self.logger = logger
         self.metrics = metrics
-        self.decodeInbound = MMPackDecoder().decoding(Inbound.self)
-        self.encodeOutbound = MMPackEncoder().encoding(Outbound.self)
+        self.decodeInbound = decodeInbound
+        self.decodeResponse = decodeResponse
+    }
+
+    /// Builds the state for one stream and its inbound producer. The one
+    /// generic step: it picks the item and terminal decoders for the call's
+    /// types and erases what they return, so the state, its lock and the
+    /// producer stay concrete. Called before the stream is registered in the
+    /// CallTable — nothing can deliver or terminate earlier.
+    static func make<Inbound: Codable & Sendable, Response: Codable & Sendable>(
+        msgid: UInt32,
+        hasResponseStream: Bool,
+        hasRequestStream: Bool,
+        inbound _: Inbound.Type,
+        response _: Response.Type,
+        sinks: ClientStreamSinks,
+        logger: Logger,
+        metrics: ClientMetrics
+    ) -> ClientStreamState {
+        let decode = MMPackDecoder().decoding(Inbound.self)
+        let state = ClientStreamState(
+            msgid: msgid,
+            hasResponseStream: hasResponseStream,
+            hasRequestStream: hasRequestStream,
+            sinks: sinks,
+            logger: logger,
+            metrics: metrics,
+            decodeInbound: { item in
+                switch decode(item) {
+                    case .success(let element): .success(element)
+                    case .failure(let error): .failure(error)
+                }
+            },
+            decodeResponse: { slots in
+                switch slots.decodeResponse(Response.self) {
+                    case .success(let response): .success(response)
+                    case .failure(let error): .failure(error)
+                }
+            }
+        )
+        let made = Producer.makeSequence(
+            elementType: (any Sendable).self,
+            backPressureStrategy: .init(
+                lowWatermark: StreamBackpressure.lowWatermark,
+                highWatermark: StreamBackpressure.highWatermark
+            ),
+            finishOnDeinit: false,
+            delegate: state
+        )
+        state.adopt(source: made.source, sequence: made.sequence)
+        return state
     }
 
     /// Installs the producer source and its consumer sequence after
-    /// `makeSequence` (the delegate must exist before the source). Called once,
-    /// before the stream is registered in the CallTable — nothing can deliver or
-    /// terminate earlier.
-    func adopt(source: Source, sequence: Producer) {
+    /// `makeSequence` (the delegate must exist before the source).
+    private func adopt(source: Source, sequence: Producer) {
         self.state.withLockedValue {
             $0.source = source
             $0.sequence = sequence
@@ -247,7 +303,7 @@ extension ClientStreamState: ClientStreamControl {
     }
 
     func deliverInboundItem(_ item: ByteBuffer) -> InboundDeliveryOutcome {
-        let element: Inbound
+        let element: any Sendable
         switch self.decodeInbound(item) {
             case .failure(let error):
                 self.metrics.streamItemDecodeFailures.increment()
@@ -348,7 +404,7 @@ extension ClientStreamState: ClientStreamControl {
     }
 
     func resolveTerminal(_ slots: ResponseSlots) {
-        self.resolve(Self.decodeTerminal(slots))
+        self.resolve(self.decodeResponse(slots))
     }
 
     func failTerminal(_ reason: MMCallError) {
@@ -365,12 +421,6 @@ extension ClientStreamState: ClientStreamControl {
 // MARK: - Terminal resolution
 
 extension ClientStreamState {
-    /// Decodes the terminal response slots into `Response` — the shared unary
-    /// rule (``ResponseSlots/decodeResponse(_:)``).
-    private static func decodeTerminal(_ slots: ResponseSlots) -> TerminalOutcome {
-        slots.decodeResponse(Response.self)
-    }
-
     /// The single terminal-resolving transition, shared by the terminal frame,
     /// connection death, and local cancel. Resolves every terminal awaiter with
     /// the same outcome (and caches it for late awaiters), finishes the inbound
@@ -432,6 +482,21 @@ extension ClientStreamState {
             if let cached { continuation.resume(returning: cached) }
         }
     }
+
+    /// ``result()`` as the call's `Response` type, for the typed handles. The
+    /// terminal decoder only ever produces a `Response`, so any other type is
+    /// a programming error.
+    func result<Response>(as _: Response.Type) async -> Result<Response, MMCallError> {
+        switch await self.result() {
+            case .success(let response):
+                guard let typed = response as? Response else {
+                    preconditionFailure("stream \(self.msgid): terminal is not \(Response.self)")
+                }
+                return .success(typed)
+            case .failure(let error):
+                return .failure(error)
+        }
+    }
 }
 
 // MARK: - Outbound send gate
@@ -447,23 +512,11 @@ private enum SendGate {
 }
 
 extension ClientStreamState {
-    /// Encodes and sends one request-stream element, credit-gated. Suspends at
+    /// Sends one encoded request-stream element, credit-gated. Suspends at
     /// zero credit until a grant (or STOP / death / END). The seq is stamped
-    /// from 0 under the lock, so concurrent senders never collide on seq.
-    func send(_ element: Outbound) async -> StreamSendOutcome {
-        // Encode outside the lock.
-        let item: ByteBuffer
-        switch self.encodeOutbound(element) {
-            case .failure:
-                // A local encode failure on an outbound element: treat as call
-                // ended rather than inventing a new outcome — the caller cannot
-                // send this element. (Element types are validated at open by the
-                // schema probe, so this is not expected in practice.)
-                return .callEnded
-            case .success(let encoded):
-                item = encoded
-        }
-
+    /// from 0 under the lock, so concurrent senders never collide on seq. The
+    /// typed handle encodes the element first.
+    func send(_ item: ByteBuffer) async -> StreamSendOutcome {
         // Acquire a credit + seq, or a terminal disposition, possibly parking.
         while true {
             let gate: SendGate = self.state.withLockedValue { state in

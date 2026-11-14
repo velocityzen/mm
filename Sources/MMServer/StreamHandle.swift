@@ -63,13 +63,13 @@ typealias ErasedStreamHandler =
 /// The connection's ``StreamTable`` routes wire frames to these methods after
 /// deciding legality under its lock (see ``StreamControl``). Effects run outside
 /// that lock.
-final class ConcreteStreamControl<
-    RequestElement: Codable & Sendable,
-    ResponseElement: Codable & Sendable
->: StreamControl {
+///
+/// Not generic: neither the source nor the sink carries an element type, so
+/// the table's per-item calls run without looking type metadata up.
+final class ConcreteStreamControl: StreamControl {
     let hasRequestStream: Bool
     let hasResponseStream: Bool
-    private let requestSource: MMRequestStreamSource<RequestElement>?
+    private let requestSource: MMRequestStreamSource?
     private let responseSink: MMResponseSinkState?
     /// The handler-task cancel state. The connection registers the entry in the
     /// ``StreamTable`` *before* the child task installs the hook (via
@@ -84,7 +84,7 @@ final class ConcreteStreamControl<
     private let cancelBox = NIOLockedValueBox(CancelState())
 
     init(
-        requestSource: MMRequestStreamSource<RequestElement>?,
+        requestSource: MMRequestStreamSource?,
         responseSink: MMResponseSinkState?
     ) {
         self.hasRequestStream = requestSource != nil

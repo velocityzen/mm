@@ -12,8 +12,8 @@
     @testable import MMServer
 
     /// The client stream both pipes run: `Int` items each way, and an `Int`
-    /// response.
-    typealias PipeClient = ClientStreamState<Int, Int, Int>
+    /// response, which the client's state carries as `any Sendable`.
+    typealias PipeClient = ClientStreamState
 
     /// A terminal handed to the client stream.
     typealias PipeTerminal = Result<Int, MMCallError>
@@ -368,7 +368,9 @@
         let plan: RequestPlan
         let record = PipeRecord()
         let client: PipeClient
-        let server: MMRequestStreamSource<Int>
+        /// The client's typed sending half, which encodes each value.
+        let outbound: OutboundStreamHandle<Int, Never, Int>
+        let server: MMRequestStreamSource
         let stream: MMRequestStream<Int>
         /// The pipe as its own closures see it, cleared by `detach()` so the
         /// client, the server and the pipe don't keep each other alive.
@@ -376,10 +378,12 @@
 
         init(plan: RequestPlan) {
             let link = NIOLockedValueBox<RequestPipe?>(nil)
-            let client = PipeClient(
+            let client = PipeClient.make(
                 msgid: 1,
                 hasResponseStream: false,
                 hasRequestStream: true,
+                inbound: Never.self,
+                response: Int.self,
                 sinks: ClientStreamSinks(
                     grantCredit: { _ in },
                     sendItem: { seq, item in
@@ -392,28 +396,19 @@
                 logger: Logger(label: "mm.property.request-pipe"),
                 metrics: ClientMetrics()
             )
-            let server = MMRequestStreamSource<Int>(
+            let (server, stream) = MMRequestStream<Int>.make(
                 msgid: 1,
-                decode: MMPackDecoder().decoding(Int.self),
+                decoding: MMPackDecoder().decoding(Int.self),
                 frameSink: { envelope in
                     link.withLockedValue { $0 }?.clientReceives(envelope) ?? false
                 },
                 metrics: MMStreamMetrics()
             )
-            let made = MMRequestStream<Int>.Base.makeSequence(
-                elementType: Int.self,
-                backPressureStrategy: .init(
-                    lowWatermark: MMStreamFlowControl.lowWatermark,
-                    highWatermark: Int(MMStreamFlowControl.initialWindow)
-                ),
-                finishOnDeinit: false,
-                delegate: server
-            )
-            server.adopt(source: made.source)
             self.plan = plan
             self.client = client
+            self.outbound = OutboundStreamHandle(state: client)
             self.server = server
-            self.stream = MMRequestStream(base: made.sequence, source: server)
+            self.stream = stream
             self.link = link
             link.withLockedValue { $0 = self }
         }
@@ -543,7 +538,7 @@
         func startAwaiter() {
             self.record.update { $0.awaiters += 1 }
             self.record.spawn {
-                let result = await self.client.result()
+                let result = await self.client.result(as: Int.self)
                 self.record.update { $0.results.append(result) }
             }
         }
@@ -552,7 +547,7 @@
         /// send that doesn't go out.
         func send() async {
             for value in 0..<self.plan.items {
-                let sent = await self.client.send(value)
+                let sent = await self.outbound.send(value)
                 let outcome: SendOutcome =
                     switch sent {
                         case .sent: .sent
@@ -684,10 +679,12 @@
 
         init(plan: ResponsePlan) {
             let link = NIOLockedValueBox<ResponsePipe?>(nil)
-            let client = PipeClient(
+            let client = PipeClient.make(
                 msgid: 1,
                 hasResponseStream: true,
                 hasRequestStream: false,
+                inbound: Int.self,
+                response: Int.self,
                 sinks: ClientStreamSinks(
                     grantCredit: { credits in link.withLockedValue { $0 }?.serverGranted(credits) },
                     sendItem: { _, _ in false },
@@ -698,16 +695,6 @@
                 logger: Logger(label: "mm.property.response-pipe"),
                 metrics: ClientMetrics()
             )
-            let made = PipeClient.Producer.makeSequence(
-                elementType: Int.self,
-                backPressureStrategy: .init(
-                    lowWatermark: StreamBackpressure.lowWatermark,
-                    highWatermark: StreamBackpressure.highWatermark
-                ),
-                finishOnDeinit: false,
-                delegate: client
-            )
-            client.adopt(source: made.source, sequence: made.sequence)
             let server = MMResponseSinkState(
                 msgid: 1,
                 itemSink: { seq, item in
@@ -797,7 +784,7 @@
         func startAwaiter() {
             self.record.update { $0.awaiters += 1 }
             self.record.spawn {
-                let result = await self.client.result()
+                let result = await self.client.result(as: Int.self)
                 self.record.update { $0.results.append(result) }
             }
         }

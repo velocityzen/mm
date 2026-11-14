@@ -37,19 +37,20 @@ extension MMStreamFlowControl {
 ///
 /// Exactly one iterator (a second violates the producer's precondition); the
 /// handler body iterates it, and each element it pulls advances credit.
+///
+/// ## Concrete producer
+///
+/// The producer carries each decoded element as `any Sendable`, and `next()`
+/// casts it back to `Element`. A producer generic over `Element` is not
+/// specialized across modules, so every yield and every `next()` looked its
+/// type metadata up at run time; this one's types are fixed.
 public struct MMRequestStream<Element: Codable & Sendable>: AsyncSequence, Sendable {
-    typealias Base = NIOAsyncSequenceProducer<
-        Element,
-        NIOAsyncSequenceProducerBackPressureStrategies.HighLowWatermark,
-        MMRequestStreamSource<Element>
-    >
-
-    let base: Base
-    let source: MMRequestStreamSource<Element>
+    let base: MMRequestStreamSource.Sequence
+    let source: MMRequestStreamSource
 
     public struct AsyncIterator: AsyncIteratorProtocol {
-        var base: Base.AsyncIterator
-        let source: MMRequestStreamSource<Element>
+        var base: MMRequestStreamSource.Sequence.AsyncIterator
+        let source: MMRequestStreamSource
 
         /// The next request element, or `nil` once the client's request
         /// direction has ended (END, CANCEL, connection death, or terminal) and
@@ -69,14 +70,52 @@ public struct MMRequestStream<Element: Codable & Sendable>: AsyncSequence, Senda
         /// `Sendable`, so it is only ever advanced off the caller's actor.
         @concurrent
         public mutating func next() async -> Element? {
-            let element = await self.base.next()
-            if element != nil { self.source.didConsume() }
-            return element
+            guard let element = await self.base.next() else { return nil }
+            self.source.didConsume()
+            // The source only ever holds what this stream's own decode made.
+            guard let typed = element as? Element else {
+                preconditionFailure("stream \(self.source.msgid): element is not \(Element.self)")
+            }
+            return typed
         }
     }
 
     public func makeAsyncIterator() -> AsyncIterator {
         AsyncIterator(base: self.base.makeAsyncIterator(), source: self.source)
+    }
+
+    /// Builds a request-stream source and its typed sequence: the source
+    /// decodes each item with `decode` and holds it as `any Sendable` until
+    /// this sequence casts it back. Credit grants and STOP go out through
+    /// `frameSink`.
+    static func make(
+        msgid: UInt32,
+        decoding decode: @escaping @Sendable (ByteBuffer) -> Result<Element, MMWireError>,
+        frameSink: @escaping MMRequestStreamSource.FrameSink,
+        metrics: MMStreamMetrics
+    ) -> (source: MMRequestStreamSource, stream: MMRequestStream<Element>) {
+        let source = MMRequestStreamSource(
+            msgid: msgid,
+            decode: { item in
+                switch decode(item) {
+                    case .success(let element): .success(element)
+                    case .failure(let error): .failure(error)
+                }
+            },
+            frameSink: frameSink,
+            metrics: metrics
+        )
+        let made = MMRequestStreamSource.Sequence.makeSequence(
+            elementType: (any Sendable).self,
+            backPressureStrategy: .init(
+                lowWatermark: MMStreamFlowControl.lowWatermark,
+                highWatermark: Int(MMStreamFlowControl.initialWindow)
+            ),
+            finishOnDeinit: false,
+            delegate: source
+        )
+        source.adopt(source: made.source)
+        return (source, MMRequestStream(base: made.sequence, source: source))
     }
 
     /// Server-initiated STOP: asks the client to gracefully finish its request
@@ -88,7 +127,8 @@ public struct MMRequestStream<Element: Codable & Sendable>: AsyncSequence, Senda
 }
 
 /// The producer-side state machine for one request stream: it decodes inbound
-/// `item` slices to `Element`, yields them into the `NIOAsyncSequenceProducer`,
+/// `item` slices to the stream's element type, yields them as `any Sendable`
+/// into the `NIOAsyncSequenceProducer`,
 /// and computes credit grants back to the client as the handler consumes.
 ///
 /// A locked value (not actor state), for the same reason as the client's
@@ -120,8 +160,12 @@ public struct MMRequestStream<Element: Codable & Sendable>: AsyncSequence, Senda
 /// the buffer is full (the credit window guarantees it never fills under a
 /// conforming client). Its only outbound effects are credit grants (via the
 /// pump) and one idempotent STOP.
-final class MMRequestStreamSource<Element: Codable & Sendable>: Sendable {
-    typealias Sequence = MMRequestStream<Element>.Base
+final class MMRequestStreamSource: Sendable {
+    typealias Sequence = NIOAsyncSequenceProducer<
+        any Sendable,
+        NIOAsyncSequenceProducerBackPressureStrategies.HighLowWatermark,
+        MMRequestStreamSource
+    >
     typealias Source = Sequence.Source
 
     /// Emits one outbound frame for this stream (credit grants, STOP) through
@@ -154,8 +198,10 @@ final class MMRequestStreamSource<Element: Codable & Sendable>: Sendable {
     let msgid: UInt32
     private let state: NIOLockedValueBox<State>
     /// The element decode its `Handle` picked once for the route: through the
-    /// generated code when `Element` has some, through `Decodable` otherwise.
-    private let decode: @Sendable (ByteBuffer) -> Result<Element, MMWireError>
+    /// generated code when the element type has some, through `Decodable`
+    /// otherwise. It returns the element as `any Sendable`, so this class and
+    /// its producer stay free of the element type.
+    private let decode: @Sendable (ByteBuffer) -> Result<any Sendable, MMWireError>
     private let frameSink: FrameSink
     /// Coalesced "grant may be due" nudges to the pump loop. Dropping duplicate
     /// nudges is correct: the pump reads the exact `pendingGrant` amount, so one
@@ -167,7 +213,7 @@ final class MMRequestStreamSource<Element: Codable & Sendable>: Sendable {
 
     init(
         msgid: UInt32,
-        decode: @escaping @Sendable (ByteBuffer) -> Result<Element, MMWireError>,
+        decode: @escaping @Sendable (ByteBuffer) -> Result<any Sendable, MMWireError>,
         frameSink: @escaping FrameSink,
         metrics: MMStreamMetrics
     ) {

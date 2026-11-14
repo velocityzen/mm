@@ -393,8 +393,8 @@ private func streamRoute<Request: Codable & Sendable>(
 /// The run choreography shared by the two request-stream-carrying shapes:
 /// grant pump as a sibling task, the handler's terminal, finish the inbound
 /// sequence (which ends the pump), optionally end the response sink, join.
-private func runWithGrantPump<Element: Codable & Sendable>(
-    _ source: MMRequestStreamSource<Element>,
+private func runWithGrantPump(
+    _ source: MMRequestStreamSource,
     endSink: (@Sendable () -> Void)? = nil,
     _ handler: @escaping @Sendable () async -> StreamTerminal
 ) async -> StreamTerminal {
@@ -416,24 +416,13 @@ private func makeRequestStream<Element: Codable & Sendable>(
     msgid: UInt32,
     seams: StreamWireSeams,
     metrics: MMStreamMetrics
-) -> (source: MMRequestStreamSource<Element>, stream: MMRequestStream<Element>) {
-    let source = MMRequestStreamSource<Element>(
+) -> (source: MMRequestStreamSource, stream: MMRequestStream<Element>) {
+    MMRequestStream<Element>.make(
         msgid: msgid,
-        decode: decode,
+        decoding: decode,
         frameSink: seams.sendFrame,
         metrics: metrics
     )
-    let made = MMRequestStream<Element>.Base.makeSequence(
-        elementType: Element.self,
-        backPressureStrategy: .init(
-            lowWatermark: MMStreamFlowControl.lowWatermark,
-            highWatermark: Int(MMStreamFlowControl.initialWindow)
-        ),
-        finishOnDeinit: false,
-        delegate: source
-    )
-    source.adopt(source: made.source)
-    return (source, MMRequestStream(base: made.sequence, source: source))
 }
 
 /// Binds a server-streaming handler: `(request, sink, context)`. The server streams
@@ -463,7 +452,7 @@ public func Handle<
             itemSink: seams.sendItem,
             metrics: metrics
         )
-        let control = ConcreteStreamControl<NeverElement, Element>(
+        let control = ConcreteStreamControl(
             requestSource: nil,
             responseSink: sinkState
         )
@@ -505,7 +494,7 @@ public func Handle<
             metrics: metrics
         )
 
-        let control = ConcreteStreamControl<Element, NeverElement>(
+        let control = ConcreteStreamControl(
             requestSource: source,
             responseSink: nil
         )
@@ -556,7 +545,7 @@ public func Handle<
             metrics: metrics
         )
 
-        let control = ConcreteStreamControl<RequestElement, ResponseElement>(
+        let control = ConcreteStreamControl(
             requestSource: source,
             responseSink: sinkState
         )

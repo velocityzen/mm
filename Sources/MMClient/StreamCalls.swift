@@ -35,7 +35,6 @@ extension MMClientConnection {
             hasResponseStream: true,
             hasRequestStream: false,
             inbound: Element.self,
-            outbound: Never.self,
             response: Response.self
         )
         return InboundStreamHandle(state: state)
@@ -61,7 +60,6 @@ extension MMClientConnection {
             hasResponseStream: false,
             hasRequestStream: true,
             inbound: Never.self,
-            outbound: Element.self,
             response: Response.self
         )
         return OutboundStreamHandle(state: state)
@@ -89,7 +87,6 @@ extension MMClientConnection {
             hasResponseStream: true,
             hasRequestStream: true,
             inbound: ResponseElement.self,
-            outbound: RequestElement.self,
             response: Response.self
         )
         return BidirectionalStreamHandle(state: state)

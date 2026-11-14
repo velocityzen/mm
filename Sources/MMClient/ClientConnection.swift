@@ -873,7 +873,6 @@ public actor MMClientConnection {
     /// authorization failures arrive the same way, as the terminal frame.
     nonisolated func openStream<
         Inbound: Codable & Sendable,
-        Outbound: Codable & Sendable,
         Response: Codable & Sendable
     >(
         methodName: String,
@@ -882,9 +881,8 @@ public actor MMClientConnection {
         hasResponseStream: Bool,
         hasRequestStream: Bool,
         inbound _: Inbound.Type,
-        outbound _: Outbound.Type,
         response _: Response.Type
-    ) async -> ClientStreamState<Inbound, Outbound, Response> {
+    ) async -> ClientStreamState {
         self.metrics.streamsOpened.increment()
         // The shared send path; a pre-send failure resolves the terminal
         // immediately on a state that never entered the table.
@@ -903,7 +901,6 @@ public actor MMClientConnection {
                     hasResponseStream: hasResponseStream,
                     hasRequestStream: hasRequestStream,
                     inbound: Inbound.self,
-                    outbound: Outbound.self,
                     response: Response.self
                 )
             },
@@ -911,6 +908,8 @@ public actor MMClientConnection {
                 self.failedStream(
                     hasResponseStream: hasResponseStream,
                     hasRequestStream: hasRequestStream,
+                    inbound: Inbound.self,
+                    response: Response.self,
                     error: error
                 )
             }
@@ -922,7 +921,6 @@ public actor MMClientConnection {
     /// and hand it any terminal that raced ahead.
     private nonisolated func openPreparedStream<
         Inbound: Codable & Sendable,
-        Outbound: Codable & Sendable,
         Response: Codable & Sendable
     >(
         msgid: UInt32,
@@ -932,9 +930,8 @@ public actor MMClientConnection {
         hasResponseStream: Bool,
         hasRequestStream: Bool,
         inbound _: Inbound.Type,
-        outbound _: Outbound.Type,
         response _: Response.Type
-    ) async -> ClientStreamState<Inbound, Outbound, Response> {
+    ) async -> ClientStreamState {
         do {
             try await writer.write(frame)
         } catch is CancellationError {
@@ -956,6 +953,8 @@ public actor MMClientConnection {
             return self.failedStream(
                 hasResponseStream: hasResponseStream,
                 hasRequestStream: hasRequestStream,
+                inbound: Inbound.self,
+                response: Response.self,
                 error: reason
             )
         } catch {
@@ -976,7 +975,6 @@ public actor MMClientConnection {
             hasResponseStream: hasResponseStream,
             hasRequestStream: hasRequestStream,
             inbound: Inbound.self,
-            outbound: Outbound.self,
             response: Response.self
         )
         // A terminal (or a close) that resolved before the control was
@@ -1058,16 +1056,14 @@ public actor MMClientConnection {
     /// connection's outbound writer.
     private nonisolated func makeStreamState<
         Inbound: Codable & Sendable,
-        Outbound: Codable & Sendable,
         Response: Codable & Sendable
     >(
         msgid: UInt32,
         hasResponseStream: Bool,
         hasRequestStream: Bool,
         inbound _: Inbound.Type,
-        outbound _: Outbound.Type,
         response _: Response.Type
-    ) -> ClientStreamState<Inbound, Outbound, Response> {
+    ) -> ClientStreamState {
         let sinks = ClientStreamSinks(
             grantCredit: { [self] credits in
                 _ = await self.writeStreamFrame(.credit(msgid: msgid, credits: credits))
@@ -1088,25 +1084,16 @@ public actor MMClientConnection {
                 _ = await self.writeStreamFrame(.cancel(msgid: msgid))
             }
         )
-        let state = ClientStreamState<Inbound, Outbound, Response>(
+        return ClientStreamState.make(
             msgid: msgid,
             hasResponseStream: hasResponseStream,
             hasRequestStream: hasRequestStream,
+            inbound: Inbound.self,
+            response: Response.self,
             sinks: sinks,
             logger: self.logger,
             metrics: self.metrics
         )
-        let new = ClientStreamState<Inbound, Outbound, Response>.Producer.makeSequence(
-            elementType: Inbound.self,
-            backPressureStrategy: .init(
-                lowWatermark: StreamBackpressure.lowWatermark,
-                highWatermark: StreamBackpressure.highWatermark
-            ),
-            finishOnDeinit: false,
-            delegate: state
-        )
-        state.adopt(source: new.source, sequence: new.sequence)
-        return state
     }
 
     /// A stream state that never entered the CallTable, born with its
@@ -1117,20 +1104,20 @@ public actor MMClientConnection {
     /// normal terminal frame on an installed stream.
     private nonisolated func failedStream<
         Inbound: Codable & Sendable,
-        Outbound: Codable & Sendable,
         Response: Codable & Sendable
     >(
         hasResponseStream: Bool,
         hasRequestStream: Bool,
+        inbound _: Inbound.Type,
+        response _: Response.Type,
         error: MMCallError
-    ) -> ClientStreamState<Inbound, Outbound, Response> {
+    ) -> ClientStreamState {
         // msgid 0 is only a log label here; the state is not in the table.
         let state = self.makeStreamState(
             msgid: 0,
             hasResponseStream: hasResponseStream,
             hasRequestStream: hasRequestStream,
             inbound: Inbound.self,
-            outbound: Outbound.self,
             response: Response.self
         )
         state.failTerminal(error)

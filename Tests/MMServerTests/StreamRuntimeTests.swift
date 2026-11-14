@@ -711,9 +711,7 @@ struct ConcreteStreamControlCancelTests {
         // installs the cancel hook. A CANCEL routed in that window calls
         // cancelHandler() while the hook is nil; without a latch the cancel is
         // lost. The latch must fire the hook the moment attachCancel installs it.
-        let control = ConcreteStreamControl<NeverElement, NeverElement>(
-            requestSource: nil, responseSink: nil
-        )
+        let control = ConcreteStreamControl(requestSource: nil, responseSink: nil)
         let fired = NIOLockedValueBox(0)
         // CANCEL races ahead of attachCancel: no hook yet, latch it.
         control.cancelHandler()
@@ -725,9 +723,7 @@ struct ConcreteStreamControlCancelTests {
 
     @Test("the normal ordering (attach then cancel) fires exactly once, no double-fire")
     func attachThenCancelFiresOnce() {
-        let control = ConcreteStreamControl<NeverElement, NeverElement>(
-            requestSource: nil, responseSink: nil
-        )
+        let control = ConcreteStreamControl(requestSource: nil, responseSink: nil)
         let fired = NIOLockedValueBox(0)
         control.attachCancel { fired.withLockedValue { $0 += 1 } }
         #expect(fired.withLockedValue { $0 } == 0)  // not fired on attach
