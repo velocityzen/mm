@@ -255,6 +255,8 @@ let package = Package(
                 "MMCLI",
                 "MMWire",
                 "MMSchema",
+                // `isValidLowerIdentifierPath`, the macros' namespace check.
+                "MMSchemaCodeGenerator",
                 "MMServer",
                 "MMClient",
                 "MMTestSupport",
