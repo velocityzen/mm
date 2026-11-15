@@ -112,6 +112,9 @@
             var unreadPastTheWindow: [(seq: UInt32, unread: Int)] = []
             /// Seqs the client's inbound check called a violation.
             var violations: [UInt32] = []
+            /// Seqs whose delivery filled the client's buffer, so its inbound
+            /// loop parked.
+            var parks: [UInt32] = []
             /// The values the receiving side's reader took, in order.
             var consumed: [Int] = []
             /// What each send returned, in order.
@@ -674,6 +677,11 @@
     final class ResponsePipe: Sendable {
         let plan: ResponsePlan
         let record = PipeRecord()
+        /// Opens once the client's inbound loop has handled the last item
+        /// of the initial window, or the server has stopped sending. A late
+        /// reader waits for it, so the whole window is in the buffer before
+        /// the first read.
+        let windowBuffered = Gate()
         let client: PipeClient
         let server: MMResponseSinkState
         let sink: MMResponseSink<Int>
@@ -726,10 +734,21 @@
                 case .drop:
                     self.record.event("an item reached a client that stopped reading")
                 case .deliver:
-                    if case .stopProducing = self.client.deliverInboundItem(item) {
-                        self.record.event("the client's buffer filled")
+                    let filled = self.client.deliverInboundItem(item)
+                    if seq + 1 == MMStreamFlowControl.initialWindow, self.plan.readsLate {
+                        self.record.event("the whole window reached a reader that had read none")
+                    }
+                    if case .stopProducing = filled {
+                        self.record.update { $0.parks.append(seq) }
+                        // A late reader waits for the window first; let it
+                        // drain the buffer, so the case fails on the park
+                        // instead of hanging.
+                        self.windowBuffered.open()
                         await self.client.awaitInboundDemand()
                     }
+            }
+            if seq + 1 >= MMStreamFlowControl.initialWindow {
+                self.windowBuffered.open()
             }
             self.interrupt(at: seq)
             return true
@@ -777,6 +796,7 @@
             self.record.update { $0.dead = true }
             self.record.event("the connection died")
             self.record.senderStopped()
+            self.windowBuffered.open()
             self.serverEnded()
             self.record.handTerminal(.failure(.connectionClosed))
             self.client.failTerminal(.connectionClosed)
@@ -803,7 +823,7 @@
             var cancelled = false
             while true {
                 if read == 0, self.plan.readsLate {
-                    await self.record.windowSpent.wait()
+                    await self.windowBuffered.wait()
                 }
                 if read == self.plan.limit {
                     switch self.plan.reading {
@@ -855,6 +875,7 @@
                     guard last == .sent else { break }
                 }
                 self.record.senderStopped()
+                self.windowBuffered.open()
                 if last == .peerStopped || Task.isCancelled {
                     await group.waitForAll()
                 }
@@ -1072,12 +1093,16 @@
 
         /// A server's response sink, sending to a client that reads all of
         /// it, asks it to STOP, cancels the call or stops reading as its task
-        /// is cancelled, reading at once or only once the server has spent
-        /// its window, with the connection dying at a drawn point and the
-        /// handler's task cancelled at a random checkpoint, never sends more
-        /// items than the initial window plus the client's grants so far,
-        /// and the client grants only for items it received. The client's
-        /// inbound check finds every seq in order. A send that doesn't go out
+        /// is cancelled, reading at once or only once its whole initial window
+        /// is in the client's buffer, with the connection dying at a drawn
+        /// point and the handler's task cancelled at a random checkpoint,
+        /// never sends more items than the initial window plus the client's
+        /// grants so far, and the client grants only for items it received.
+        /// The client's inbound check finds every seq in order, and its
+        /// buffer never fills: a whole window waiting unread still leaves its
+        /// inbound loop reading. A parked loop reads no frame for any call on
+        /// the connection, so a reader that waits on another call before it
+        /// drains the window would wait forever. A send that doesn't go out
         /// says why: a STOP or the sink's end. With nothing in the way, every
         /// send goes out. Every `stopRequested()` watcher returns exactly
         /// once, explained by a STOP, the end, the connection's death or its
@@ -1089,7 +1114,9 @@
         /// the end that leaves the sender parked, a STOP that leaves the stop
         /// watchers waiting, a watcher that ignores its earlier cancellation,
         /// a parked send that reuses its seq, a client that grants one too
-        /// many, or a second terminal that overwrites the first, fails here.
+        /// many, a client buffer that parks its loop at a full window (the
+        /// bug this property found), or a second terminal that overwrites the
+        /// first, fails here.
         @Test
         func responseSinkStaysInsideTheClientsGrants() async throws {
             try await property(
@@ -1101,7 +1128,8 @@
                     "a watcher returned on its own cancellation": 1_000,
                     "an item reached a client that stopped reading": 1_000,
                     "items went past the initial window": 1_000,
-                    "the client's buffer filled": 1_000, "the connection died": 1_000,
+                    "the connection died": 1_000,
+                    "the whole window reached a reader that had read none": 1_000,
                 ]
             ) { tc in
                 let plan = try ResponsePlan.draw(tc)
@@ -1148,6 +1176,10 @@
                 #expect(
                     record.violations.isEmpty,
                     "the client's inbound check refused seqs \(record.violations)"
+                )
+                #expect(
+                    record.parks.isEmpty,
+                    "a server inside its credit parked the client's inbound loop at seqs \(record.parks)"
                 )
                 expectInsideTheWindow(record)
                 switch record.outcomes.last {

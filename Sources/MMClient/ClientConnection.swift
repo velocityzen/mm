@@ -565,7 +565,8 @@ public actor MMClientConnection {
     /// late item (after the stream ended) or an item for an unknown/retired
     /// msgid is a tolerated drop-and-count. On a legal item whose delivery fills
     /// the per-stream buffer, the loop parks (``awaitInboundDemand``) before
-    /// returning — real backpressure to the socket.
+    /// returning — real backpressure to the socket. The buffer holds a full
+    /// credit window, so only a server past its credit fills it.
     private func handleInboundItem(
         msgid: UInt32,
         seq: UInt32,
@@ -593,8 +594,9 @@ public actor MMClientConnection {
                     case .produceMore, .dropped:
                         return nil
                     case .stopProducing:
-                        // Buffer full: park before reading the next frame so lag reaches
-                        // the socket. The park releases on consumer drain, stream end,
+                        // Buffer full, which only a server past its credit gets to:
+                        // park before reading the next frame so lag reaches the
+                        // socket. The park releases on consumer drain, stream end,
                         // or task cancellation (loop teardown).
                         await control.awaitInboundDemand()
                         return nil

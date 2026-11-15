@@ -9,12 +9,19 @@ import NIOCore
 
 /// The inbound response-element producer's buffer bounds. Fixed, not
 /// configurable: it is a smoothing window, and the real limit is the credit
-/// window (the consumer stops granting when it lags, so the server parks). The
-/// high watermark is the initial credit window so the buffer can hold a full
-/// unprompted burst without the producer parking mid-window.
+/// window (the consumer stops granting when it lags, so the server parks).
+///
+/// The high watermark is one past the credit window, so a server inside its
+/// credit never parks the inbound loop. The producer stops at the yield that
+/// brings the buffer to the high watermark, and resumes only once the buffer
+/// is below the low watermark: empty. At the window itself, a full window
+/// waiting unread parked the loop until the consumer drained all of it, and
+/// a parked loop reads no frame for any call on the connection. A consumer
+/// that waited on another call before draining waited forever. Only a server
+/// past its credit fills the buffer now.
 enum StreamBackpressure {
     static let lowWatermark = 1
-    static let highWatermark = Int(MMStreamFlowControl.initialWindow)
+    static let highWatermark = Int(MMStreamFlowControl.initialWindow) + 1
 }
 
 // A stream direction that does not exist is typed as the stdlib's `Never`

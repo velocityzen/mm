@@ -158,9 +158,10 @@ struct StreamTests {
                 ClientTestMethods.follow, on: entity("box"), boxRequest(1))
             let (msgid, _, _) = try await client.readRequestFrame()
 
-            // Fill past the high watermark (initial window = 8) so the producer
-            // buffer fills and the inbound loop parks before reading further.
-            // The consumer has not started iterating, so nothing drains.
+            // Fill past the high watermark (one past the initial window of 8,
+            // so this server overruns its credit) so the producer buffer fills
+            // and the inbound loop parks before reading further. The consumer
+            // has not started iterating, so nothing drains.
             for seq in UInt32(0)..<10 {
                 try await client.channel.writeInbound(
                     itemFrame(msgid: msgid, seq: seq, value: Int(seq)))
