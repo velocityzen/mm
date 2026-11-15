@@ -291,6 +291,13 @@ struct ClientStreamDecoders: Sendable {
 
 // MARK: - Inbound consumer (credit granting)
 
+/// What the inbound producer carries in place of a response item that failed
+/// to decode. The server spent a credit on the item, and the client grants
+/// credit back as its consumer drains the buffer, so the item still has to
+/// reach the consumer to be counted. The handle's iterator counts the marker
+/// like an element, then skips it.
+struct UndecodableStreamItem: Sendable {}
+
 extension ClientStreamState {
     /// Accounts one consumed inbound element toward the credit grant, returning
     /// the additive credit to write now (or nil to withhold). Called by the
@@ -347,7 +354,9 @@ extension ClientStreamState: ClientStreamControl {
                     "stream item decode failed",
                     metadata: ["msgid": "\(self.msgid)", "error": "\(error)"]
                 )
-                return .dropped
+                // The server spent a credit on the item: a marker takes its
+                // place, so the consumer counts it toward the next grant.
+                element = UndecodableStreamItem()
             case .success(let decoded):
                 element = decoded
         }

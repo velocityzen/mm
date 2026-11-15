@@ -115,6 +115,8 @@
             /// Seqs whose delivery filled the client's buffer, so its inbound
             /// loop parked.
             var parks: [UInt32] = []
+            /// The items that reached the client in a form it can't decode.
+            var undecodable = 0
             /// The values the receiving side's reader took, in order.
             var consumed: [Int] = []
             /// What each send returned, in order.
@@ -236,6 +238,9 @@
                 if UInt64(state.arrivals.count) == window + state.granted {
                     state.events.insert("a grant came with the sender out of credit")
                 }
+                if state.undecodable > 0 {
+                    state.events.insert("a grant came after an item that failed to decode")
+                }
                 state.granted += UInt64(credits)
                 if state.granted > UInt64(state.arrivals.count) {
                     state.overGrants.append(state.granted)
@@ -274,6 +279,12 @@
             .just(0),
             .element(of: [7, 8, 9, 16]),
             .int(in: 0...40)
+        )
+        /// The seqs of the items that reach the client in a form it can't
+        /// decode: none, or a few, often at the window's edges.
+        static let undecodableItems: Gen<[Int]> = .oneOf(
+            .just([]),
+            .array(of: positions, count: 1...3)
         )
         /// How many times a reader yields after each item: a fast reader
         /// leaves the sender credit, a slow one makes it wait.
@@ -646,6 +657,9 @@
         var awaitersBefore: Int
         var awaiterAt: Int?
         var terminalValue: Int
+        /// The seqs of the items that reach the client as text, which an
+        /// `Int` stream can't decode.
+        var undecodable: Set<Int>
 
         static func draw(_ tc: TestCase) throws -> ResponsePlan {
             let items = try tc.draw(PipeGenerators.items, named: "items")
@@ -665,7 +679,8 @@
                 ),
                 awaitersBefore: try tc.draw(PipeGenerators.awaiters, named: "awaitersBefore"),
                 awaiterAt: try tc.draw(.optional(PipeGenerators.positions), named: "awaiterAt"),
-                terminalValue: try tc.draw(PipeGenerators.terminalValues, named: "terminalValue")
+                terminalValue: try tc.draw(PipeGenerators.terminalValues, named: "terminalValue"),
+                undecodable: Set(try tc.draw(PipeGenerators.undecodableItems, named: "undecodable"))
             )
         }
     }
@@ -725,6 +740,7 @@
 
         /// One item reaches the client's inbound loop: it validates the seq,
         /// buffers the item, and waits for its reader when the buffer is full.
+        /// An item the plan makes undecodable arrives as text.
         func clientReceives(seq: UInt32, item: ByteBuffer) async -> Bool {
             self.record.checkpoint("item \(seq) sent")
             guard self.record.arrive(seq) else { return false }
@@ -734,6 +750,12 @@
                 case .drop:
                     self.record.event("an item reached a client that stopped reading")
                 case .deliver:
+                    var item = item
+                    if self.plan.undecodable.contains(Int(seq)) {
+                        item = (try? MMPackEncoder().encode("item \(seq)").get()) ?? ByteBuffer()
+                        self.record.update { $0.undecodable += 1 }
+                        self.record.event("an item failed to decode")
+                    }
                     let filled = self.client.deliverInboundItem(item)
                     if seq + 1 == MMStreamFlowControl.initialWindow, self.plan.readsLate {
                         self.record.event("the whole window reached a reader that had read none")
@@ -925,8 +947,9 @@
 
     /// What every pipe holds to whatever the run did: no item past the
     /// window, no grant for items never received, seqs and values in order,
-    /// and one `.sent` for every item the receiver took.
-    func expectInsideTheWindow(_ record: PipeRecord.State) {
+    /// with no value but the `undecodable` ones missing, and one `.sent` for
+    /// every item the receiver took.
+    func expectInsideTheWindow(_ record: PipeRecord.State, undecodable: Set<Int> = []) {
         #expect(
             record.pastTheWindow.isEmpty,
             "items past the initial window plus the grants: seqs \(record.pastTheWindow)"
@@ -939,8 +962,10 @@
             record.arrivals == (0..<record.arrivals.count).map { UInt32($0) },
             "seqs not stamped 0, 1, 2 and on: \(record.arrivals)"
         )
+        let readable = (0..<(record.consumed.count + undecodable.count))
+            .filter { !undecodable.contains($0) }
         #expect(
-            record.consumed == Array(0..<record.consumed.count),
+            record.consumed == Array(readable.prefix(record.consumed.count)),
             "the reader got items out of order: \(record.consumed)"
         )
         #expect(record.outcomes.filter { $0 == .sent }.count == record.accepted)
@@ -1102,9 +1127,12 @@
         /// buffer never fills: a whole window waiting unread still leaves its
         /// inbound loop reading. A parked loop reads no frame for any call on
         /// the connection, so a reader that waits on another call before it
-        /// drains the window would wait forever. A send that doesn't go out
-        /// says why: a STOP or the sink's end. With nothing in the way, every
-        /// send goes out. Every `stopRequested()` watcher returns exactly
+        /// drains the window would wait forever. Some items can reach the
+        /// client as text its `Int` stream can't decode: the reader gets every
+        /// other value in order, and the credit the server spent on those
+        /// items still comes back. A send that doesn't go out says why: a STOP
+        /// or the sink's end. With nothing in the way, every send goes out,
+        /// whichever items fail to decode. Every `stopRequested()` watcher returns exactly
         /// once, explained by a STOP, the end, the connection's death or its
         /// own cancellation; after a STOP or a cancellation they all return
         /// before the sink ends. The client's terminal resolves once, the
@@ -1114,8 +1142,9 @@
         /// the end that leaves the sender parked, a STOP that leaves the stop
         /// watchers waiting, a watcher that ignores its earlier cancellation,
         /// a parked send that reuses its seq, a client that grants one too
-        /// many, a client buffer that parks its loop at a full window (the
-        /// bug this property found), or a second terminal that overwrites the
+        /// many, a client buffer that parks its loop at a full window, a
+        /// client that grants nothing for an item that fails to decode (both
+        /// bugs this property found), or a second terminal that overwrites the
         /// first, fails here.
         @Test
         func responseSinkStaysInsideTheClientsGrants() async throws {
@@ -1123,7 +1152,9 @@
                 reaching: ["several terminals were handed", "the handler's task was cancelled"],
                 reachingAfter: [
                     "a STOP released a watcher": 1_000,
+                    "a grant came after an item that failed to decode": 1_000,
                     "a grant came with the sender out of credit": 1_000,
+                    "an item failed to decode": 1_000,
                     "a send ended callEnded": 1_000, "a send ended peerStopped": 1_000,
                     "a watcher returned on its own cancellation": 1_000,
                     "an item reached a client that stopped reading": 1_000,
@@ -1181,7 +1212,7 @@
                     record.parks.isEmpty,
                     "a server inside its credit parked the client's inbound loop at seqs \(record.parks)"
                 )
-                expectInsideTheWindow(record)
+                expectInsideTheWindow(record, undecodable: plan.undecodable)
                 switch record.outcomes.last {
                     case .peerStopped:
                         #expect(record.stopped, "a send stopped with no STOP")

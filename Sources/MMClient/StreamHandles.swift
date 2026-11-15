@@ -55,9 +55,11 @@ public struct InboundStreamHandle<
 
         /// The next response element, or `nil` once the server ended the stream
         /// (END or terminal) and the buffer is drained, or once the consuming
-        /// task is cancelled. Non-throwing: elements that failed to decode were
-        /// dropped on the producing side (warn + counter). Draining an element
-        /// may emit a credit grant to the server.
+        /// task is cancelled. Non-throwing: an element that failed to decode was
+        /// logged and counted on the producing side, and is skipped here. It
+        /// still counts toward the next credit grant, so the credit the server
+        /// spent on it comes back. Draining an element may emit a credit grant
+        /// to the server.
         ///
         /// Cancelling the consuming task ends the element sequence (the producer
         /// observes it and stops granting credit). To abandon the **whole call**
@@ -71,16 +73,24 @@ public struct InboundStreamHandle<
         /// `Sendable`, so it is only ever advanced off the caller's actor.
         @concurrent
         public mutating func next() async -> Element? {
-            guard let element = await self.base.next() else { return nil }
-            if let credits = self.state.creditToGrantAfterConsume() {
-                await self.state.grantConsumed(credits)
+            while let element = await self.base.next() {
+                if let credits = self.state.creditToGrantAfterConsume() {
+                    await self.state.grantConsumed(credits)
+                }
+                // An item that failed to decode, counted above like any other.
+                if element is UndecodableStreamItem {
+                    continue
+                }
+                // The state's producer carries `any Sendable`; its decoder only
+                // ever yields an `Element`.
+                guard let typed = element as? Element else {
+                    preconditionFailure(
+                        "stream \(self.state.msgid): element is not \(Element.self)"
+                    )
+                }
+                return typed
             }
-            // The state's producer carries `any Sendable`; its decoder only
-            // ever yields an `Element`.
-            guard let typed = element as? Element else {
-                preconditionFailure("stream \(self.state.msgid): element is not \(Element.self)")
-            }
-            return typed
+            return nil
         }
     }
 

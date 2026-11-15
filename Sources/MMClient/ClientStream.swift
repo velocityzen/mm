@@ -84,9 +84,10 @@ protocol ClientStreamControl: AnyObject, Sendable {
     /// Deliver one inbound response item (already seq-validated). Returns
     /// `.stopProducing` when the producer buffer hit its high watermark, so the
     /// inbound loop parks before reading further frames (backpressure to the
-    /// socket). A decode failure drops the element with a warning and a counter
-    /// — never a violation (element decoding is per-consumer, like a unary
-    /// result).
+    /// socket). A decode failure logs a warning and counts it, and buffers an
+    /// ``UndecodableStreamItem`` in the element's place, which the consumer
+    /// counts toward its next credit grant and skips — never a violation
+    /// (element decoding is per-consumer, like a unary result).
     func deliverInboundItem(_ item: ByteBuffer) -> InboundDeliveryOutcome
 
     /// The inbound producer parked at its high watermark: suspend the caller
@@ -147,7 +148,7 @@ enum InboundDeliveryOutcome {
     /// The buffer hit the high watermark; the loop must
     /// ``ClientStreamControl/awaitInboundDemand()`` before reading further.
     case stopProducing
-    /// The element was dropped (consumer gone, or decode failure). Keep reading.
+    /// The element was dropped: the consumer is gone. Keep reading.
     case dropped
 }
 
