@@ -9,30 +9,10 @@ import Testing
 
 @testable import MMServer
 
-@Suite("Idle handling and pipeline assembly")
+/// The server's child pipeline. `MMIdleCloseHandler`'s own behavior is
+/// checked in `MMWireTests`.
+@Suite("Pipeline assembly")
 struct PipelineTests {
-    @Test("MMIdleCloseHandler closes the channel on an idle event")
-    func idleEventCloses() throws {
-        let channel = EmbeddedChannel(handler: MMIdleCloseHandler())
-        channel.connect(to: try SocketAddress(unixDomainSocketPath: "/mm-test"), promise: nil)
-        channel.embeddedEventLoop.run()
-        #expect(channel.isActive)
-        channel.pipeline.fireUserInboundEventTriggered(IdleStateHandler.IdleStateEvent.read)
-        channel.embeddedEventLoop.run()
-        #expect(channel.isActive == false)
-    }
-
-    @Test("MMIdleCloseHandler forwards unrelated user events")
-    func unrelatedEventsForwarded() throws {
-        let channel = EmbeddedChannel(handler: MMIdleCloseHandler())
-        channel.connect(to: try SocketAddress(unixDomainSocketPath: "/mm-test"), promise: nil)
-        channel.embeddedEventLoop.run()
-        channel.pipeline.fireUserInboundEventTriggered(ChannelEvent.inputClosed)
-        channel.embeddedEventLoop.run()
-        #expect(channel.isActive)
-        _ = try? channel.finish()
-    }
-
     @Test("child pipeline contains idle timeout, framing codec, and hello handler")
     func childPipelineAssembly() throws {
         let channel = EmbeddedChannel()

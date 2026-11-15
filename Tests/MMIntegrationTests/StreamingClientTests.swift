@@ -142,57 +142,19 @@ struct StreamingClientTests {
 
     // Row 3 --------------------------------------------------------------
 
-    @Test("client streaming: send 6 elements, finish(), then a count-6 terminal")
-    func clientStreamHappyPath() async throws {
-        // The within-window happy path (6 ≤ 8): the typed `send`/END/terminal
-        // round-trip with no grant needed. The suspend/resume-past-the-window half
-        // of matrix row 3 is proven separately by
-        // `clientStreamPastWindowSuspendsAndResumes` (row 3b), which streams >8
-        // items and relies on the server's request-stream credit grant.
-        try await withTempSocketPath { path in
-            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
-            try await withRunningServer(server) { _ in
-                let (result, runResult) = try await withConnectedClient(unixPath: path) {
-                    connection -> (
-                        outcomes: [MMClient::StreamSendOutcome],
-                        terminal: Result<StreamSummary, MMCallError>
-                    ) in
-                    let handle = await connection.call(
-                        TestMethods.importItems, on: Self.box,
-                        ImportRequest(entity: Self.box, stopAfter: 0)
-                    )
-                    // Six elements ride the implicit initial window with no grant
-                    // needed; each `send` is accepted. `finish()` sends END, which
-                    // ends the handler's request sequence and yields the terminal.
-                    var outcomes: [MMClient::StreamSendOutcome] = []
-                    for value in 0..<6 {
-                        outcomes.append(await handle.send(StreamItem(value: value)))
-                    }
-                    await handle.finish()
-                    let terminal = await handle.result()
-                    return (outcomes, terminal)
-                }
-                #expect(result.outcomes == Array(repeating: .sent, count: 6))
-                #expect(result.terminal == .success(StreamSummary(count: 6)))
-                expectCleanRun(runResult)
-            }
-        }
-    }
-
-    // Row 3b -------------------------------------------------------------
-
     @Test(
         "client streaming past the window: the send gate suspends on the 9th and resumes on a server grant"
     )
     func clientStreamPastWindowSuspendsAndResumes() async throws {
-        // The suspend/resume half of matrix row 3, now provable end to end: a
-        // conforming client streams MORE than the initial window (8) of request
-        // items to the fast `importItems` handler (which drains each item as it
-        // arrives). The 9th send exhausts the window and the outbound gate
-        // suspends; the server, as its handler consumes, grants request-stream
-        // credit over the wire (a kind-2 frame) on the consumption edge, which
-        // resumes the parked send. Every send therefore returns `.sent`, and the
-        // terminal counts all N — no deadlock.
+        // Matrix row 3, end to end: a conforming client sends its request
+        // items, finishes with END and gets a terminal counting them all. It
+        // streams MORE than the initial window (8) of request items to the
+        // fast `importItems` handler (which drains each item as it arrives).
+        // The 9th send exhausts the window and the outbound gate suspends;
+        // the server, as its handler consumes, grants request-stream credit
+        // over the wire (a kind-2 frame) on the consumption edge, which
+        // resumes the parked send. Every send therefore returns `.sent`, and
+        // the terminal counts all N — no deadlock.
         try await withTempSocketPath { path in
             let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
             try await withRunningServer(server) { _ in

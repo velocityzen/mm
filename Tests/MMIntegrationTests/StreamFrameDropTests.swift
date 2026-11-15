@@ -5,48 +5,15 @@ import Testing
 
 @testable import MMServer
 
-/// Real S3 drop rules, over a real socket: a stream frame addressed to a msgid
-/// the stream table does not own — an unknown/retired msgid, or a live *unary*
-/// msgid whose only lifecycle is its own terminal — is logged, counted, and
-/// dropped; the connection stays alive and subsequent calls are served. (A
-/// frame to a live *stream* msgid is routed, not dropped — that is the province
-/// of `StreamingServerTests`.) This pins the drop-and-count edges that keep a
-/// misbehaving or lagging client from disturbing well-formed calls.
-@Suite("Server drops stream frames for unowned/unary msgids")
+/// Real S3 drop rules, over a real socket: a stream frame addressed to a live
+/// *unary* msgid, whose only lifecycle is its own terminal, is logged,
+/// counted, and dropped; the call still answers once. (Frames to an
+/// unknown/retired msgid, and frames to a live *stream* msgid, which are
+/// routed rather than dropped, are the province of `StreamingServerTests`.)
+/// This pins the drop-and-count edge that keeps a misbehaving or lagging
+/// client from disturbing well-formed calls.
+@Suite("Server drops stream frames for a live unary msgid")
 struct ServerStreamFrameDropTests {
-    @Test("every stream kind is dropped and the connection keeps serving calls")
-    func dropsAllStreamKindsAndServes() async throws {
-        try await withTempSocketPath { path in
-            let server = makeTestServer(configuration: .init(endpoint: .unix(path: path)))
-            try await withRunningServer(server) { _ in
-                try await withWireSession(unixPath: path) { session in
-                    _ = try await session.handshake()
-                    let streamFrames: [MMEnvelope] = [
-                        .credit(msgid: 9, credits: 8),
-                        .item(msgid: 9, seq: 0, item: encodedParams(EchoResponse(value: 1))),
-                        .end(msgid: 9),
-                        .stop(msgid: 9, code: 0),
-                        .cancel(msgid: 9),
-                    ]
-                    for envelope in streamFrames {
-                        try await session.send(envelope)
-                    }
-                    // All five dropped: the very same connection still
-                    // authorizes and answers a normal call.
-                    try await session.send(
-                        request(
-                            msgid: 10, method: "echo.run", entity: entity("box.item"),
-                            EchoRequest(entity: entity("box.item"), value: 5))
-                    )
-                    let reply = try await session.response(msgid: 10)
-                    #expect(reply.error == nil)
-                    let echoed = try decodeResult(EchoResponse.self, from: reply.result)
-                    #expect(echoed == EchoResponse(value: 5))
-                }
-            }
-        }
-    }
-
     @Test("stream frames for a live in-flight msgid do not disturb its terminal")
     func streamFramesDoNotDisturbInFlightCall() async throws {
         try await withTempSocketPath { path in

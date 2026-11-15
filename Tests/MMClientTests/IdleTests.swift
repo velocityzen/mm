@@ -1,39 +1,17 @@
 import MMTestSupport
 import MMWire
 import NIOCore
-import NIOEmbedded
 import Testing
 
 @testable import MMClient
 
-/// The client-side idle reaper: `MMIdleCloseHandler` behavior and the
-/// pipeline assembly that installs it. The full reap/liveness behavior runs
-/// over a real socket in `MMIntegrationTests` (`IdleStateHandler` measures
-/// real monotonic time, so it cannot be driven by a fake test clock).
+/// The client-side idle reaper: the pipeline assembly that installs
+/// `MMIdleCloseHandler`, whose own behavior `MMWireTests` checks. The full
+/// reap/liveness behavior runs over a real socket in `MMIntegrationTests`
+/// (`IdleStateHandler` measures real monotonic time, so it cannot be driven
+/// by a fake test clock).
 @Suite("Client idle reaping")
 struct IdleTests {
-    @Test("MMIdleCloseHandler closes the channel on an idle event")
-    func idleEventCloses() throws {
-        let channel = EmbeddedChannel(handler: MMIdleCloseHandler())
-        channel.connect(to: try SocketAddress(unixDomainSocketPath: "/mm-test"), promise: nil)
-        channel.embeddedEventLoop.run()
-        #expect(channel.isActive)
-        channel.pipeline.fireUserInboundEventTriggered(IdleStateHandler.IdleStateEvent.all)
-        channel.embeddedEventLoop.run()
-        #expect(channel.isActive == false)
-    }
-
-    @Test("MMIdleCloseHandler forwards unrelated user events")
-    func unrelatedEventsForwarded() throws {
-        let channel = EmbeddedChannel(handler: MMIdleCloseHandler())
-        channel.connect(to: try SocketAddress(unixDomainSocketPath: "/mm-test"), promise: nil)
-        channel.embeddedEventLoop.run()
-        channel.pipeline.fireUserInboundEventTriggered(ChannelEvent.inputClosed)
-        channel.embeddedEventLoop.run()
-        #expect(channel.isActive)
-        _ = try? channel.finish()
-    }
-
     @Test("the client installs the all-traffic idle reaper once the hello is done")
     func idlePipelineAssembly() async throws {
         // Assembled on the NIOAsyncTestingChannel harness, not EmbeddedChannel:

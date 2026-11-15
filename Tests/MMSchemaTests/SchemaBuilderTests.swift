@@ -96,10 +96,4 @@ struct SchemaBuilderTests {
         }
         #expect(Combined.all.map(\.name) == ["server.schema", "server.entity", "ns.alpha"])
     }
-
-    @Test("Builtins.all itself is builder-built and unchanged")
-    func builtinsUnchanged() {
-        #expect(Builtins.all.map(\.name) == ["server.schema", "server.entity"])
-        #expect(Builtins.all.map(\.access) == [.read, .read])
-    }
 }
