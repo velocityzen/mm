@@ -59,11 +59,13 @@
 
         /// Any 16-bit mode, high bits included, often one of the nine-bit
         /// modes, one granting `rwx` to the other class whatever the owner
-        /// and group get, or a familiar one.
+        /// and group get, or a familiar one. The six drawn bits of the
+        /// `rwx`-to-other branch land in the group (3–5) and owner (6–8)
+        /// bits.
         static let modes: Gen<UInt16> = .oneOf(
             .integer(),
             .integer(in: 0...0o777),
-            Gen<UInt16>.integer(in: 0...0o77).map { $0 << 6 | 0o007 },
+            Gen<UInt16>.integer(in: 0...0o77).map { $0 << 3 | 0o007 },
             .element(of: [0o000, 0o007, 0o070, 0o700, 0o750, 0o644, 0o777, 0o1777, 0xFFFF])
         )
 
@@ -125,9 +127,11 @@
             try property(
                 reaching: ["denied", "granted"],
                 reachingAfter: [
-                    "denied though the other class would grant": 1_000, "someone else": 1_000,
+                    "someone else": 1_000,
+                    "the group denied though the other class would grant": 1_000,
                     "the group, by a supplementary group": 1_000,
                     "the group, by primary gid": 1_000, "the owner": 1_000,
+                    "the owner denied though the other class would grant": 1_000,
                     "the owner, in the group too": 1_000,
                 ]
             ) { tc in
@@ -138,7 +142,9 @@
                 try tc.event(relation.rawValue)
                 try tc.event(granted ? "granted" : "denied")
                 if !granted && index != 2 && tripleGrants(acl.mode, 2, requested) {
-                    try tc.event("denied though the other class would grant")
+                    try tc.event(
+                        "the \(index == 0 ? "owner" : "group") denied though the other class would grant"
+                    )
                 }
                 let classes: [EntityACL.PermissionClass] = [.owner, .group, .other]
                 #expect(acl.permissionClass(for: peer) == classes[index])
