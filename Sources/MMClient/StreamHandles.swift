@@ -44,6 +44,11 @@ public struct InboundStreamHandle<
 >: AsyncSequence, Sendable {
     let state: ClientStreamState
 
+    @usableFromInline
+    init(state: ClientStreamState) {
+        self.state = state
+    }
+
     public struct AsyncIterator: AsyncIteratorProtocol {
         let state: ClientStreamState
         var base: ClientStreamState.Producer.AsyncIterator
@@ -195,9 +200,16 @@ public struct OutboundStreamHandle<
     /// generated code when the type has some, through `Codable` otherwise.
     let encode: @Sendable (Element) -> Result<ByteBuffer, MMWireError>
 
-    init(state: ClientStreamState) {
+    /// Takes the element coder the typed call picked with
+    /// ``MMPackEncoder/encoding(_:)`` in the caller's module, where `Element`
+    /// is concrete.
+    @usableFromInline
+    init(
+        state: ClientStreamState,
+        encode: @escaping @Sendable (Element) -> Result<ByteBuffer, MMWireError>
+    ) {
         self.state = state
-        self.encode = MMPackEncoder().encoding(Element.self)
+        self.encode = encode
     }
 
     /// Sends one request element, credit-gated (suspends at zero credit until a
@@ -263,8 +275,12 @@ public struct BidirectionalStreamHandle<
     /// and the shared terminal.
     public let outbound: OutboundStreamHandle<RequestElement, ResponseElement, Response>
 
-    init(state: ClientStreamState) {
+    @usableFromInline
+    init(
+        state: ClientStreamState,
+        encode: @escaping @Sendable (RequestElement) -> Result<ByteBuffer, MMWireError>
+    ) {
         self.inbound = InboundStreamHandle(state: state)
-        self.outbound = OutboundStreamHandle(state: state)
+        self.outbound = OutboundStreamHandle(state: state, encode: encode)
     }
 }

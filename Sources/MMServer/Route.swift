@@ -302,14 +302,35 @@ public struct Accepts: Sendable {
 ///
 /// Every handler shape runs in its call's own task (`@concurrent`), off any
 /// actor.
+///
+/// Inlinable, as every `Handle` is: the coders are picked in the caller's
+/// module, where the types are concrete, so a type's generated code is
+/// specialized there instead of running unspecialized in this one.
+@inlinable
 public func Handle<Request: Codable & Sendable, Response: Codable & Sendable>(
     _ method: Method<Request, Response>,
     _ accepts: Accepts = Accepts(.all),
     _ body: @escaping @Sendable @concurrent (Request, MMContext) async -> Result<Response, MMError>
 ) -> Route {
-    let decodeRequest = MMPackDecoder().decoding(Request.self)
-    let encodeResponse = MMPackEncoder().encoding(Response.self)
-    return Route(
+    unaryRoute(
+        method,
+        accepts,
+        decodeRequest: MMPackDecoder().decoding(Request.self),
+        encodeResponse: MMPackEncoder().encoding(Response.self),
+        body
+    )
+}
+
+/// The unary ``Handle(_:_:_:)``'s route, with the coders its shell picked.
+@usableFromInline
+func unaryRoute<Request: Codable & Sendable, Response: Codable & Sendable>(
+    _ method: Method<Request, Response>,
+    _ accepts: Accepts,
+    decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
+    encodeResponse: @escaping @Sendable (Response) -> Result<ByteBuffer, MMWireError>,
+    _ body: @escaping @Sendable @concurrent (Request, MMContext) async -> Result<Response, MMError>
+) -> Route {
+    Route(
         name: method.name,
         access: method.access,
         accepts: accepts,
@@ -360,7 +381,7 @@ private func streamTerminal<Response: Codable & Sendable>(
 /// malformed request abandons startup with `nil`; the router replies
 /// `malformedParams` itself) and the `Route` assembly. Each shape supplies
 /// only its startup — control wiring and run choreography. Like the unary
-/// `Handle`, every coder is picked once per route, here and in each shape's
+/// `Handle`, every coder is picked once per route, in each shape's inlinable
 /// `Handle`, so a stream's items reach the generated code without a check
 /// per item.
 private func streamRoute<Request: Codable & Sendable>(
@@ -368,13 +389,13 @@ private func streamRoute<Request: Codable & Sendable>(
     access: AccessMode,
     accepts: Accepts,
     signatureThunk: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
+    decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
     startup:
         @escaping @Sendable (
             Request, MMContext, UInt32, StreamWireSeams, MMStreamMetrics
         ) -> StreamStartup
 ) -> Route {
-    let decodeRequest = MMPackDecoder().decoding(Request.self)
-    return Route(
+    Route(
         name: name,
         access: access,
         accepts: accepts,
@@ -428,6 +449,7 @@ private func makeRequestStream<Element: Codable & Sendable>(
 /// Binds a server-streaming handler: `(request, sink, context)`. The server streams
 /// `Element` values through `sink` before returning its terminal `Response`.
 /// Authorization runs on `Request`'s entity at open, exactly as for unary methods.
+@inlinable
 public func Handle<
     Request: Codable & Sendable,
     Element: Codable & Sendable,
@@ -439,13 +461,38 @@ public func Handle<
         @escaping @Sendable @concurrent (Request, MMResponseSink<Element>, MMContext) async ->
         Result<Response, MMError>
 ) -> Route {
-    let encodeElement = MMPackEncoder().encoding(Element.self)
-    let encodeResponse = MMPackEncoder().encoding(Response.self)
-    return streamRoute(
+    serverStreamRoute(
+        method,
+        accepts,
+        decodeRequest: MMPackDecoder().decoding(Request.self),
+        encodeElement: MMPackEncoder().encoding(Element.self),
+        encodeResponse: MMPackEncoder().encoding(Response.self),
+        body
+    )
+}
+
+/// The server-streaming `Handle`'s route, with the coders its shell picked.
+@usableFromInline
+func serverStreamRoute<
+    Request: Codable & Sendable,
+    Element: Codable & Sendable,
+    Response: Codable & Sendable
+>(
+    _ method: ServerStreamMethod<Request, Element, Response>,
+    _ accepts: Accepts,
+    decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
+    encodeElement: @escaping @Sendable (Element) -> Result<ByteBuffer, MMWireError>,
+    encodeResponse: @escaping @Sendable (Response) -> Result<ByteBuffer, MMWireError>,
+    _ body:
+        @escaping @Sendable @concurrent (Request, MMResponseSink<Element>, MMContext) async ->
+        Result<Response, MMError>
+) -> Route {
+    streamRoute(
         name: method.name,
         access: method.access,
         accepts: accepts,
-        signatureThunk: { method.signature() }
+        signatureThunk: { method.signature() },
+        decodeRequest: decodeRequest
     ) { (request: Request, context, msgid, seams, metrics) in
         let sinkState = MMResponseSinkState(
             msgid: msgid,
@@ -468,6 +515,7 @@ public func Handle<
 /// END) after opening with `Request`; the server answers with one terminal `Response`.
 /// `elements.stop()` sends a server-initiated STOP (advisory; the call
 /// continues). Authorization runs on `Request`'s entity at open.
+@inlinable
 public func Handle<
     Request: Codable & Sendable,
     Element: Codable & Sendable,
@@ -479,13 +527,38 @@ public func Handle<
         @escaping @Sendable @concurrent (Request, MMRequestStream<Element>, MMContext) async ->
         Result<Response, MMError>
 ) -> Route {
-    let decodeElement = MMPackDecoder().decoding(Element.self)
-    let encodeResponse = MMPackEncoder().encoding(Response.self)
-    return streamRoute(
+    clientStreamRoute(
+        method,
+        accepts,
+        decodeRequest: MMPackDecoder().decoding(Request.self),
+        decodeElement: MMPackDecoder().decoding(Element.self),
+        encodeResponse: MMPackEncoder().encoding(Response.self),
+        body
+    )
+}
+
+/// The client-streaming `Handle`'s route, with the coders its shell picked.
+@usableFromInline
+func clientStreamRoute<
+    Request: Codable & Sendable,
+    Element: Codable & Sendable,
+    Response: Codable & Sendable
+>(
+    _ method: ClientStreamMethod<Request, Element, Response>,
+    _ accepts: Accepts,
+    decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
+    decodeElement: @escaping @Sendable (ByteBuffer) -> Result<Element, MMWireError>,
+    encodeResponse: @escaping @Sendable (Response) -> Result<ByteBuffer, MMWireError>,
+    _ body:
+        @escaping @Sendable @concurrent (Request, MMRequestStream<Element>, MMContext) async ->
+        Result<Response, MMError>
+) -> Route {
+    streamRoute(
         name: method.name,
         access: method.access,
         accepts: accepts,
-        signatureThunk: { method.signature() }
+        signatureThunk: { method.signature() },
+        decodeRequest: decodeRequest
     ) { (request: Request, context, msgid, seams, metrics) in
         let (source, stream) = makeRequestStream(
             decoding: decodeElement,
@@ -510,6 +583,7 @@ public func Handle<
 /// streams `RequestElement` values (the `elements` sequence), the server streams
 /// `ResponseElement` values (through `sink`), and the call terminates with one
 /// `Response`. Authorization runs on `Request`'s entity at open.
+@inlinable
 public func Handle<
     Request: Codable & Sendable,
     RequestElement: Codable & Sendable,
@@ -523,14 +597,42 @@ public func Handle<
             Request, MMRequestStream<RequestElement>, MMResponseSink<ResponseElement>, MMContext
         ) async -> Result<Response, MMError>
 ) -> Route {
-    let decodeRequestElement = MMPackDecoder().decoding(RequestElement.self)
-    let encodeResponseElement = MMPackEncoder().encoding(ResponseElement.self)
-    let encodeResponse = MMPackEncoder().encoding(Response.self)
-    return streamRoute(
+    bidirectionalStreamRoute(
+        method,
+        accepts,
+        decodeRequest: MMPackDecoder().decoding(Request.self),
+        decodeRequestElement: MMPackDecoder().decoding(RequestElement.self),
+        encodeResponseElement: MMPackEncoder().encoding(ResponseElement.self),
+        encodeResponse: MMPackEncoder().encoding(Response.self),
+        body
+    )
+}
+
+/// The bidirectional `Handle`'s route, with the coders its shell picked.
+@usableFromInline
+func bidirectionalStreamRoute<
+    Request: Codable & Sendable,
+    RequestElement: Codable & Sendable,
+    ResponseElement: Codable & Sendable,
+    Response: Codable & Sendable
+>(
+    _ method: BidirectionalStreamMethod<Request, RequestElement, ResponseElement, Response>,
+    _ accepts: Accepts,
+    decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
+    decodeRequestElement: @escaping @Sendable (ByteBuffer) -> Result<RequestElement, MMWireError>,
+    encodeResponseElement: @escaping @Sendable (ResponseElement) -> Result<ByteBuffer, MMWireError>,
+    encodeResponse: @escaping @Sendable (Response) -> Result<ByteBuffer, MMWireError>,
+    _ body:
+        @escaping @Sendable @concurrent (
+            Request, MMRequestStream<RequestElement>, MMResponseSink<ResponseElement>, MMContext
+        ) async -> Result<Response, MMError>
+) -> Route {
+    streamRoute(
         name: method.name,
         access: method.access,
         accepts: accepts,
-        signatureThunk: { method.signature() }
+        signatureThunk: { method.signature() },
+        decodeRequest: decodeRequest
     ) { (request: Request, context, msgid, seams, metrics) in
         let (source, stream) = makeRequestStream(
             decoding: decodeRequestElement,

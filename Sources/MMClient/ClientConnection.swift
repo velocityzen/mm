@@ -689,7 +689,8 @@ public actor MMClientConnection {
     }
 
     /// Counts and logs one failed call (any error shape, local or remote).
-    private nonisolated func recordCallFailure(method: String, error: MMCallError) {
+    @usableFromInline
+    nonisolated func recordCallFailure(method: String, error: MMCallError) {
         self.metrics.callFailures.increment()
         self.logger.debug(
             "call failed",
@@ -699,81 +700,36 @@ public actor MMClientConnection {
 
     // MARK: - Call
 
-    /// Performs one typed call: encodes `request`, allocates a msgid, sends
-    /// the request envelope, and suspends until the response (routed by the
-    /// `run()` loop) arrives.
-    ///
-    /// Bounded: at most ``MMClientConfiguration/maxInFlightCalls`` calls wait
-    /// at once — the excess fails immediately with `.tooManyInFlight`, it is
-    /// never queued.
-    ///
-    /// ## Cancellation
-    ///
-    /// Cancelling the awaiting task abandons the msgid: the call returns
-    /// `.failure(.cancelled)` promptly and a late response for that msgid is
-    /// dropped with a debug log. **The request may still execute
-    /// server-side** — cancellation is local abandonment, not a remote abort;
-    /// only its response delivery is cut.
-    ///
-    /// ## Omitting the target
-    ///
-    /// `on:` defaults to `EntityName.root` — an entity-less request. Omit it
-    /// only when the daemon's route declares exactly one concrete entity
-    /// (`Accepts("system.log")` server-side): the server infers the target
-    /// and authorizes it as if spelled out. Any other route answers an
-    /// entity-less call with `.denied`.
-    public nonisolated func call<Request: Codable & Sendable, Response: Codable & Sendable>(
-        _ method: Method<Request, Response>,
-        on entity: EntityName = .root,
-        _ request: Request
-    ) async -> Result<Response, MMCallError> {
-        self.metrics.calls.increment()
-
-        return await self.call(
-            methodName: method.name,
-            entity: entity,
-            request: request,
-            as: Response.self
-        )
-        .tapError { error in
-            self.recordCallFailure(method: method.name, error: error)
-        }
-    }
-
-    /// The untyped-descriptor core of ``call(_:on:_:)``: the wire name is a
-    /// plain string, so the dynamic surfaces (discovery, the CLI's raw call)
-    /// and the typed overload share one send path.
-    private nonisolated func call<Request: Codable & Sendable, Response: Codable & Sendable>(
+    /// The untyped core of ``call(_:on:_:)``: the wire name is a plain string
+    /// and the request arrives as its encode, so the whole send path runs
+    /// here, unspecialized and the same for every type. Counts the call and
+    /// returns the response's raw slots for the typed overload to decode.
+    @usableFromInline
+    nonisolated func call(
         methodName: String,
         entity: EntityName,
-        request: Request,
-        as _: Response.Type
-    ) async -> Result<Response, MMCallError> {
+        encodeRequest: () -> Result<ByteBuffer, MMWireError>
+    ) async -> Result<ResponseSlots, MMCallError> {
+        self.metrics.calls.increment()
         guard !Task.isCancelled else {
             return .failure(.cancelled)
         }
         return await self.prepareRequestSend(
             methodName: methodName,
             entity: entity,
-            request: request
+            encodeRequest: encodeRequest
         )
         .flatMapAsync { msgid, frame, writer in
-            await self.sendAndAwaitResponse(
-                msgid: msgid,
-                frame: frame,
-                writer: writer,
-                as: Response.self
-            )
+            await self.sendAndAwaitResponse(msgid: msgid, frame: frame, writer: writer)
         }
     }
 
     /// Writes the prepared request and suspends until the response arrives.
-    private nonisolated func sendAndAwaitResponse<Response: Codable & Sendable>(
+    private nonisolated func sendAndAwaitResponse(
         msgid: UInt32,
         frame: ByteBuffer,
-        writer: Writer,
-        as _: Response.Type
-    ) async -> Result<Response, MMCallError> {
+        writer: Writer
+    ) async -> CallTable.Outcome {
         let start = ContinuousClock.now
         // Writer backpressure suspends here when this call is the one
         // writing; a call that queues behind another returns at once.
@@ -788,7 +744,7 @@ public actor MMClientConnection {
                 // .connectionClosed). A parked response wins over the write
                 // failure, same as the `cancel(msgid:)` path.
                 return self.calls.withLockedValue { $0.abandon(msgid: msgid) }
-                    .map { parked in self.resolve(parked, as: Response.self, start: start) }
+                    .map { parked in self.resolve(parked, start: start) }
                     ?? .failure(.cancelled)
             case .failure(.channelClosed):
                 // The channel is gone — but the terminal transition belongs
@@ -813,21 +769,18 @@ public actor MMClientConnection {
             },
             cancelled: .failure(.cancelled)
         )
-        return self.resolve(outcome, as: Response.self, start: start)
+        return self.resolve(outcome, start: start)
     }
 
-    private nonisolated func resolve<Response: Codable & Sendable>(
+    /// Records the round trip of a call that got its response; the typed
+    /// overload decodes the slots after it.
+    private nonisolated func resolve(
         _ outcome: CallTable.Outcome,
-        as _: Response.Type,
         start: ContinuousClock.Instant
-    ) -> Result<Response, MMCallError> {
-        outcome
-            .tap { _ in
-                self.metrics.callRoundtrip.record(duration: start.duration(to: .now))
-            }
-            // The shared unary/terminal decode rule (spec §4) —
-            // ``ResponseSlots/decodeResponse(_:)``.
-            .flatMap { slots in slots.decodeResponse(Response.self) }
+    ) -> CallTable.Outcome {
+        outcome.tap { _ in
+            self.metrics.callRoundtrip.record(duration: start.duration(to: .now))
+        }
     }
 
     /// Waits for the outbound writer that `run()` produces. Cancellation-safe:
@@ -880,18 +833,17 @@ public actor MMClientConnection {
     /// installed (encode, cap, connection closed) are surfaced by pre-resolving
     /// the stream state's terminal, so the returned handle uniformly reports
     /// failures through `result()` with an empty element sequence — server-side
-    /// authorization failures arrive the same way, as the terminal frame.
-    nonisolated func openStream<
-        Inbound: Codable & Sendable,
-        Response: Codable & Sendable
-    >(
+    /// authorization failures arrive the same way, as the terminal frame. The
+    /// typed overloads pick the request's encode and the `decoders` in the
+    /// caller's module, so this runs the same for every type.
+    @usableFromInline
+    nonisolated func openStream(
         methodName: String,
         entity: EntityName,
-        request: some Codable & Sendable,
+        encodeRequest: () -> Result<ByteBuffer, MMWireError>,
         hasResponseStream: Bool,
         hasRequestStream: Bool,
-        inbound _: Inbound.Type,
-        response _: Response.Type
+        decoders: ClientStreamDecoders
     ) async -> ClientStreamState {
         self.metrics.streamsOpened.increment()
         // The shared send path; a pre-send failure resolves the terminal
@@ -899,7 +851,7 @@ public actor MMClientConnection {
         return await self.prepareRequestSend(
             methodName: methodName,
             entity: entity,
-            request: request
+            encodeRequest: encodeRequest
         )
         .matchAsync(
             { msgid, frame, writer in
@@ -910,16 +862,14 @@ public actor MMClientConnection {
                     methodName: methodName,
                     hasResponseStream: hasResponseStream,
                     hasRequestStream: hasRequestStream,
-                    inbound: Inbound.self,
-                    response: Response.self
+                    decoders: decoders
                 )
             },
             { error in
                 self.failedStream(
                     hasResponseStream: hasResponseStream,
                     hasRequestStream: hasRequestStream,
-                    inbound: Inbound.self,
-                    response: Response.self,
+                    decoders: decoders,
                     error: error
                 )
             }
@@ -929,18 +879,14 @@ public actor MMClientConnection {
     /// The post-prepare half of ``openStream``: write the opening request,
     /// build the stream state with its wire sinks, install it in the table,
     /// and hand it any terminal that raced ahead.
-    private nonisolated func openPreparedStream<
-        Inbound: Codable & Sendable,
-        Response: Codable & Sendable
-    >(
+    private nonisolated func openPreparedStream(
         msgid: UInt32,
         frame: ByteBuffer,
         writer: Writer,
         methodName: String,
         hasResponseStream: Bool,
         hasRequestStream: Bool,
-        inbound _: Inbound.Type,
-        response _: Response.Type
+        decoders: ClientStreamDecoders
     ) async -> ClientStreamState {
         switch await writer.write(frame) {
             case .success:
@@ -965,8 +911,7 @@ public actor MMClientConnection {
                 return self.failedStream(
                     hasResponseStream: hasResponseStream,
                     hasRequestStream: hasRequestStream,
-                    inbound: Inbound.self,
-                    response: Response.self,
+                    decoders: decoders,
                     error: reason
                 )
             case .failure(.channelClosed):
@@ -986,8 +931,7 @@ public actor MMClientConnection {
             msgid: msgid,
             hasResponseStream: hasResponseStream,
             hasRequestStream: hasRequestStream,
-            inbound: Inbound.self,
-            response: Response.self
+            decoders: decoders
         )
         // A terminal (or a close) that resolved before the control was
         // installed is handed to the state so `result()` sees it.
@@ -997,8 +941,8 @@ public actor MMClientConnection {
     }
 
     /// The open-request send path every call shape shares: encode params
-    /// (through the request type's generated code when it has some, found by
-    /// a check per call), reserve a msgid under the in-flight cap, build the envelope, enforce
+    /// (with the encode the typed overload picked in the caller's module),
+    /// reserve a msgid under the in-flight cap, build the envelope, enforce
     /// the outbound frame cap *before* the pipeline (`MMFrameEncodingHandler` would
     /// throw at the handler seam, poisoning the encoder and tearing down the
     /// whole connection — one oversized request must fail one call, locally),
@@ -1010,9 +954,9 @@ public actor MMClientConnection {
     private nonisolated func prepareRequestSend(
         methodName: String,
         entity: EntityName,
-        request: some Codable & Sendable
+        encodeRequest: () -> Result<ByteBuffer, MMWireError>
     ) async -> Result<(msgid: UInt32, frame: ByteBuffer, writer: Writer), MMCallError> {
-        await MMPackEncoder().encodeCheckingForGeneratedCode(request)
+        await encodeRequest()
             .mapError { MMCallError.encode($0) }
             .flatMap { params in
                 self.calls.withLockedValue {
@@ -1066,15 +1010,11 @@ public actor MMClientConnection {
 
     /// Builds a stream state wired to write its own lifecycle frames through the
     /// connection's outbound writer.
-    private nonisolated func makeStreamState<
-        Inbound: Codable & Sendable,
-        Response: Codable & Sendable
-    >(
+    private nonisolated func makeStreamState(
         msgid: UInt32,
         hasResponseStream: Bool,
         hasRequestStream: Bool,
-        inbound _: Inbound.Type,
-        response _: Response.Type
+        decoders: ClientStreamDecoders
     ) -> ClientStreamState {
         let sinks = ClientStreamSinks(
             grantCredit: { [self] credits in
@@ -1100,8 +1040,7 @@ public actor MMClientConnection {
             msgid: msgid,
             hasResponseStream: hasResponseStream,
             hasRequestStream: hasRequestStream,
-            inbound: Inbound.self,
-            response: Response.self,
+            decoders: decoders,
             sinks: sinks,
             logger: self.logger,
             metrics: self.metrics
@@ -1114,14 +1053,10 @@ public actor MMClientConnection {
     /// error, the element sequence is empty (already finished). Server-side
     /// authorization failures never come through here; they arrive as the
     /// normal terminal frame on an installed stream.
-    private nonisolated func failedStream<
-        Inbound: Codable & Sendable,
-        Response: Codable & Sendable
-    >(
+    private nonisolated func failedStream(
         hasResponseStream: Bool,
         hasRequestStream: Bool,
-        inbound _: Inbound.Type,
-        response _: Response.Type,
+        decoders: ClientStreamDecoders,
         error: MMCallError
     ) -> ClientStreamState {
         // msgid 0 is only a log label here; the state is not in the table.
@@ -1129,8 +1064,7 @@ public actor MMClientConnection {
             msgid: 0,
             hasResponseStream: hasResponseStream,
             hasRequestStream: hasRequestStream,
-            inbound: Inbound.self,
-            response: Response.self
+            decoders: decoders
         )
         state.failTerminal(error)
         return state
@@ -1271,6 +1205,64 @@ public actor MMClientConnection {
     /// 2^32 calls.
     nonisolated func _seedNextMsgid(_ value: UInt32) {
         self.calls.withLockedValue { $0.nextMsgid = value }
+    }
+}
+
+// MARK: - Typed call
+
+/// The typed unary call is declared in an extension, so it is dispatched
+/// statically. A method in the actor's body is called through its table,
+/// so the caller's module could neither inline nor specialize it.
+extension MMClientConnection {
+    /// Performs one typed call: encodes `request`, allocates a msgid, sends
+    /// the request envelope, and suspends until the response (routed by the
+    /// `run()` loop) arrives.
+    ///
+    /// Bounded: at most ``MMClientConfiguration/maxInFlightCalls`` calls wait
+    /// at once — the excess fails immediately with `.tooManyInFlight`, it is
+    /// never queued.
+    ///
+    /// ## Cancellation
+    ///
+    /// Cancelling the awaiting task abandons the msgid: the call returns
+    /// `.failure(.cancelled)` promptly and a late response for that msgid is
+    /// dropped with a debug log. **The request may still execute
+    /// server-side** — cancellation is local abandonment, not a remote abort;
+    /// only its response delivery is cut.
+    ///
+    /// ## Omitting the target
+    ///
+    /// `on:` defaults to `EntityName.root` — an entity-less request. Omit it
+    /// only when the daemon's route declares exactly one concrete entity
+    /// (`Accepts("system.log")` server-side): the server infers the target
+    /// and authorizes it as if spelled out. Any other route answers an
+    /// entity-less call with `.denied`.
+    ///
+    /// ## Inlining
+    ///
+    /// Inlinable: the request's encode and the response's decode are picked
+    /// in the caller's module, where the types are concrete, so a type's
+    /// generated code is specialized there instead of running unspecialized
+    /// in this one. Everything else runs in
+    /// ``call(methodName:entity:encodeRequest:)``, once for every type.
+    @inlinable
+    public nonisolated func call<Request: Codable & Sendable, Response: Codable & Sendable>(
+        _ method: Method<Request, Response>,
+        on entity: EntityName = .root,
+        _ request: Request
+    ) async -> Result<Response, MMCallError> {
+        let response = await self.call(
+            methodName: method.name,
+            entity: entity,
+            encodeRequest: { MMPackEncoder().encodeCheckingForGeneratedCode(request) }
+        )
+        // The shared unary/terminal decode rule (spec §4) —
+        // ``ResponseSlots/decodeResponse(_:)``.
+        .flatMap { slots in slots.decodeResponse(Response.self) }
+        if case .failure(let error) = response {
+            self.recordCallFailure(method: method.name, error: error)
+        }
+        return response
     }
 }
 

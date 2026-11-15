@@ -56,8 +56,9 @@ import NIOCore
 /// it already encoded. A state generic over the call's types is not
 /// specialized across modules, so every lock, yield and `next()` looked its
 /// type metadata up at run time; this one's types are fixed. The generic
-/// step is ``make(msgid:hasResponseStream:hasRequestStream:inbound:response:sinks:logger:metrics:)``,
-/// once per stream.
+/// step is ``ClientStreamDecoders/init(inbound:response:)``, once per stream,
+/// in the module that opens it.
+@usableFromInline
 final class ClientStreamState: Sendable {
     typealias TerminalOutcome = Result<any Sendable, MMCallError>
 
@@ -162,22 +163,20 @@ final class ClientStreamState: Sendable {
         self.decodeResponse = decodeResponse
     }
 
-    /// Builds the state for one stream and its inbound producer. The one
-    /// generic step: it picks the item and terminal decoders for the call's
-    /// types and erases what they return, so the state, its lock and the
-    /// producer stay concrete. Called before the stream is registered in the
+    /// Builds the state for one stream and its inbound producer, with the
+    /// item and terminal decoders the typed call picked
+    /// (``ClientStreamDecoders``), so the state, its lock and the producer
+    /// stay concrete. Called before the stream is registered in the
     /// CallTable — nothing can deliver or terminate earlier.
-    static func make<Inbound: Codable & Sendable, Response: Codable & Sendable>(
+    static func make(
         msgid: UInt32,
         hasResponseStream: Bool,
         hasRequestStream: Bool,
-        inbound _: Inbound.Type,
-        response _: Response.Type,
+        decoders: ClientStreamDecoders,
         sinks: ClientStreamSinks,
         logger: Logger,
         metrics: ClientMetrics
     ) -> ClientStreamState {
-        let decode = MMPackDecoder().decoding(Inbound.self)
         let state = ClientStreamState(
             msgid: msgid,
             hasResponseStream: hasResponseStream,
@@ -185,18 +184,8 @@ final class ClientStreamState: Sendable {
             sinks: sinks,
             logger: logger,
             metrics: metrics,
-            decodeInbound: { item in
-                switch decode(item) {
-                    case .success(let element): .success(element)
-                    case .failure(let error): .failure(error)
-                }
-            },
-            decodeResponse: { slots in
-                switch slots.decodeResponse(Response.self) {
-                    case .success(let response): .success(response)
-                    case .failure(let error): .failure(error)
-                }
-            }
+            decodeInbound: decoders.decodeInbound,
+            decodeResponse: decoders.decodeResponse
         )
         let made = Producer.makeSequence(
             elementType: (any Sendable).self,
@@ -250,6 +239,53 @@ final class ClientStreamState: Sendable {
     /// The current outbound credit (test aid).
     var currentOutboundCredit: UInt32 {
         self.state.withLockedValue { $0.outboundCredit }
+    }
+}
+
+// MARK: - Decoders
+
+/// The item and terminal decoders of one stream call, erased to what the
+/// stream state carries.
+@usableFromInline
+struct ClientStreamDecoders: Sendable {
+    let decodeInbound: @Sendable (ByteBuffer) -> Result<any Sendable, MMWireError>
+    let decodeResponse: @Sendable (ResponseSlots) -> Result<any Sendable, MMCallError>
+
+    @usableFromInline
+    init(
+        decodeInbound: @escaping @Sendable (ByteBuffer) -> Result<any Sendable, MMWireError>,
+        decodeResponse: @escaping @Sendable (ResponseSlots) -> Result<any Sendable, MMCallError>
+    ) {
+        self.decodeInbound = decodeInbound
+        self.decodeResponse = decodeResponse
+    }
+
+    /// Picks the decoders for the call's types: through a type's generated
+    /// code when it has some, through `Codable` otherwise; the terminal by
+    /// the shared decode rule, ``ResponseSlots/decodeResponse(_:)``.
+    /// Inlinable, so the typed calls pick them in the caller's module, where
+    /// the types are concrete, and a type's generated code is specialized
+    /// there instead of running unspecialized in this one.
+    @inlinable
+    init<Inbound: Codable & Sendable, Response: Codable & Sendable>(
+        inbound _: Inbound.Type,
+        response _: Response.Type
+    ) {
+        let decode = MMPackDecoder().decoding(Inbound.self)
+        self.init(
+            decodeInbound: { item in
+                switch decode(item) {
+                    case .success(let element): .success(element)
+                    case .failure(let error): .failure(error)
+                }
+            },
+            decodeResponse: { slots in
+                switch slots.decodeResponse(Response.self) {
+                    case .success(let response): .success(response)
+                    case .failure(let error): .failure(error)
+                }
+            }
+        )
     }
 }
 
@@ -639,6 +675,7 @@ extension ClientStreamState {
 extension ClientStreamState: NIOAsyncSequenceProducerDelegate {
     /// The consumer drained the buffer below the low watermark: release the
     /// parked inbound producer or record the demand for the next park.
+    @usableFromInline
     func produceMore() {
         let parked = self.state.withLockedValue { state -> CheckedContinuation<Void, Never>? in
             if let parked = state.inboundParked {
@@ -655,6 +692,7 @@ extension ClientStreamState: NIOAsyncSequenceProducerDelegate {
     /// cancelled): mark inbound ended and release the parked producer so the
     /// inbound loop can proceed. The terminal is unaffected — a consumer that
     /// stops iterating still awaits `result()`.
+    @usableFromInline
     func didTerminate() {
         let (parked, source) = self.state.withLockedValue { Self.endInbound(&$0) }
         parked?.resume()

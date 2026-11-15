@@ -131,6 +131,7 @@ extension MMCallError {
     /// `MMErrorCode`, whose `unknown` case is the open-world catch-all — this
     /// is the sanctioned way to branch on wire codes without an exhaustive
     /// switch over raw integers.
+    @usableFromInline
     static func from(error: MMError) -> MMCallError {
         switch MMErrorCode(code: error.code) {
             case .unknownMethod: return .unknownMethod

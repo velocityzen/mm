@@ -257,6 +257,7 @@ let package = Package(
                 "MMSchema",
                 "MMServer",
                 "MMClient",
+                "MMTestSupport",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),

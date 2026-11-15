@@ -5,9 +5,10 @@ import NIOCore
 /// inbound loop to the awaiting call task. Payload decoding happens in the
 /// *call* task, so a result that fails to decode fails exactly that call and
 /// nothing else.
+@usableFromInline
 struct ResponseSlots: Sendable, Equatable {
-    var error: MMError?
-    var result: ByteBuffer?
+    @usableFromInline var error: MMError?
+    @usableFromInline var result: ByteBuffer?
 
     /// The one decode rule for a unary result or a stream terminal (spec §4):
     /// an `MMError` maps through `MMCallError.from`; a response with nil in
@@ -17,7 +18,9 @@ struct ResponseSlots: Sendable, Equatable {
     /// succeeds with nil, a non-optional fails with a truthful decode error
     /// for this call only. A `Response` with generated code decodes through
     /// it, found by a check per decode: there is one decode per call, so no
-    /// resolved decode to keep.
+    /// resolved decode to keep. Inlinable, so the check and the decode are
+    /// specialized where `Response` is concrete.
+    @inlinable
     func decodeResponse<Response: Codable & Sendable>(
         _ type: Response.Type
     ) -> Result<Response, MMCallError> {

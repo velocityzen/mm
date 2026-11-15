@@ -382,8 +382,7 @@
                 msgid: 1,
                 hasResponseStream: false,
                 hasRequestStream: true,
-                inbound: Never.self,
-                response: Int.self,
+                decoders: ClientStreamDecoders(inbound: Never.self, response: Int.self),
                 sinks: ClientStreamSinks(
                     grantCredit: { _ in },
                     sendItem: { seq, item in
@@ -406,7 +405,10 @@
             )
             self.plan = plan
             self.client = client
-            self.outbound = OutboundStreamHandle(state: client)
+            self.outbound = OutboundStreamHandle(
+                state: client,
+                encode: MMPackEncoder().encoding(Int.self)
+            )
             self.server = server
             self.stream = stream
             self.link = link
@@ -683,8 +685,7 @@
                 msgid: 1,
                 hasResponseStream: true,
                 hasRequestStream: false,
-                inbound: Int.self,
-                response: Int.self,
+                decoders: ClientStreamDecoders(inbound: Int.self, response: Int.self),
                 sinks: ClientStreamSinks(
                     grantCredit: { credits in link.withLockedValue { $0 }?.serverGranted(credits) },
                     sendItem: { _, _ in false },

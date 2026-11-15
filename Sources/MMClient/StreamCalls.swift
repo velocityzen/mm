@@ -1,5 +1,6 @@
 import MMSchema
 import MMWire
+import NIOCore
 
 /// The typed streaming `call` overloads — one per stream descriptor. Each opens
 /// the call on the normal open path (encode, msgid, in-flight cap, outbound
@@ -11,6 +12,11 @@ import MMWire
 /// against a route whose server-side `Accepts` names exactly one concrete
 /// entity (the server infers and authorizes it); any other route answers
 /// with `.denied` through the terminal.
+///
+/// Each overload is inlinable: the request's encode, the element coders and
+/// the terminal's decode are picked in the caller's module, where the types
+/// are concrete, so a type's generated code is specialized there instead of
+/// running unspecialized in this one.
 extension MMClientConnection {
     /// Opens a **server-streaming** call: the server streams `Element` values
     /// then a terminal `Response`. Returns an ``InboundStreamHandle`` — a
@@ -19,6 +25,7 @@ extension MMClientConnection {
     ///
     /// Iterate the element sequence from a task that does not also await other
     /// traffic on this connection (backpressure head-of-line caveat).
+    @inlinable
     public nonisolated func call<
         Request: Codable & Sendable,
         Element: Codable & Sendable,
@@ -31,11 +38,10 @@ extension MMClientConnection {
         let state = await self.openStream(
             methodName: method.name,
             entity: entity,
-            request: request,
+            encodeRequest: { MMPackEncoder().encodeCheckingForGeneratedCode(request) },
             hasResponseStream: true,
             hasRequestStream: false,
-            inbound: Element.self,
-            response: Response.self
+            decoders: ClientStreamDecoders(inbound: Element.self, response: Response.self)
         )
         return InboundStreamHandle(state: state)
     }
@@ -44,6 +50,7 @@ extension MMClientConnection {
     /// after opening with `request`; the server answers with one terminal `Response`.
     /// Returns an ``OutboundStreamHandle`` — credit-gated `send(_:)`, a one-shot
     /// `finish()` (END), and an awaitable `result()`.
+    @inlinable
     public nonisolated func call<
         Request: Codable & Sendable,
         Element: Codable & Sendable,
@@ -56,13 +63,12 @@ extension MMClientConnection {
         let state = await self.openStream(
             methodName: method.name,
             entity: entity,
-            request: request,
+            encodeRequest: { MMPackEncoder().encodeCheckingForGeneratedCode(request) },
             hasResponseStream: false,
             hasRequestStream: true,
-            inbound: Never.self,
-            response: Response.self
+            decoders: ClientStreamDecoders(inbound: Never.self, response: Response.self)
         )
-        return OutboundStreamHandle(state: state)
+        return OutboundStreamHandle(state: state, encode: MMPackEncoder().encoding(Element.self))
     }
 
     /// Opens a **bidirectional** call: the client streams `RequestElement`
@@ -70,6 +76,7 @@ extension MMClientConnection {
     /// terminates with one `Response`. Returns a ``BidirectionalStreamHandle`` whose two
     /// halves (`inbound`, `outbound`) are usable independently from different
     /// tasks and share the one terminal.
+    @inlinable
     public nonisolated func call<
         Request: Codable & Sendable,
         RequestElement: Codable & Sendable,
@@ -83,12 +90,14 @@ extension MMClientConnection {
         let state = await self.openStream(
             methodName: method.name,
             entity: entity,
-            request: request,
+            encodeRequest: { MMPackEncoder().encodeCheckingForGeneratedCode(request) },
             hasResponseStream: true,
             hasRequestStream: true,
-            inbound: ResponseElement.self,
-            response: Response.self
+            decoders: ClientStreamDecoders(inbound: ResponseElement.self, response: Response.self)
         )
-        return BidirectionalStreamHandle(state: state)
+        return BidirectionalStreamHandle(
+            state: state,
+            encode: MMPackEncoder().encoding(RequestElement.self)
+        )
     }
 }

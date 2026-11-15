@@ -105,8 +105,7 @@
             msgid: 1,
             hasResponseStream: true,
             hasRequestStream: false,
-            inbound: Element.self,
-            response: Element.self,
+            decoders: ClientStreamDecoders(inbound: Element.self, response: Element.self),
             sinks: StreamFrameRecord().sinks,
             logger: Logger(label: "mm.property.stream-elements"),
             metrics: ClientMetrics()
@@ -145,12 +144,12 @@
                 msgid: 1,
                 hasResponseStream: false,
                 hasRequestStream: true,
-                inbound: Never.self,
-                response: Element.self,
+                decoders: ClientStreamDecoders(inbound: Never.self, response: Element.self),
                 sinks: record.sinks,
                 logger: Logger(label: "mm.property.stream-elements"),
                 metrics: ClientMetrics()
-            )
+            ),
+            encode: MMPackEncoder().encoding(Element.self)
         )
         for element in elements {
             let outcome = await outbound.send(element)
