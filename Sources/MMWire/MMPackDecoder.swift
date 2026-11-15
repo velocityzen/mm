@@ -174,10 +174,18 @@ public struct MMPackDecoder: Sendable {
 
 /// Where a map's entries are. Small maps keep theirs on the decode's stack and
 /// are searched in order; large ones hash, so lookups stay constant-time.
+/// Either way the keys list in wire order, so a decode that walks them reads
+/// the same entry first on every run.
 enum MPMapIndex {
     /// Positions on the stack, in wire order, holding each key's first occurrence only.
     case stack(Range<Int>, hasStringKeys: Bool)
-    case hashed(intKeys: [Int64: ByteBuffer], stringKeys: [String: ByteBuffer])
+    /// Each key's first occurrence, hashed for lookups and listed in wire
+    /// order: a hash table's order changes from one table to the next.
+    case hashed(
+        intKeys: [Int64: ByteBuffer],
+        stringKeys: [String: ByteBuffer],
+        keysInWireOrder: [MMPackMapKey]
+    )
 
     /// Maps with more entries than this hash.
     static let linearSearchLimit = 32
@@ -429,8 +437,10 @@ final class MPDecodingState {
         } else {
             var intKeys: [Int64: ByteBuffer] = [:]
             var stringKeys: [String: ByteBuffer] = [:]
+            var keysInWireOrder: [MMPackMapKey] = []
             // Never trust a wire-supplied count for allocation sizing.
             intKeys.reserveCapacity(min(count, 64))
+            keysInWireOrder.reserveCapacity(min(count, 64))
             for _ in 0..<count {
                 let key = try Self.readMapKey(from: &cursor, keyDepth: entryDepth, cap: self.cap)
                 let value = try cursor.sliceMessagePackValue(
@@ -439,14 +449,24 @@ final class MPDecodingState {
                 ).get()
                 switch key {
                     case .int(let intKey):
-                        if intKeys[intKey] == nil { intKeys[intKey] = value }
+                        if intKeys[intKey] == nil {
+                            intKeys[intKey] = value
+                            keysInWireOrder.append(key)
+                        }
                     case .string(let stringKey):
-                        if stringKeys[stringKey] == nil { stringKeys[stringKey] = value }
+                        if stringKeys[stringKey] == nil {
+                            stringKeys[stringKey] = value
+                            keysInWireOrder.append(key)
+                        }
                     case .unusable:
                         break
                 }
             }
-            index = .hashed(intKeys: intKeys, stringKeys: stringKeys)
+            index = .hashed(
+                intKeys: intKeys,
+                stringKeys: stringKeys,
+                keysInWireOrder: keysInWireOrder
+            )
         }
         self.stack[position].buffer = cursor
         self.stack[position].mapIndex = index
@@ -471,7 +491,7 @@ final class MPDecodingState {
                 guard let found = positions.first(where: { self.stack[$0].mapKey == wanted })
                 else { return nil }
                 return self.stack[found].buffer
-            case .hashed(let intKeys, let stringKeys):
+            case .hashed(let intKeys, let stringKeys, _):
                 if let intKey = mpFaithfulIntKey(key), let found = intKeys[Int64(intKey)] {
                     return found
                 }
@@ -479,8 +499,7 @@ final class MPDecodingState {
         }
     }
 
-    /// Every key of the map that `Key` can represent, in wire order for a
-    /// stack index.
+    /// Every key of the map that `Key` can represent, in wire order.
     func keys<Key: CodingKey>(in index: MPMapIndex, as type: Key.Type) -> [Key] {
         var keys: [Key] = []
         func append(_ mapKey: MMPackMapKey) {
@@ -503,13 +522,10 @@ final class MPDecodingState {
                 for position in positions {
                     append(self.stack[position].mapKey)
                 }
-            case .hashed(let intKeys, let stringKeys):
-                keys.reserveCapacity(intKeys.count + stringKeys.count)
-                for intKey in intKeys.keys {
-                    append(.int(intKey))
-                }
-                for stringKey in stringKeys.keys {
-                    append(.string(stringKey))
+            case .hashed(_, _, let keysInWireOrder):
+                keys.reserveCapacity(keysInWireOrder.count)
+                for mapKey in keysInWireOrder {
+                    append(mapKey)
                 }
         }
         return keys
