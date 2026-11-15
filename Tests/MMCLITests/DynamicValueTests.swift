@@ -603,10 +603,12 @@ struct DynamicJSONParseTests {
         expectParseFailure(objects(433), messageContains: refusal)
     }
 
-    @Test("Foundation's documented leniency: array trailing commas parse")
-    func trailingCommaLeniency() throws {
-        // JSON syntax is Foundation's domain now (by design); correctness is
-        // the schema-directed validation layer's job, not syntax pedantry.
+    @Test("a comma before the bracket that closes an array is accepted")
+    func trailingCommaAccepted() throws {
+        // `parse` accepts what `JSONDecoder` accepts, a trailing comma
+        // included: `JSONSyntaxError` reads the text first and must let
+        // `[1,]` through, then `JSONDecoder` reads it as `[1]`. The JSON
+        // syntax properties check this too, but they don't run on Android.
         #expect(try MMCLIDynamicTree.parse(jsonText: "[1,]") == .array([.int(1)]))
     }
 }

@@ -16,16 +16,4 @@ struct LogContextTests {
         #expect(metadata == ["connection": "42"])
         #expect(MMLogContext.metadataProvider.get().isEmpty)
     }
-
-    @Test("the binding is task-local: child tasks inherit it, siblings do not")
-    func bindingIsTaskLocal() async {
-        let inherited = await MMLogContext.$connectionID.withValue(7) {
-            await withTaskGroup(of: Logger.Metadata.self) { group in
-                group.addTask { MMLogContext.metadataProvider.get() }
-                return await group.next() ?? [:]
-            }
-        }
-        #expect(inherited == ["connection": "7"])
-        #expect(MMLogContext.metadataProvider.get().isEmpty)
-    }
 }

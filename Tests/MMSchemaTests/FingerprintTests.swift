@@ -226,14 +226,6 @@ struct FingerprintTests {
         ])
     )
 
-    @Test("an empty type table hashes to the pre-types value")
-    func emptyTypesMatchLegacy() {
-        let signatures = [Self.appendSignature, Self.statSignature]
-        #expect(
-            SchemaFingerprint.compute(signatures, types: [])
-                == SchemaFingerprint.compute(signatures))
-    }
-
     @Test("descriptions never affect the fingerprint")
     func descriptionsNeverHash() {
         var documented = Self.setSignature

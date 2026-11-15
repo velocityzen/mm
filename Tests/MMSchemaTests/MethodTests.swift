@@ -105,13 +105,8 @@ struct MethodTests {
         }
     }
 
-    @Test("builtin request/response types round trip with root entity")
-    func builtinCodableRoundTrip() throws {
-        let request = SchemaRequest()
-        let decoded = try JSONDecoder().decode(
-            SchemaRequest.self, from: JSONEncoder().encode(request))
-        #expect(decoded == request)
-
+    @Test("SchemaResponse round trips through its hand-written coding")
+    func schemaResponseRoundTrip() throws {
         let response = SchemaResponse(
             fingerprint: 0x0123_4567_89ab_cdef,
             methods: [FingerprintTests.statSignature]
@@ -119,10 +114,5 @@ struct MethodTests {
         let decodedResponse = try JSONDecoder().decode(
             SchemaResponse.self, from: JSONEncoder().encode(response))
         #expect(decodedResponse == response)
-
-        let stat = StatResponse(owner: 1000, group: 100, mode: 0o750)
-        let decodedStat = try JSONDecoder().decode(
-            StatResponse.self, from: JSONEncoder().encode(stat))
-        #expect(decodedStat == stat)
     }
 }

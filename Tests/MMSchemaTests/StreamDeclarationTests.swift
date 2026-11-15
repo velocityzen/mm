@@ -210,7 +210,6 @@ struct StreamDeclarationTests {
 
     @Test("explicit StreamOptions equals the default, and the payload form matches Fields")
     func streamOptions() {
-        #expect(StreamOptions() == StreamOptions())
         let defaulted = Schema("feed") {
             Call("ingest") {
                 Access { .write }
