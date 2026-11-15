@@ -807,6 +807,11 @@
         /// time. The server stream's elements written through `Codable` fail
         /// it only when the client reads an element, so the server stream's
         /// elements are often ones the own code both writes and reads.
+        ///
+        /// It found that a stream frame reaching the client before the
+        /// stream's control was installed closed the connection. With the
+        /// old order, writing the opening request and installing the control
+        /// 20 ms later, it fails every run.
         @Test
         func streamCallsUseTheTypesOwnCode() async throws {
             try await withCoderChoiceServer { connection, exchange in

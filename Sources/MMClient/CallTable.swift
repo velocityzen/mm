@@ -257,11 +257,12 @@ struct CallTable: Sendable {
 
     // MARK: - Stream lifecycle
 
-    /// Transitions a reserved msgid into a live stream once its opening request
-    /// is on the wire. Returns a parked terminal outcome if one raced in before
-    /// the caller installed the control (a terminal for a stream whose open
-    /// request was written but whose control was not yet installed); the caller
-    /// hands that outcome straight to the control. `nil` means the stream is now
+    /// Transitions a reserved msgid into a live stream before its opening
+    /// request goes out, so every frame the server answers it with finds the
+    /// control: a stream frame for a reserved msgid is one on a live unary
+    /// call. Returns an outcome already parked for the msgid (a close that
+    /// drained the reservation, or a terminal parked on it); the caller hands
+    /// that outcome straight to the control. `nil` means the stream is now
     /// live in the table. Never sees `.waiting` (a stream never registers a
     /// unary continuation).
     mutating func installStream(

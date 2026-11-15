@@ -826,16 +826,17 @@ public actor MMClientConnection {
         return true
     }
 
-    /// Opens a streaming call: encodes and sends the opening request (the normal
+    /// Opens a streaming call: encodes the opening request (the normal
     /// untyped `call(methodName:)` open path — msgid reservation, in-flight cap, outbound cap,
-    /// writer wait), builds the stream state with its wire sinks, and installs
-    /// the control in the CallTable. Local failures before the control is
-    /// installed (encode, cap, connection closed) are surfaced by pre-resolving
-    /// the stream state's terminal, so the returned handle uniformly reports
-    /// failures through `result()` with an empty element sequence — server-side
-    /// authorization failures arrive the same way, as the terminal frame. The
-    /// typed overloads pick the request's encode and the `decoders` in the
-    /// caller's module, so this runs the same for every type.
+    /// writer wait), builds the stream state with its wire sinks, installs
+    /// the control in the CallTable, and sends the request. Local failures
+    /// before the control is installed (encode, cap, connection closed) are
+    /// surfaced by pre-resolving the stream state's terminal, so the returned
+    /// handle uniformly reports failures through `result()` with an empty
+    /// element sequence — server-side authorization failures arrive the same
+    /// way, as the terminal frame. The typed overloads pick the request's
+    /// encode and the `decoders` in the caller's module, so this runs the
+    /// same for every type.
     @usableFromInline
     nonisolated func openStream(
         methodName: String,
@@ -876,9 +877,14 @@ public actor MMClientConnection {
         )
     }
 
-    /// The post-prepare half of ``openStream``: write the opening request,
-    /// build the stream state with its wire sinks, install it in the table,
-    /// and hand it any terminal that raced ahead.
+    /// The post-prepare half of ``openStream``: build the stream state with
+    /// its wire sinks, install it in the table, then write the opening
+    /// request.
+    ///
+    /// The install comes first. The server may answer the request with a
+    /// stream frame (an item, END or credit) as soon as it reads it, and a
+    /// stream frame for a msgid that is still only reserved reads as one on
+    /// a live unary call: a protocol violation that closes the connection.
     private nonisolated func openPreparedStream(
         msgid: UInt32,
         frame: ByteBuffer,
@@ -888,55 +894,42 @@ public actor MMClientConnection {
         hasRequestStream: Bool,
         decoders: ClientStreamDecoders
     ) async -> ClientStreamState {
-        switch await writer.write(frame) {
-            case .success:
-                break
-            case .failure(.cancelled):
-                // The task was cancelled before its frame was written; the
-                // connection is still alive. Reclaim the reservation
-                // (claiming a parked terminal if one somehow raced) and fail
-                // the handle locally.
-                let parked = self.calls.withLockedValue { $0.abandon(msgid: msgid) }
-                let reason: MMCallError
-                switch parked {
-                    case .some(.success(let slots)) where slots.error != nil:
-                        // A terminal raced in before the write failed: honor it.
-                        reason = .from(error: slots.error!)
-                    case .some(.failure(let closeReason)):
-                        // The connection closed and parked the reservation as a failure.
-                        reason = closeReason
-                    case .some(.success), .none:
-                        reason = .cancelled
-                }
-                return self.failedStream(
-                    hasResponseStream: hasResponseStream,
-                    hasRequestStream: hasRequestStream,
-                    decoders: decoders,
-                    error: reason
-                )
-            case .failure(.channelClosed):
-                // The channel is gone — but the terminal transition belongs
-                // to finish(): run() observes the same death and drives it,
-                // and finish's ordering guarantees no handle fails while
-                // `state` still reads `.connected`. Fall through: the install
-                // below claims the parked close failure when finish won the
-                // race, and finish fails the terminal (state first) when it
-                // hasn't run yet — same discipline as the unary write path.
-                break
-        }
-
-        // The open request is on the wire. Build the state with its wire sinks,
-        // then install it — claiming a terminal that raced ahead of the install.
         let state = self.makeStreamState(
             msgid: msgid,
             hasResponseStream: hasResponseStream,
             hasRequestStream: hasRequestStream,
             decoders: decoders
         )
-        // A terminal (or a close) that resolved before the control was
-        // installed is handed to the state so `result()` sees it.
-        self.calls.withLockedValue { $0.installStream(msgid: msgid, control: state) }?
-            .match(state.resolveTerminal, state.failTerminal)
+        // Nothing can answer a request that is not on the wire yet, so the
+        // only outcome the install can hand back is a close that drained
+        // the reservation first.
+        if let closed = self.calls.withLockedValue({
+            $0.installStream(msgid: msgid, control: state)
+        }) {
+            closed.match(state.resolveTerminal, state.failTerminal)
+            return state
+        }
+
+        switch await writer.write(frame) {
+            case .success:
+                break
+            case .failure(.cancelled):
+                // The task was cancelled before its frame was written; the
+                // connection is still alive. Retire the stream so nothing
+                // reaches it, and fail the handle locally. When the stream
+                // is already gone, a close took it and failed its terminal.
+                if self.calls.withLockedValue({ $0.retireStreamForCancel(msgid: msgid) }) != nil {
+                    state.failTerminal(.cancelled)
+                }
+            case .failure(.channelClosed):
+                // The channel is gone, but the terminal transition belongs
+                // to finish(): run() observes the same death and drives it,
+                // and finish's ordering guarantees no handle fails while
+                // `state` still reads `.connected`. It fails the installed
+                // stream's terminal, as it does every live stream's — same
+                // discipline as the unary write path.
+                break
+        }
         return state
     }
 
