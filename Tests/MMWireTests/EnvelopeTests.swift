@@ -250,28 +250,6 @@ struct ItemGoldenVectorTests {
                 == .failure(.invalidArity(expected: 4, got: 5))
         )
     }
-
-    @Test("invalid item slot fails encoding before any bytes are written")
-    func invalidItemWritesNothing() {
-        let incomplete = MMEnvelope.item(msgid: 1, seq: 0, item: mpBytes("9201"))
-        var buffer = ByteBuffer()
-        #expect(
-            incomplete.encode(into: &buffer).mpFailure
-                == .encodingFailed(
-                    description: "item is not a single complete MessagePack value"
-                )
-        )
-        #expect(buffer.readableBytes == 0)
-
-        let trailing = MMEnvelope.item(msgid: 1, seq: 0, item: mpBytes("9000"))
-        #expect(
-            trailing.encode(into: &buffer).mpFailure
-                == .encodingFailed(
-                    description: "item has trailing bytes after one MessagePack value"
-                )
-        )
-        #expect(buffer.readableBytes == 0)
-    }
 }
 
 @Suite("MMEnvelope golden vectors — kind 4 END")
@@ -695,31 +673,43 @@ struct EnvelopeEncodeValidationTests {
         )
     }
 
-    @Test("invalid result slot fails encoding before any bytes are written")
-    func invalidResultWritesNothing() {
-        let envelope = MMEnvelope.response(msgid: 1, error: nil, result: mpBytes("92"))
+    @Test("an invalid item, result or error payload fails encoding before writing a byte")
+    func invalidSlotWritesNothing() {
         var buffer = ByteBuffer()
-        let outcome = envelope.encode(into: &buffer)
+        let incompleteItem = MMEnvelope.item(msgid: 1, seq: 0, item: mpBytes("9201"))
         #expect(
-            outcome.mpFailure
+            incompleteItem.encode(into: &buffer).mpFailure
+                == .encodingFailed(
+                    description: "item is not a single complete MessagePack value"
+                )
+        )
+        #expect(buffer.readableBytes == 0)
+
+        let trailingItem = MMEnvelope.item(msgid: 1, seq: 0, item: mpBytes("9000"))
+        #expect(
+            trailingItem.encode(into: &buffer).mpFailure
+                == .encodingFailed(
+                    description: "item has trailing bytes after one MessagePack value"
+                )
+        )
+        #expect(buffer.readableBytes == 0)
+
+        let result = MMEnvelope.response(msgid: 1, error: nil, result: mpBytes("92"))
+        #expect(
+            result.encode(into: &buffer).mpFailure
                 == .encodingFailed(
                     description: "result is not a single complete MessagePack value"
                 )
         )
         #expect(buffer.readableBytes == 0)
-    }
 
-    @Test("invalid error payload fails encoding before any bytes are written")
-    func invalidErrorPayloadWritesNothing() {
-        let envelope = MMEnvelope.response(
+        let errorPayload = MMEnvelope.response(
             msgid: 1,
             error: MMError(code: 1, message: "e", payload: mpBytes("c1")),
             result: nil
         )
-        var buffer = ByteBuffer()
-        let outcome = envelope.encode(into: &buffer)
         #expect(
-            outcome.mpFailure
+            errorPayload.encode(into: &buffer).mpFailure
                 == .encodingFailed(
                     description: "error payload is not a single complete MessagePack value"
                 )

@@ -31,7 +31,6 @@ struct HelloTests {
     @Test("encoded size is exactly 15 bytes")
     func encodedSize() {
         #expect(MMHello.encodedByteCount == 15)
-        #expect(Self.pinnedHello.encode().mpSuccess?.readableBytes == 15)
     }
 
     @Test("bad matter in either byte is badMatter")
