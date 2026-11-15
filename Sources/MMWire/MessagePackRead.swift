@@ -331,92 +331,21 @@ extension ByteBuffer {
     }
 
     /// Skip with explicit depth accounting: the value being skipped sits at container
-    /// nesting level `currentDepth` (0 for a top-level value).
+    /// nesting level `currentDepth` (0 for a top-level value). On failure the reader
+    /// index stays where the walk stopped.
     mutating func skipMessagePackValue(currentDepth: Int, cap: Int) -> Result<Void, MMWireError> {
-        guard let format = self.readInteger(as: UInt8.self) else { return .failure(.truncated) }
-        switch format {
-            case 0x00...0x7f, 0xe0...0xff, MPFormat.nilByte, MPFormat.falseByte, MPFormat.trueByte:
-                return .success(())
-            case MPFormat.uint8, MPFormat.int8:
-                return self.skipRawBytes(1)
-            case MPFormat.uint16, MPFormat.int16:
-                return self.skipRawBytes(2)
-            case MPFormat.uint32, MPFormat.int32, MPFormat.float32:
-                return self.skipRawBytes(4)
-            case MPFormat.uint64, MPFormat.int64, MPFormat.float64:
-                return self.skipRawBytes(8)
-            case 0xa0...0xbf:
-                return self.skipRawBytes(Int(format & 0x1f))
-            case MPFormat.str8, MPFormat.bin8:
-                return self.readFixedInteger(UInt8.self).flatMap { self.skipRawBytes(Int($0)) }
-            case MPFormat.str16, MPFormat.bin16:
-                return self.readFixedInteger(UInt16.self).flatMap { self.skipRawBytes(Int($0)) }
-            case MPFormat.str32, MPFormat.bin32:
-                return self.readFixedInteger(UInt32.self).flatMap { self.skipRawBytes(Int($0)) }
-            case MPFormat.fixext1:
-                return self.skipRawBytes(2)
-            case MPFormat.fixext2:
-                return self.skipRawBytes(3)
-            case MPFormat.fixext4:
-                return self.skipRawBytes(5)
-            case MPFormat.fixext8:
-                return self.skipRawBytes(9)
-            case MPFormat.fixext16:
-                return self.skipRawBytes(17)
-            case MPFormat.ext8:
-                return self.readFixedInteger(UInt8.self).flatMap { self.skipRawBytes(Int($0) + 1) }
-            case MPFormat.ext16:
-                return self.readFixedInteger(UInt16.self).flatMap { self.skipRawBytes(Int($0) + 1) }
-            case MPFormat.ext32:
-                return self.readFixedInteger(UInt32.self).flatMap { self.skipRawBytes(Int($0) + 1) }
-            case 0x90...0x9f:
-                return self.skipElements(
-                    count: Int(format & 0x0f), containerDepth: currentDepth, cap: cap)
-            case MPFormat.array16:
-                return self.readFixedInteger(UInt16.self).flatMap {
-                    self.skipElements(count: Int($0), containerDepth: currentDepth, cap: cap)
-                }
-            case MPFormat.array32:
-                return self.readFixedInteger(UInt32.self).flatMap {
-                    self.skipElements(count: Int($0), containerDepth: currentDepth, cap: cap)
-                }
-            case 0x80...0x8f:
-                return self.skipElements(
-                    count: 2 * Int(format & 0x0f), containerDepth: currentDepth, cap: cap)
-            case MPFormat.map16:
-                return self.readFixedInteger(UInt16.self).flatMap {
-                    self.skipElements(count: 2 * Int($0), containerDepth: currentDepth, cap: cap)
-                }
-            case MPFormat.map32:
-                return self.readFixedInteger(UInt32.self).flatMap {
-                    self.skipElements(count: 2 * Int($0), containerDepth: currentDepth, cap: cap)
-                }
-            default:
-                // Only 0xc1 (never used) reaches here.
-                return .failure(.invalidFormat(byte: format))
+        let (walked, failure) = self.withUnsafeReadableBytes { bytes in
+            var walk = MPStructuralWalk(bytes: bytes, cap: cap)
+            let failure = walk.skipValue(depth: currentDepth)
+            return (walk.offset, failure)
         }
-    }
-
-    private mutating func skipElements(
-        count: Int,
-        containerDepth: Int,
-        cap: Int
-    ) -> Result<Void, MMWireError> {
-        guard containerDepth < cap else { return .failure(.nestingTooDeep(limit: cap)) }
-        for _ in 0..<count {
-            if case .failure(let error) = self.skipMessagePackValue(
-                currentDepth: containerDepth + 1, cap: cap)
-            {
-                return .failure(error)
-            }
+        self.moveReaderIndex(forwardBy: walked)
+        switch failure {
+            case nil: return .success(())
+            case .truncated: return .failure(.truncated)
+            case .invalidFormat(let byte): return .failure(.invalidFormat(byte: byte))
+            case .nestingTooDeep: return .failure(.nestingTooDeep(limit: cap))
         }
-        return .success(())
-    }
-
-    private mutating func skipRawBytes(_ count: Int) -> Result<Void, MMWireError> {
-        guard self.readableBytes >= count else { return .failure(.truncated) }
-        self.moveReaderIndex(forwardBy: count)
-        return .success(())
     }
 
     private mutating func readFixedInteger<T: FixedWidthInteger>(

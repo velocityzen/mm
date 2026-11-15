@@ -253,9 +253,7 @@ public actor MMClientConnection {
         try sync.addHandler(
             ByteToMessageHandler(MMFrameDecoder(maxFrameLength: configuration.maxFrameLength))
         )
-        try sync.addHandler(
-            MessageToByteHandler(MMFrameEncoder(maxFrameLength: configuration.maxFrameLength))
-        )
+        try sync.addHandler(MMFrameEncodingHandler(maxFrameLength: configuration.maxFrameLength))
         try sync.addHandler(
             ClientHelloHandler(clientHello: configuration.clientHello, helloPromise: helloPromise)
         )
@@ -1001,7 +999,7 @@ public actor MMClientConnection {
     /// The open-request send path every call shape shares: encode params
     /// (through the request type's generated code when it has some, found by
     /// a check per call), reserve a msgid under the in-flight cap, build the envelope, enforce
-    /// the outbound frame cap *before* the pipeline (`MMFrameEncoder` would
+    /// the outbound frame cap *before* the pipeline (`MMFrameEncodingHandler` would
     /// throw at the handler seam, poisoning the encoder and tearing down the
     /// whole connection — one oversized request must fail one call, locally),
     /// and obtain the writer. Two phases: before the reservation a failure

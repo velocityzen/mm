@@ -145,6 +145,44 @@
         }
     }
 
+    /// A payload as a writer hands it to the frame handler: its buffer, with
+    /// whatever sits in front of its reader index.
+    struct OutboundPayload: Sendable {
+        var label: String
+        var buffer: ByteBuffer
+        /// Whether the buffer came from `MMEnvelope.encoded`, which puts the
+        /// length prefix in front.
+        var isEncodedEnvelope = false
+    }
+
+    /// Whether the four bytes in front of `buffer`'s reader index hold its
+    /// length prefix, which the frame handler then writes in place.
+    func carriesItsLengthPrefix(_ buffer: ByteBuffer) -> Bool {
+        guard buffer.readerIndex >= 4, let length = UInt32(exactly: buffer.readableBytes) else {
+            return false
+        }
+        var front = buffer
+        front.moveReaderIndex(to: buffer.readerIndex - 4)
+        return front.readBytes(length: 4) == lengthPrefix(length)
+    }
+
+    /// Whether `frame` was written from `payload`'s own storage.
+    func sharesStorage(_ frame: ByteBuffer, with payload: ByteBuffer) -> Bool {
+        let frameStorage = frame.withVeryUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
+        let payloadStorage = payload.withVeryUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
+        return frameStorage == payloadStorage
+    }
+
+    /// What a write threw, as text, or nil.
+    func thrownError(by write: () throws -> Void) -> String? {
+        do {
+            try write()
+            return nil
+        } catch {
+            return "\(error)"
+        }
+    }
+
     enum FramingGenerators {
         /// Any number of payloads, each any bytes of any size.
         static let payloads: Gen<[[UInt8]]> = .array(of: .bytes())
@@ -154,6 +192,71 @@
             Gen<[UInt8]>.bytes()
         )
         .map { PayloadBuffer(alreadyRead: $0, payload: $1) }
+
+        /// Payloads with their own length prefix in front, as
+        /// `MMEnvelope.encoded` leaves an envelope, with a prefix one off or
+        /// any four bytes in front, or with fewer than four bytes in front;
+        /// any bytes may come before what is in front.
+        static let outboundPayloads: Gen<OutboundPayload> = .oneOf(
+            Hegel.zip(Gen<[UInt8]>.bytes(), Gen<[UInt8]>.bytes()).map { alreadyRead, payload in
+                outboundPayload(
+                    "a payload with its length prefix in front",
+                    front: alreadyRead + lengthPrefix(UInt32(payload.count)),
+                    payload: payload
+                )
+            },
+            Hegel.zip(Gen<[UInt8]>.bytes(), .element(of: [-1, 1])).map { payload, offset in
+                outboundPayload(
+                    "a payload with a prefix one off in front",
+                    front: lengthPrefix(UInt32(payload.count) &+ UInt32(bitPattern: Int32(offset))),
+                    payload: payload
+                )
+            },
+            Hegel.zip(Gen<[UInt8]>.bytes(), Gen<[UInt8]>.bytes(count: 4...4), Gen<[UInt8]>.bytes())
+                .map { alreadyRead, front, payload in
+                    outboundPayload(
+                        "a payload with any four bytes in front",
+                        front: alreadyRead + front,
+                        payload: payload
+                    )
+                },
+            Hegel.zip(Gen<[UInt8]>.bytes(count: 0...3), Gen<[UInt8]>.bytes()).map {
+                front,
+                payload in
+                outboundPayload(
+                    "a payload with fewer than four bytes in front",
+                    front: front,
+                    payload: payload
+                )
+            },
+            envelopes.map {
+                OutboundPayload(
+                    label: "an envelope from encoded()",
+                    buffer: $0,
+                    isEncodedEnvelope: true
+                )
+            }
+        )
+
+        /// `MMEnvelope.encoded` stream items and credit grants.
+        static let envelopes: Gen<ByteBuffer> = Gen<MMEnvelope>.oneOf(
+            Hegel.zip(
+                Gen<UInt32>.integer(),
+                Gen<UInt32>.integer(),
+                PackGenerators.values(of: PackGenerators.scalarFamilies)
+            )
+            .map { msgid, seq, item in
+                MMEnvelope.item(msgid: msgid, seq: seq, item: ByteBuffer(bytes: item))
+            },
+            Hegel.zip(Gen<UInt32>.integer(), Gen<UInt32>.integer()).map {
+                MMEnvelope.credit(msgid: $0, credits: $1)
+            }
+        )
+        .map { envelope in
+            // An item too deeply nested for the default limit does not
+            // encode; its message is then a CANCEL.
+            (try? envelope.encoded().get()) ?? (try! MMEnvelope.cancel(msgid: 0).encoded().get())
+        }
 
         /// Any `UInt32` from `smallest` up, often exactly `smallest` or
         /// `UInt32.max`.
@@ -205,6 +308,13 @@
                 }
             }
         )
+    }
+
+    /// `payload` in a buffer whose reader index has passed `front`.
+    func outboundPayload(_ label: String, front: [UInt8], payload: [UInt8]) -> OutboundPayload {
+        var buffer = ByteBuffer(bytes: front + payload)
+        buffer.moveReaderIndex(forwardBy: front.count)
+        return OutboundPayload(label: label, buffer: buffer)
     }
 
     @Suite("Frame codec properties", .hegel, .offTheCooperativePool)
@@ -374,6 +484,77 @@
                     )
                     #expect(try encoder.finish().isClean)
                 }
+            }
+        }
+
+        /// The frame handler writes the frames of `MessageToByteHandler` with
+        /// `MMFrameEncoder`, fails the same writes with the same error, fires
+        /// the same errors down the pipeline, and fails every write after the
+        /// first failure as that one does. An envelope from
+        /// `MMEnvelope.encoded` has its length prefix in front of it, and a
+        /// payload within the limit that has is written from its own
+        /// storage, not copied.
+        @Test
+        func frameHandlerWritesTheFrameEncodersFrames() throws {
+            try property(
+                reaching: [
+                    "a payload with a prefix one off in front",
+                    "a payload with any four bytes in front",
+                    "a payload with fewer than four bytes in front",
+                    "a payload with its length prefix in front", "a write after a failure",
+                    "an envelope from encoded()", "framed in its own storage", "over the limit",
+                ]
+            ) { tc in
+                let payloads = try #draw(
+                    Gen<[OutboundPayload]>.array(
+                        of: FramingGenerators.outboundPayloads,
+                        count: 1...4
+                    ),
+                    from: tc
+                )
+                let largestPayload = UInt32(payloads.map(\.buffer.readableBytes).max() ?? 0)
+                let maximumLength = try #draw(
+                    FramingGenerators.limits(around: largestPayload),
+                    from: tc
+                )
+                let handler = EmbeddedChannel(
+                    handler: MMFrameEncodingHandler(maxFrameLength: maximumLength)
+                )
+                let encoder = encoderChannel(maximumLength: maximumLength)
+                var failed = false
+                for payload in payloads {
+                    try tc.event(payload.label)
+                    if failed {
+                        try tc.event("a write after a failure")
+                    }
+                    let handlerError = thrownError { try handler.writeOutbound(payload.buffer) }
+                    let encoderError = thrownError { try encoder.writeOutbound(payload.buffer) }
+                    #expect(handlerError == encoderError)
+                    let handlerFired = thrownError { try handler.throwIfErrorCaught() }
+                    let encoderFired = thrownError { try encoder.throwIfErrorCaught() }
+                    #expect(handlerFired == encoderFired, "fired down the pipeline")
+                    if payload.isEncodedEnvelope {
+                        #expect(carriesItsLengthPrefix(payload.buffer), "\(hex(payload.buffer))")
+                    }
+                    let handlerFrame = try handler.readOutbound(as: ByteBuffer.self)
+                    let encoderFrame = try encoder.readOutbound(as: ByteBuffer.self)
+                    #expect(
+                        handlerFrame.map { Array($0.readableBytesView) }
+                            == encoderFrame.map { Array($0.readableBytesView) },
+                        "\(hex(payload.buffer))"
+                    )
+                    if encoderError != nil {
+                        if !failed {
+                            try tc.event("over the limit")
+                        }
+                        failed = true
+                    } else if carriesItsLengthPrefix(payload.buffer), let handlerFrame {
+                        try tc.event("framed in its own storage")
+                        #expect(sharesStorage(handlerFrame, with: payload.buffer))
+                    }
+                }
+                _ = try? handler.finish(acceptAlreadyClosed: true)
+                _ = try? encoder.finish(acceptAlreadyClosed: true)
             }
         }
 

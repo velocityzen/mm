@@ -4,6 +4,6 @@ public enum MMWireInfo {
     public static let protocolVersion: UInt8 = 1
 
     /// Default maximum frame payload length: 16 MiB. Configurable per endpoint on
-    /// `MMFrameDecoder` / `MMFrameEncoder`.
+    /// `MMFrameDecoder` / `MMFrameEncoder` / `MMFrameEncodingHandler`.
     public static let defaultMaxFrameLength: UInt32 = 16 * 1024 * 1024
 }

@@ -55,9 +55,7 @@ struct PipelineTests {
         #expect(throws: Never.self) {
             try sync.handler(type: ByteToMessageHandler<MMFrameDecoder>.self)
         }
-        #expect(throws: Never.self) {
-            try sync.handler(type: MessageToByteHandler<MMFrameEncoder>.self)
-        }
+        #expect(throws: Never.self) { try sync.handler(type: MMFrameEncodingHandler.self) }
         #expect(throws: Never.self) { try sync.handler(type: ServerHelloHandler.self) }
         _ = try? channel.finish()
     }

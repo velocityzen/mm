@@ -114,4 +114,87 @@ public struct MMFrameEncoder: MessageToByteEncoder, Sendable {
         out.writeInteger(UInt32(byteCount), endianness: .little)
         out.writeImmutableBuffer(data)
     }
+
+    /// `payload` as a frame, with the bytes and the failure of
+    /// ``encode(data:out:)``. A payload whose length prefix already sits in
+    /// the four bytes before its reader index, as
+    /// ``MMEnvelope/encoded(allocator:maxDepth:)`` leaves it, comes back in
+    /// its own storage with the reader index moved back over the prefix.
+    /// Any other payload is copied behind a new prefix.
+    public func frame(
+        _ payload: ByteBuffer,
+        allocator: ByteBufferAllocator
+    ) throws -> ByteBuffer {
+        let byteCount = payload.readableBytes
+        if byteCount <= Int(self.maxFrameLength), payload.readerIndex >= 4 {
+            var framed = payload
+            framed.moveReaderIndex(to: payload.readerIndex - 4)
+            let prefix = framed.getInteger(
+                at: framed.readerIndex,
+                endianness: .little,
+                as: UInt32.self
+            )
+            if prefix == UInt32(byteCount) {
+                return framed
+            }
+        }
+        var out = allocator.buffer(capacity: 4 + byteCount)
+        try self.encode(data: payload, out: &out)
+        return out
+    }
 }
+
+/// Frames outbound payloads as `[u32 LE length][payload]`, the frames of
+/// `MessageToByteHandler(MMFrameEncoder(...))`, through
+/// ``MMFrameEncoder/frame(_:allocator:)``: a payload that already carries
+/// its length prefix, as an envelope from
+/// ``MMEnvelope/encoded(allocator:maxDepth:)`` does, is written without a
+/// copy.
+///
+/// Failures are `MessageToByteHandler`'s: a payload longer than
+/// `maxFrameLength` fails its write with `MMWireError.frameTooLarge` and
+/// fires the error down the pipeline, and so does every write after it.
+/// Once the handler is removed, writes are dropped.
+public final class MMFrameEncodingHandler: ChannelOutboundHandler {
+    public typealias OutboundIn = ByteBuffer
+    public typealias OutboundOut = ByteBuffer
+
+    private let encoder: MMFrameEncoder
+    private var failure: (any Error)?
+    private var removed = false
+
+    public init(maxFrameLength: UInt32 = MMWireInfo.defaultMaxFrameLength) {
+        self.encoder = MMFrameEncoder(maxFrameLength: maxFrameLength)
+    }
+
+    public func handlerRemoved(context: ChannelHandlerContext) {
+        self.removed = true
+    }
+
+    public func write(
+        context: ChannelHandlerContext,
+        data: NIOAny,
+        promise: EventLoopPromise<Void>?
+    ) {
+        guard !self.removed else { return }
+        if let failure = self.failure {
+            promise?.fail(failure)
+            context.fireErrorCaught(failure)
+            return
+        }
+        do {
+            let frame = try self.encoder.frame(
+                Self.unwrapOutboundIn(data),
+                allocator: context.channel.allocator
+            )
+            context.write(Self.wrapOutboundOut(frame), promise: promise)
+        } catch {
+            self.failure = error
+            promise?.fail(error)
+            context.fireErrorCaught(error)
+        }
+    }
+}
+
+@available(*, unavailable)
+extension MMFrameEncodingHandler: Sendable {}

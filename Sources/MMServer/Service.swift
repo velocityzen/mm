@@ -607,7 +607,7 @@ package struct ServerRuntime: Sendable {
         }
         try sync.addHandler(ConnectionDrainHandler())
         try sync.addHandler(ByteToMessageHandler(MMFrameDecoder(maxFrameLength: maxFrameLength)))
-        try sync.addHandler(MessageToByteHandler(MMFrameEncoder(maxFrameLength: maxFrameLength)))
+        try sync.addHandler(MMFrameEncodingHandler(maxFrameLength: maxFrameLength))
         try sync.addHandler(
             ServerHelloHandler(
                 serverHello: serverHello,

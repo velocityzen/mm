@@ -15,17 +15,18 @@ func stageBenchmarks<Payload: ThroughputPayload>(_ payload: Payload.Type) {
     let method = Payload.echo.name
 
     Benchmark("OneWay.encode.\(Payload.shape)") { benchmark in
-        var writer = MessageWriter()
+        let writer = MessageWriter()
         benchmark.startMeasurement()
         for seq in benchmark.scaledIterations {
             let item = try MMPackEncoder().encode(sample).get()
             try writer.write(.item(msgid: 1, seq: UInt32(seq), item: item))
         }
         benchmark.stopMeasurement()
+        try writer.finish()
     }
 
     Benchmark("TwoWay.encode.\(Payload.shape)") { benchmark in
-        var writer = MessageWriter()
+        let writer = MessageWriter()
         benchmark.startMeasurement()
         for _ in benchmark.scaledIterations {
             let params = try MMPackEncoder().encode(sample).get()
@@ -36,6 +37,7 @@ func stageBenchmarks<Payload: ThroughputPayload>(_ payload: Payload.Type) {
             try writer.write(.response(msgid: 1, error: nil, result: result))
         }
         benchmark.stopMeasurement()
+        try writer.finish()
     }
 
     Benchmark("OneWay.decode.\(Payload.shape)") { benchmark in
@@ -61,19 +63,18 @@ func stageBenchmarks<Payload: ThroughputPayload>(_ payload: Payload.Type) {
     }
 }
 
-/// Writes envelopes the way a connection sends them: each one encoded, then
-/// framed, into buffers reused from message to message.
+/// Writes envelopes the way a connection sends them: each one encoded into a
+/// buffer of its own, then through the connection's frame encoder.
 private struct MessageWriter {
-    private let frameEncoder = MMFrameEncoder()
-    private var envelope = ByteBuffer()
-    private var frame = ByteBuffer()
+    private let channel = EmbeddedChannel(handler: MMFrameEncodingHandler())
 
-    mutating func write(_ message: MMEnvelope) throws {
-        self.envelope.clear()
-        try message.encode(into: &self.envelope).get()
-        self.frame.clear()
-        try self.frameEncoder.encode(data: self.envelope, out: &self.frame)
-        blackHole(self.frame)
+    func write(_ message: MMEnvelope) throws {
+        try self.channel.writeOutbound(try message.encoded().get())
+        blackHole(try self.channel.readOutbound(as: ByteBuffer.self))
+    }
+
+    func finish() throws {
+        _ = try self.channel.finish()
     }
 }
 

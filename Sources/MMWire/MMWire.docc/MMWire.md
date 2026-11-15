@@ -6,7 +6,7 @@ The wire layer: MessagePack coding over `ByteBuffer`, length-prefix framing, the
 
 MMWire implements the lowest layers of the matter-in-motion protocol. It depends only on NIOCore and MMSchema (for the VPTS codec of the wire time kinds).
 
-- **Framing**: `[u32 LE length][payload]` frames, through ``MMFrameDecoder`` and ``MMFrameEncoder``. The length counts only the payload. The decoder checks the size limit (default 16 MiB, see ``MMWireInfo``) before it stores any body byte.
+- **Framing**: `[u32 LE length][payload]` frames, through ``MMFrameDecoder`` and ``MMFrameEncoder``. The length counts only the payload. The decoder checks the size limit (default 16 MiB, see ``MMWireInfo``) before it stores any body byte. ``MMFrameEncodingHandler`` frames outbound payloads without copying an envelope that ``MMEnvelope/encoded(allocator:maxDepth:)`` wrote, since its length prefix is already in front of it.
 - **Hello preamble**: ``MMHello``, a fixed 15-byte structure (matter bytes `MM`, protocol version, schema fingerprint, capability bitset). Each side sends it as its first frame.
 - **Envelope**: ``MMEnvelope``, tagged MessagePack arrays with kinds 0 to 6: terminal, open, credit, item, END, STOP, and CANCEL. Params, results, and stream items stay raw `ByteBuffer` slices until a typed layer decodes them.
 
@@ -54,6 +54,7 @@ Failures return a `Result` with one typed error, ``MMWireError``. ``MMErrorCode`
 
 - ``MMFrameDecoder``
 - ``MMFrameEncoder``
+- ``MMFrameEncodingHandler``
 
 ### Envelope
 

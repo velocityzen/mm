@@ -315,13 +315,24 @@ public enum MMEnvelope: Equatable, Sendable {
         }
     }
 
-    /// Encodes the envelope into a fresh buffer.
+    /// Encodes the envelope into a fresh buffer. The readable bytes are the
+    /// envelope; the four bytes before them hold its frame's length prefix,
+    /// so ``MMFrameEncodingHandler`` frames it without a copy.
     public func encoded(
         allocator: ByteBufferAllocator = ByteBufferAllocator(),
         maxDepth: Int = 128
     ) -> Result<ByteBuffer, MMWireError> {
         var buffer = allocator.buffer(capacity: 64)
-        return self.encode(into: &buffer, maxDepth: maxDepth).map { buffer }
+        buffer.writeInteger(UInt32(0))
+        buffer.moveReaderIndex(forwardBy: 4)
+        return self.encode(into: &buffer, maxDepth: maxDepth).map {
+            buffer.setInteger(
+                UInt32(truncatingIfNeeded: buffer.readableBytes),
+                at: 0,
+                endianness: .little
+            )
+            return buffer
+        }
     }
 
     /// Decodes one envelope from a frame payload. The frame must contain exactly the
