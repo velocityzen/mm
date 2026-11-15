@@ -297,7 +297,7 @@ Input(Search.RootCommand.self) { input, arguments, search in
         FromResult(input.lines)
         Filter { (query: String) in !query.isEmpty && !query.hasPrefix("#") }
         Map { (query: String) in Search.RootRequest(query: query, limit: arguments.limit) }
-        AsyncFlatMapKeepOrder(concurrency: 4) { (request: Search.RootRequest) in await search(request) }
+        AsyncFlatMap(concurrency: 4, ordered: true) { (request: Search.RootRequest) in await search(request) }
     }
 }
 ```
@@ -409,7 +409,7 @@ Reports go to the controlling terminal, so they arrive even when stdout is piped
 
 ## Requirements
 
-- Swift 6.4+ (strict concurrency). Everything runs on macOS 26+, Linux and Android. The client (`MMClient`, `MMSchema`, `MMWire`) also runs on iOS, iPadOS, tvOS, watchOS and visionOS 26+.
+- Swift 6.4+ (strict concurrency). Everything runs on macOS 27+, Linux and Android. The client (`MMClient`, `MMSchema`, `MMWire`) also runs on iOS, iPadOS, tvOS, watchOS and visionOS 27+.
 - Runtime dependencies (complete list): [swift-nio](https://github.com/apple/swift-nio), [swift-log](https://github.com/apple/swift-log), [swift-metrics](https://github.com/apple/swift-metrics), [fp-swift](https://github.com/velocityzen/fp-swift), [fp-swift-bracket](https://github.com/velocityzen/fp-swift-bracket), [fp-swift-service](https://github.com/velocityzen/fp-swift-service) (`FPService` for the server's shutdown fan-out, `ProcessSignals` for `MMCLI`), and [ProgramStatus](https://github.com/velocityzen/ProgramStatus) (terminal status for `MMServer` and `MMCLI`). The CLI example and tests also use [fp-swift-pipe](https://github.com/velocityzen/fp-swift-pipe). MessagePack is implemented in this repository. [swift-syntax](https://github.com/swiftlang/swift-syntax) is a compile-time-only dependency of the `#schema` macro and the `MMCLIGeneratorPlugin`. It is never linked into products.
 
 ## Installation

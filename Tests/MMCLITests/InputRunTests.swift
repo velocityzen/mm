@@ -40,7 +40,7 @@ struct InputRunTests {
             Pipe<CLIEchoResponse, MMCLIError> {
                 FromResult(input.lines)
                 Filter { (line: String) in !line.isEmpty && !line.hasPrefix("#") }
-                AsyncFlatMapKeepOrder(concurrency: 4) { (line: String) in await echo(line) }
+                AsyncFlatMap(concurrency: 4, ordered: true) { (line: String) in await echo(line) }
                 Tap { (response: CLIEchoResponse) in echoed.add(response.value) }
             }
         }

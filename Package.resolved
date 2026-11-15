@@ -1,22 +1,22 @@
 {
-  "originHash" : "f15a84450bf9e3b0709e7a3289a59db9d2077bb74253eb259ed3ae52a67d2be0",
+  "originHash" : "1f986c272708bcda996603966e721b96f86c4c9ec3cd5ad1be0e117ac9fe2622",
   "pins" : [
     {
       "identity" : "fp-swift",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/velocityzen/fp-swift.git",
       "state" : {
-        "revision" : "807c45c000a42c803f72313dbdffc9ab731bba88",
-        "version" : "4.2.1"
+        "revision" : "7dcd038849b5098fd488407fa34f07d0d6e11130",
+        "version" : "4.5.0"
       }
     },
     {
       "identity" : "fp-swift-bracket",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/velocityzen/fp-swift-bracket",
+      "location" : "https://github.com/velocityzen/fp-swift-bracket.git",
       "state" : {
-        "revision" : "85c0404bb60050060572c9a003b729b9ad741e81",
-        "version" : "2.1.0"
+        "revision" : "a811376126c06aed1f3c39a7aa582aee05d36968",
+        "version" : "3.0.0"
       }
     },
     {
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/velocityzen/fp-swift-pipe.git",
       "state" : {
-        "revision" : "29f6dd92f7373a30db3530d34655257d516c1a1c",
-        "version" : "2.1.0"
+        "revision" : "b14e9f94fe9c7aa117420edbd01773226d4fb25a",
+        "version" : "2.4.1"
       }
     },
     {
@@ -33,8 +33,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/velocityzen/fp-swift-service.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "f6565058a85c291cabb78e631c804f7bb430152f"
+        "revision" : "726b524aef972e2376e2a6719ba3d8a870ee95ba",
+        "version" : "0.2.0"
       }
     },
     {
@@ -51,8 +51,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/velocityzen/ProgramStatus.git",
       "state" : {
-        "revision" : "7c2b321ff5e4a5e6042267c0486e76845a7df125",
-        "version" : "0.4.0"
+        "revision" : "e1a5839a8bc676e7999584151cab82c76980aff9",
+        "version" : "0.4.1"
       }
     },
     {

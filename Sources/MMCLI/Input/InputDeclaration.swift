@@ -109,7 +109,7 @@ public struct MMCLIInputs: Sendable, ExpressibleByArrayLiteral {
 ///         FromResult(input.lines)
 ///         Filter { (query: String) in !query.isEmpty && !query.hasPrefix("#") }
 ///         Map { (query: String) in Search.RootRequest(query: query, limit: arguments.limit) }
-///         AsyncFlatMapKeepOrder(concurrency: 4) { (request: Search.RootRequest) in await search(request) }
+///         AsyncFlatMap(concurrency: 4, ordered: true) { (request: Search.RootRequest) in await search(request) }
 ///     }
 /// }
 /// ```

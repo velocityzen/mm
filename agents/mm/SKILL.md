@@ -298,7 +298,7 @@ A top-level `CLI(.enabled)` entry in the schema block generates one swift-argume
 
 ## House rules that apply to any code you write here
 
-- Swift 6.4+ with strict concurrency, macOS 26+/Linux.
+- Swift 6.4+ with strict concurrency, macOS 27+/Linux.
 - Never use Dispatch/GCD, free-floating `Task {}`, `.wait()`, `print()`, `Date()`, or `@unchecked Sendable`.
 - Public APIs return typed `Result`s (`MMCallError`, `MMWireError`, `MMError`), not thrown errors.
 - Tests use Swift Testing (`@Test`/`#expect`) in three tiers: `EmbeddedChannel` for handlers, plain value tests for domain logic, real temp-dir Unix sockets for integration.

@@ -36,14 +36,20 @@ jobs:
 
   macos:
     name: Test macOS
-    runs-on: macos-26
+    # Package.swift needs macOS 27, which only the xcode-27 image (a public
+    # preview) runs; macos-26 can't launch what it builds.
+    runs-on: xcode-27
     timeout-minutes: 45
+    env:
+      # The SDK swift.org's toolchain builds against: Xcode 27.1's, so a
+      # change of the image's default Xcode cannot change it.
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # The image's Xcode ships Swift 6.3; this installs the toolchain the
-      # Linux jobs build with.
+      # The image's default Xcode may ship another Swift; this installs the
+      # toolchain the Linux jobs build with.
       - name: Set up Swift
         uses: ./.github/actions/setup-swift
         with:

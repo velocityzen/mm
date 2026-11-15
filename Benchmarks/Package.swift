@@ -7,7 +7,7 @@ import PackageDescription
 let package = Package(
     name: "MatterInMotionBenchmarks",
     // Matches the library's minimum.
-    platforms: [.macOS(.v26)],
+    platforms: [.macOS(.v27)],
     dependencies: [
         // The name is set explicitly: SwiftPM otherwise takes it from the
         // checkout's directory name, which a git worktree names after itself.
