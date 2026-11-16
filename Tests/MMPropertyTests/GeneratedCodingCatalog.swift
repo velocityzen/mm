@@ -310,8 +310,9 @@
                 let name = try tc.draw(self.text)
                 let tag =
                     ["pending", "shipped", "split", "held"].contains(name) ? name + "+" : name
+                // In one order, so a replay draws the same bytes.
                 let fields = try tc.draw(.optional(self.map(keys: Self.integer, values: self.text)))
-                    .map { try MMPackRawValue(MMPackEncoder().encode($0).get().readableBytesView) }
+                    .map { try MMPackRawValue(encodedInOneOrder($0).readableBytesView) }
                 return .unknown(tag: tag, fields: fields)
             }
         }

@@ -202,13 +202,14 @@
         }
 
         /// No path decodes a strict prefix of a request's bytes, and both fail
-        /// on it with the same error.
+        /// on it with the same error. The request's dictionaries encode in
+        /// one order, so a replay cuts the same bytes.
         @Test
         func truncatedPayloadsFailTheSameWay() throws {
             try property(reaching: ["failed with truncated"]) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)
-                let bytes = try encodedThroughCodable(request).get()
+                let bytes = try encodedInOneOrder(request)
                 let length = try #draw(prefixLengths(below: bytes.readableBytes), from: tc)
                 let prefix = try #require(bytes.getSlice(at: bytes.readerIndex, length: length))
                 let generated = decodedThroughGeneratedCode(Catalog.PutRequest.self, from: prefix)
@@ -227,7 +228,9 @@
         }
 
         /// Both paths decode a request with any bytes replaced, inserted or
-        /// removed to the same value, or fail on it with the same error.
+        /// removed to the same value, or fail on it with the same error. The
+        /// request's dictionaries encode in one order, so a replay changes
+        /// the same bytes.
         @Test
         func corruptedPayloadsDecodeOrFailTheSameWay() throws {
             try property(
@@ -239,7 +242,7 @@
             ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)
-                let bytes = try Array(encodedThroughCodable(request).get().readableBytesView)
+                let bytes = try Array(encodedInOneOrder(request).readableBytesView)
                 let changes = try #draw(mutations, from: tc)
                 let corrupted = ByteBuffer(bytes: mutated(bytes, by: changes))
                 let generated = decodedThroughGeneratedCode(

@@ -104,7 +104,8 @@
         /// is not an integer, and a seal text naming no case, each with a
         /// `DecodingError`. The rest of the menu is null, an integer, text
         /// and empty containers, which the slots refuse with an
-        /// `MMWireError`.
+        /// `MMWireError`. A drawn dictionary's entries come in one order,
+        /// so a replay draws the same bytes.
         func slotBytes(for slot: CodableSlot) -> Gen<[UInt8]> {
             let pairs: Gen<[UInt8]> = Gen { tc in
                 let keys = try tc.draw(
@@ -115,25 +116,31 @@
                 )
             }
             let negativeKeys: Gen<[UInt8]> = Gen { tc in
-                try codableBytes(
-                    tc.draw(
-                        Gen<[Int: String]>.dictionary(
-                            keys: .int(in: Int.min...(-1)),
-                            values: self.text,
-                            count: 1...3
+                try Array(
+                    encodedInOneOrder(
+                        tc.draw(
+                            Gen<[Int: String]>.dictionary(
+                                keys: .int(in: Int.min...(-1)),
+                                values: self.text,
+                                count: 1...3
+                            )
                         )
                     )
+                    .readableBytesView
                 )
             }
             let textKeys: Gen<[UInt8]> = Gen { tc in
-                try codableBytes(
-                    tc.draw(
-                        Gen<[String: String]>.dictionary(
-                            keys: self.text,
-                            values: self.text,
-                            count: 1...3
+                try Array(
+                    encodedInOneOrder(
+                        tc.draw(
+                            Gen<[String: String]>.dictionary(
+                                keys: self.text,
+                                values: self.text,
+                                count: 1...3
+                            )
                         )
                     )
+                    .readableBytesView
                 )
             }
             let seal: Gen<[UInt8]> = Gen { tc in
@@ -157,12 +164,12 @@
             }
         }
 
-        /// `request` encoded through `Codable`, with the value in `slot`
-        /// replaced by `replacement`. An item slot is in one of the
-        /// request's items, a held shipment slot in one of its held
-        /// shipments at any depth; a request without one gets one. The slot
-        /// is found by its bytes: it first takes a value holding
-        /// `slotSentinel`, whose encoding occurs once.
+        /// `request` encoded through `Codable` with its dictionaries in one
+        /// order, and the value in `slot` replaced by `replacement`. An item
+        /// slot is in one of the request's items, a held shipment slot in
+        /// one of its held shipments at any depth; a request without one
+        /// gets one. The slot is found by its bytes: it first takes a value
+        /// holding `slotSentinel`, whose encoding occurs once.
         func replacing(
             _ slot: CodableSlot,
             in request: Catalog.PutRequest,
@@ -212,7 +219,7 @@
                         after = try [1] + codableBytes(found.customs)
                     }
             }
-            var bytes = try codableBytes(request)
+            var bytes = try Array(encodedInOneOrder(request).readableBytesView)
             let marked = try #require(occurrences(of: marker, in: bytes).only)
             var range = marked
             if !after.isEmpty {
