@@ -509,31 +509,35 @@
             }
         }
 
-        /// The set with one change: half the time a change to the set or a
-        /// signature, otherwise an edit inside one of its schemas. Every
-        /// kind is drawn as often as the others and made where it applies,
-        /// at a place drawn from all such places; a kind with no place in
-        /// the set adds a signature or replaces a schema instead.
+        /// The set with one edit inside one of its schemas. Every kind of
+        /// edit the set has a place for is drawn as often as the others,
+        /// and made at a place drawn from all its places. A set always has
+        /// a place to replace a schema, since it has a signature.
+        static func edited(_ set: SchemaSet, _ tc: TestCase) throws -> (SchemaSet, String) {
+            var set = set
+            let edits = SchemaEdit.allCases.filter { !set.places(for: $0).isEmpty }
+            let edit = try tc.draw(Gen<SchemaEdit>.element(of: edits))
+            let places = set.places(for: edit)
+            let place = places[try pick(places.count, tc)]
+            let (node, label) = try applying(edit, to: place.node, tc)
+            set.replace(
+                place.slot,
+                with: replacing(at: place.path, in: set.schema(at: place.slot), with: node)
+            )
+            return (set, label)
+        }
+
+        /// The set with one change to the set or to a signature, outside
+        /// its schemas. Every kind of change the set allows is drawn as
+        /// often as the others, and made to a signature drawn from those it
+        /// applies to. A set always allows adding a signature.
         static func changed(_ set: SchemaSet, _ tc: TestCase) throws -> (SchemaSet, String) {
             var set = set
-            if try tc.draw(Gen<Bool>.bool()) {
-                var edit = try tc.draw(Gen<SchemaEdit>.element(of: SchemaEdit.allCases))
-                if set.places(for: edit).isEmpty { edit = .schemaReplaced }
-                let places = set.places(for: edit)
-                let place = places[try pick(places.count, tc)]
-                let (node, label) = try applying(edit, to: place.node, tc)
-                set.replace(
-                    place.slot,
-                    with: replacing(at: place.path, in: set.schema(at: place.slot), with: node)
-                )
-                return (set, label)
+            let changes = SetChange.allCases.filter {
+                set.signatures(for: $0)?.isEmpty != true
+                    && !($0.needsDefinition && set.types.isEmpty)
             }
-            var change = try tc.draw(Gen<SetChange>.element(of: SetChange.allCases))
-            if set.signatures(for: change)?.isEmpty == true
-                || (change.needsDefinition && set.types.isEmpty)
-            {
-                change = .signatureAdded
-            }
+            let change = try tc.draw(Gen<SetChange>.element(of: changes))
             let candidates = set.signatures(for: change) ?? Array(set.signatures.indices)
             let index = candidates[try pick(candidates.count, tc)]
             let typeIndex = set.types.isEmpty ? 0 : try pick(set.types.count, tc)
@@ -604,24 +608,57 @@
         }
 
         /// Two sets fingerprint the same exactly when their wire forms, with
-        /// no order and no descriptions, are the same: one change anywhere,
-        /// a name, an access mode, a field's name, key or place, a case, a
-        /// stream or its slot, a definition, changes the fingerprint unless
-        /// it changes nothing on the wire.
+        /// no order and no descriptions, are the same: one edit inside a
+        /// schema, a field's name, key or place, a field or a case added or
+        /// dropped, a case renamed or moved, or a schema replaced, changes
+        /// the fingerprint unless it changes nothing on the wire.
         ///
-        /// Mutation check: leaving a field's key, a union case's fields or
-        /// the access mode out of the hash, or tagging a response stream as
-        /// a request stream, fails here.
+        /// Mutation check: leaving a field's key or a union case's fields
+        /// out of the hash fails here.
         @Test
-        func fingerprintSeesEveryChange() throws {
+        func fingerprintSeesEverySchemaEdit() throws {
             try property(
                 reaching: ["the wire form changed"],
                 reachingAfter: [
-                    "a definition added": 1_000, "a field added": 1_000, "a field dropped": 1_000,
-                    "a field key changed": 1_000, "a field renamed": 1_000,
-                    "a schema replaced": 1_000, "a signature added": 1_000, "access changed": 1_000,
-                    "the request stream changed": 1_000, "the response stream changed": 1_000,
+                    "a field added": 1_000, "a field dropped": 1_000, "a field key changed": 1_000,
+                    "a field renamed": 1_000, "a schema replaced": 1_000,
+                    "a union case dropped": 1_000, "a union case renamed": 1_000,
+                    "an enum case dropped": 1_000, "an enum case renamed": 1_000,
                     "two enum cases swapped": 1_000, "two fields swapped": 1_000,
+                    "two union cases swapped": 1_000,
+                ]
+            ) { tc in
+                let set = try #draw(FingerprintGenerators.sets(signatureCount: 1...6), from: tc)
+                let (changed, label) = try FingerprintGenerators.edited(set, tc)
+                let restated = try FingerprintGenerators.restated(changed, tc)
+                let same = try wireForm(set) == wireForm(restated)
+                try tc.event(label)
+                try tc.event(same ? "nothing changed on the wire" : "the wire form changed")
+                #expect((restated.fingerprint == set.fingerprint) == same, "\(label)")
+            }
+        }
+
+        /// Two sets fingerprint the same exactly when their wire forms, with
+        /// no order and no descriptions, are the same: one change outside
+        /// the schemas, a signature added, dropped or doubled, a method's
+        /// name or access mode, a stream or its slot, or a definition added,
+        /// renamed or dropped, changes the fingerprint unless it changes
+        /// nothing on the wire.
+        ///
+        /// Mutation check: leaving the access mode out of the hash, or
+        /// tagging a response stream as a request stream, fails here.
+        @Test
+        func fingerprintSeesEverySetChange() throws {
+            try property(
+                reaching: ["the wire form changed"],
+                reachingAfter: [
+                    "a definition added": 1_000, "a definition dropped": 1_000,
+                    "a definition renamed": 1_000, "a method renamed": 1_000,
+                    "a signature added": 1_000, "a signature doubled": 1_000,
+                    "a signature dropped": 1_000, "a stream moved to the other slot": 1_000,
+                    "access changed": 1_000, "nothing changed on the wire": 1_000,
+                    "the request stream changed": 1_000, "the response stream changed": 1_000,
+                    "the streams swapped slots": 1_000,
                 ]
             ) { tc in
                 let set = try #draw(FingerprintGenerators.sets(signatureCount: 1...6), from: tc)
