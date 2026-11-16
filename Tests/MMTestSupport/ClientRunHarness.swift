@@ -20,13 +20,6 @@ public func withClientRunLoop<Context: Sendable, T: Sendable>(
             let result = await connection.run()
             runResult.withLockedValue { $0 = result }
         }
-        // A sibling deadline bounds the run() join: if the loop fails to
-        // observe the close, the group throws instead of hanging the test.
-        group.addTask {
-            try await Task.sleep(
-                for: .seconds(joinSeconds), tolerance: nil, clock: ContinuousClock())
-            throw DeadlineExceeded()
-        }
         let result: T
         do {
             result = try await withDeadline(seconds: bodySeconds) { try await body(context) }
@@ -37,6 +30,15 @@ public func withClientRunLoop<Context: Sendable, T: Sendable>(
             throw error
         }
         await connection.close()
+        // A sibling deadline bounds the run() join: if the loop fails to
+        // observe the close, the group throws instead of hanging the test.
+        // It starts at the close, so a long body leaves the join its full
+        // `joinSeconds`.
+        group.addTask {
+            try await Task.sleep(
+                for: .seconds(joinSeconds), tolerance: nil, clock: ContinuousClock())
+            throw DeadlineExceeded()
+        }
         _ = try await group.next()  // run() finished, or DeadlineExceeded
         group.cancelAll()  // stop the deadline child
         try? await group.waitForAll()  // its CancellationError is expected
