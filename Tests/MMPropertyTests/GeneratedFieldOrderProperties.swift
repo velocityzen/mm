@@ -2,6 +2,7 @@
 #if os(macOS) || os(Linux)
 
     import HegelTesting
+    import MMSchema
     import MMWire
     import NIOCore
     import Testing
@@ -51,9 +52,15 @@
         /// Whether `entry`'s key names one of the fields, under its integer
         /// key or its name.
         func names(_ entry: MapEntry) -> Bool {
-            if let key = entry.integerKey { return self.name(forKey: key) != nil }
-            if let name = entry.stringKey { return self.fields.contains { $0.name == name } }
-            return false
+            self.fieldKey(entry) != nil
+        }
+
+        /// The integer key of the field `entry`'s key names, under its
+        /// integer key or its name; nil when it names no field.
+        func fieldKey(_ entry: MapEntry) -> Int? {
+            if let key = entry.integerKey { return self.name(forKey: key) == nil ? nil : key }
+            if let name = entry.stringKey { return self.fields.first { $0.name == name }?.key }
+            return nil
         }
 
         /// Whether `entries` come the way the encoder writes them: each field
@@ -93,9 +100,10 @@
         /// Writes the entry under its field's name instead of its integer
         /// key.
         case rename(Int)
-        /// Writes the entry again at the second position: with the other
-        /// value's bytes for the same key, when it has them and `otherValue`
-        /// says so, else with the same bytes.
+        /// Writes the entry again at the second position, under the same
+        /// key: with the other value's bytes for the field the key names,
+        /// when it has them and `otherValue` says so, else with the same
+        /// bytes.
         case duplicate(Int, at: Int, otherValue: Bool)
         /// Puts in an entry under a key that names no field.
         case unknown(UnknownKey, value: [UInt8], at: Int)
@@ -154,22 +162,30 @@
 
     let position: Gen<Int> = .int(in: 0...Int.max)
 
-    /// Any number of changes, often none.
+    let entryChange: Gen<EntryChange> = .oneOf(
+        Hegel.zip(position, position).map { .move($0, to: $1) },
+        position.map { .drop($0) },
+        position.map { .rename($0) },
+        Hegel.zip(position, position, .bool()).map {
+            .duplicate($0, at: $1, otherValue: $2)
+        },
+        Hegel.zip(unknownKeys, unknownValues, position).map {
+            .unknown($0, value: $1, at: $2)
+        }
+    )
+
+    /// No changes half the time. Otherwise any number of changes, or any
+    /// number and then an entry repeated with the other value's bytes,
+    /// last so that no change drops or renames it: among five kinds of
+    /// change, a repeat carrying another value came up in as few as 1 case
+    /// in 100.
     let entryChanges: Gen<[EntryChange]> = .oneOf(
         .just([]),
-        .array(
-            of: .oneOf(
-                Hegel.zip(position, position).map { .move($0, to: $1) },
-                position.map { .drop($0) },
-                position.map { .rename($0) },
-                Hegel.zip(position, position, .bool()).map {
-                    .duplicate($0, at: $1, otherValue: $2)
-                },
-                Hegel.zip(unknownKeys, unknownValues, position).map {
-                    .unknown($0, value: $1, at: $2)
-                }
-            ),
-            count: 1...8
+        .oneOf(
+            .array(of: entryChange, count: 1...8),
+            Hegel.zip(.array(of: entryChange, count: 0...7), position, position).map {
+                $0 + [.duplicate($1, at: $2, otherValue: true)]
+            }
         )
     )
 
@@ -282,7 +298,12 @@
                 case .duplicate(let from, let at, let otherValue):
                     guard !entries.isEmpty else { continue }
                     var entry = entries[from % entries.count]
-                    if otherValue, let other = others.first(where: { $0.key == entry.key }) {
+                    // The other value's entries are the encoder's, under
+                    // integer keys, so a field under its name finds its
+                    // bytes by the field.
+                    if otherValue, let field = layout.fieldKey(entry),
+                        let other = others.first(where: { layout.fieldKey($0) == field })
+                    {
                         entry.value = other.value
                     }
                     entries.insert(entry, at: at % (entries.count + 1))
@@ -348,6 +369,14 @@
         if valuesByKey.values.contains(where: { Set($0.map(\.value)).count > 1 }) {
             try tc.event("\(prefix) a repeated key with another value")
         }
+        let valuesByName = Dictionary(
+            grouping: entries.filter { $0.stringKey != nil && layout.names($0) }
+        ) {
+            $0.stringKey
+        }
+        if valuesByName.values.contains(where: { Set($0.map(\.value)).count > 1 }) {
+            try tc.event("\(prefix) a field's name repeated with another value")
+        }
         if entries.contains(where: {
             $0.stringKey.map { name in layout.fields.contains { $0.name == name } } ?? false
         }) {
@@ -412,6 +441,12 @@
         /// throws its own errors instead of handing them to `Decodable`'s
         /// path passes here, where every value is valid; the corrupted and
         /// truncated payload properties fail it.
+        ///
+        /// A repeated key's or a repeated name's last occurrence read by the
+        /// generated code, and a repeated key's last read by `Codable`'s
+        /// decoder, each fail here and in the union property below in three
+        /// runs of three. The repeated name's passed both until a repeat
+        /// under a field's name carried another value's bytes.
         @Test
         func rearrangedItemsDecodeAsCodableDecodesThem() throws {
             try property(
@@ -490,18 +525,33 @@
                     "fields a field under its name",
                     "fields a key naming no field", "fields a required field missing",
                     "decoded", "decoded with keys out of order", "failed with keyNotFound",
-                ]
+                ],
+                reachingAfter: ["fields a field's name repeated with another value": 1_000]
             ) { tc in
                 let generators = CatalogGenerators(try #draw(CatalogGenerators.shapes, from: tc))
-                let shipped = Gen<Catalog.Shipment> { tc in
-                    try .shipped(
-                        carrier: tc.draw(generators.text),
-                        tracking: tc.draw(.optional(generators.bytes)),
-                        condition: tc.draw(CatalogGenerators.condition)
-                    )
-                }
-                let shipment = try #draw(shipped, from: tc)
-                let other = try #draw(shipped, from: tc)
+                let carrier = try #draw(generators.text, from: tc)
+                let tracking = try #draw(Gen<MMBytes?>.optional(generators.bytes), from: tc)
+                let condition = try #draw(CatalogGenerators.condition, from: tc)
+                let shipment = Catalog.Shipment.shipped(
+                    carrier: carrier,
+                    tracking: tracking,
+                    condition: condition
+                )
+                // The shipment whose bytes a repeated entry carries holds
+                // another value in every field: a value the two shared
+                // would repeat the entry's own bytes, as a repeat without
+                // another value already does.
+                var otherCarrier = try #draw(generators.text, from: tc)
+                if otherCarrier == carrier { otherCarrier += "+" }
+                var otherTracking = try #draw(generators.bytes, from: tc)
+                if otherTracking == tracking { otherTracking = MMBytes(otherTracking.bytes + [0]) }
+                var otherCondition = try #draw(CatalogGenerators.condition, from: tc)
+                if otherCondition == condition { otherCondition = condition == .new ? .used : .new }
+                let other = Catalog.Shipment.shipped(
+                    carrier: otherCarrier,
+                    tracking: otherTracking,
+                    condition: otherCondition
+                )
                 let changes = try #draw(MapChanges.all, from: tc)
 
                 // The union's own map: the case under 0, its fields under 1.
