@@ -13,6 +13,7 @@ struct MethodTests {
         .init(key: 0, name: "name", type: .string),
         .init(key: 1, name: "access", type: .uint),
         .init(key: 2, name: "description", type: .optional(.string)),
+        .init(key: 3, name: "deprecation", type: .optional(.string)),
         .init(key: 10, name: "request", type: TypeSchema.schema),
         .init(key: 11, name: "requestDescription", type: .optional(.string)),
         .init(key: 12, name: "requestStream", type: .optional(TypeSchema.schema)),
@@ -47,6 +48,7 @@ struct MethodTests {
                 ])
             )
         ),
+        .init(key: 4, name: "deprecation", type: .optional(.string)),
     ])
 
     @Test("server.schema signature")

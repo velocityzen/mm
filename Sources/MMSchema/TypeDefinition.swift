@@ -15,9 +15,10 @@
 /// `enumeration` for `Enum` declarations, a `union` for `Union`
 /// declarations, a scalar kind for `Alias` declarations), **2** the optional
 /// description, **3** the optional ``TypeSchema/Constraints`` every value of
-/// the type keeps (named scalars only).
-/// The description is documentation only — served by discovery, never hashed
-/// or compared. The constraints are part of the contract.
+/// the type keeps (named scalars only), **4** the optional deprecation.
+/// The description and deprecation are documentation only — served by
+/// discovery, never hashed or compared. The constraints are part of the
+/// contract.
 public struct TypeDefinition: Sendable, Hashable, Codable {
     /// The qualified name (`<namespace>.<TypeName>`).
     public var name: String
@@ -30,17 +31,22 @@ public struct TypeDefinition: Sendable, Hashable, Codable {
     /// when it declares none. Part of the contract: served by discovery and
     /// hashed into the fingerprint.
     public var constraints: TypeSchema.Constraints?
+    /// Why the type is deprecated, or nil when it is not. Documentation, like
+    /// ``description``.
+    public var deprecation: String?
 
     public init(
         name: String,
         schema: TypeSchema,
         description: String? = nil,
-        constraints: TypeSchema.Constraints? = nil
+        constraints: TypeSchema.Constraints? = nil,
+        deprecation: String? = nil
     ) {
         self.name = name
         self.schema = schema
         self.description = description
         self.constraints = constraints
+        self.deprecation = deprecation
     }
 
     enum CodingKeys: Int, CodingKey {
@@ -48,12 +54,14 @@ public struct TypeDefinition: Sendable, Hashable, Codable {
         case schema = 1
         case description = 2
         case constraints = 3
+        case deprecation = 4
     }
 }
 
 extension TypeDefinition {
-    /// The same definition with every description removed — the form the
-    /// fingerprint hashes and `verify`/`SchemaDifference` compare.
+    /// The same definition with every description and deprecation removed —
+    /// the form the fingerprint hashes and `verify`/`SchemaDifference`
+    /// compare.
     public var strippingDescriptions: TypeDefinition {
         TypeDefinition(
             name: self.name,

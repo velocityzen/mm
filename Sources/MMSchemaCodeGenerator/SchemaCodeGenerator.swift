@@ -126,6 +126,8 @@ package enum SchemaCodeGenerator {
             throw SchemaMacroError(description: "#schemaTypes declares no types")
         }
         try validate(types: types, calls: [])
+        let resolver = WireDefaultResolver(types: types)
+        types = try types.map { try resolver.resolve($0) }
         let constrained = constrainedTypeNames(types)
         var declarations: [String] = []
         for type in types {
@@ -164,8 +166,11 @@ package enum SchemaCodeGenerator {
         // never in help, and no input decodes to it.
         let topLevel = contract.types.compactMap { type -> String? in
             switch type.payload {
-                case .enumeration:
-                    "extension \(enclosingType).\(type.name): MMCLIEnumArgument {}"
+                case .enumeration(let cases):
+                    enumArgumentConformance(
+                        "\(enclosingType).\(type.name)",
+                        cases: cases
+                    )
                 case .alias:
                     "extension \(enclosingType).\(type.name): MMCLIAliasArgument {}"
                 case .structure, .union:
@@ -376,11 +381,15 @@ struct ParsedTypeDecl {
     var name: String
     var description: String?
     var payload: Payload
+    /// Why the type is deprecated; nil when it is not.
+    var deprecation: String? = nil
 }
 
 struct ParsedCase {
     var name: String
     var description: String?
+    /// Why the case is deprecated; nil when it is not.
+    var deprecation: String? = nil
 }
 
 /// One `Union` case: its wire tag, which is also the generated Swift case,
@@ -389,6 +398,8 @@ struct ParsedUnionCase {
     var name: String
     var description: String?
     var fields: [ParsedField]
+    /// Why the case is deprecated; nil when it is not.
+    var deprecation: String? = nil
 
     /// The generated `CodingKey` enum for the case's fields.
     var codingKeysName: String { "\(capitalizedFirst(name))CodingKeys" }
@@ -398,6 +409,8 @@ struct ParsedCall {
     var name: String
     var accessSource: String  // rendered verbatim: ".write" or "[.read, .write]"
     var description: String?
+    /// Why the call is deprecated; nil when it is not.
+    var deprecation: String?
     var request: [ParsedField]
     var requestName: String?
     var requestDescription: String?
@@ -485,6 +498,11 @@ struct ParsedField {
     var cliHint: ParsedCLIArgument?
     /// The rules the field's value keeps beyond its shape.
     var constraints: ParsedConstraints? = nil
+    /// Why the field is deprecated; nil when it is not.
+    var deprecation: String? = nil
+    /// Set once the block's types are known, for a field that is not
+    /// optional with a `default:`; see ``WireDefaultResolver``.
+    var wireDefault: ParsedWireDefault? = nil
 }
 
 /// `append` → `Append` — one spelling for generated-type name derivation.
@@ -597,12 +615,19 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
         throw SchemaMacroError(description: "#schema declares no calls")
     }
     let generatedNames = try validate(types: types, calls: calls)
+    let resolver = WireDefaultResolver(types: types)
+    types = try types.map { try resolver.resolve($0) }
+    calls = try calls.map { try resolver.resolve($0) }
+    namedErrors = try namedErrors.map { try resolver.resolve($0) }
+    let resolvedNamespaceErrors = try (namespaceErrors ?? []).map {
+        try resolver.resolve($0, context: "#schema Errors")
+    }
     var contract = ParsedContract(
         namespace: namespace, types: types, calls: calls, cliMode: cliMode ?? .disabled)
     try resolveErrors(
         in: &contract,
         namedErrors: namedErrors,
-        namespaceErrors: namespaceErrors ?? [],
+        namespaceErrors: resolvedNamespaceErrors,
         generatedNames: generatedNames
     )
     return contract
@@ -655,9 +680,16 @@ private func validateCLI(calls: [ParsedCall], argumentTypeNames: Set<String>) th
             if let fieldDefault = field.defaultValue {
                 switch field.cliHint {
                     case nil, .option:
-                        try validateFieldDefault(
-                            fieldDefault, field: field, call: call, argumentTypeNames: argumentTypeNames,
-                            requiresOptional: !isCLIOption)
+                        // A wire default was checked with the block's types.
+                        if field.wireDefault == nil {
+                            try validateFieldDefault(
+                                fieldDefault,
+                                field: field,
+                                call: call,
+                                argumentTypeNames: argumentTypeNames,
+                                requiresOptional: !isCLIOption
+                            )
+                        }
                     default:
                         throw SchemaMacroError(
                             description:
@@ -743,6 +775,12 @@ private func validateInputFields(_ fields: [ParsedField], call: ParsedCall) thro
         throw SchemaMacroError(
             description:
                 "Call(\"\(call.name)\"): field \"\(field.name)\" is cli: .input but not a required .string"
+        )
+    }
+    guard field.deprecation == nil else {
+        throw SchemaMacroError(
+            description:
+                "Call(\"\(call.name)\"): field \"\(field.name)\" is cli: .input, which the input runner writes, so it cannot be deprecated"
         )
     }
     guard !call.hasRequestStream else {
@@ -998,7 +1036,9 @@ private func parseTypeDecl(_ call: FunctionCallExprSyntax, kind: String) throws 
         )
     }
     let description = try labeledDescription(call.arguments, context: "\(kind)(\"\(name)\")")
-    for argument in call.arguments.dropFirst() where argument.label?.text != "description" {
+    let deprecation = try labeledDeprecation(call.arguments, context: "\(kind)(\"\(name)\")")
+    for argument in call.arguments.dropFirst()
+    where argument.label?.text != "description" && argument.label?.text != "deprecated" {
         throw SchemaMacroError(
             description:
                 "\(kind)(\"\(name)\"): unsupported argument \(argument.expression.trimmedDescription)"
@@ -1013,7 +1053,11 @@ private func parseTypeDecl(_ call: FunctionCallExprSyntax, kind: String) throws 
             throw SchemaMacroError(description: "Type(\"\(name)\") declares no fields")
         }
         return ParsedTypeDecl(
-            name: name, description: description, payload: .structure(fields))
+            name: name,
+            description: description,
+            payload: .structure(fields),
+            deprecation: deprecation
+        )
     }
     var cases: [(parsed: ParsedCase, fields: [ParsedField]?)] = []
     var seen: Set<String> = []
@@ -1045,15 +1089,26 @@ private func parseTypeDecl(_ call: FunctionCallExprSyntax, kind: String) throws 
     }
     guard kind == "Union" else {
         return ParsedTypeDecl(
-            name: name, description: description, payload: .enumeration(cases.map(\.parsed)))
+            name: name,
+            description: description,
+            payload: .enumeration(cases.map(\.parsed)),
+            deprecation: deprecation
+        )
     }
     return ParsedTypeDecl(
         name: name, description: description,
         payload: .union(
             cases.map { parsed, fields in
                 ParsedUnionCase(
-                    name: parsed.name, description: parsed.description, fields: fields ?? [])
-            }))
+                    name: parsed.name,
+                    description: parsed.description,
+                    fields: fields ?? [],
+                    deprecation: parsed.deprecation
+                )
+            }
+        ),
+        deprecation: deprecation
+    )
 }
 
 private func parseCase(
@@ -1079,12 +1134,14 @@ private func parseCase(
     }
     let context = "\(kind)(\"\(typeName)\").Case(\"\(name)\")"
     let description = try labeledDescription(call.arguments, context: context)
-    for argument in call.arguments.dropFirst() where argument.label?.text != "description" {
+    let deprecation = try labeledDeprecation(call.arguments, context: context)
+    for argument in call.arguments.dropFirst()
+    where argument.label?.text != "description" && argument.label?.text != "deprecated" {
         throw SchemaMacroError(
             description: "\(context): unsupported argument \(argument.expression.trimmedDescription)"
         )
     }
-    return ParsedCase(name: name, description: description)
+    return ParsedCase(name: name, description: description, deprecation: deprecation)
 }
 
 private func parseCall(_ call: FunctionCallExprSyntax) throws -> ParsedCall {
@@ -1106,6 +1163,7 @@ private func parseCall(_ call: FunctionCallExprSyntax) throws -> ParsedCall {
     var result = ParsedCall(
         name: name, accessSource: "", request: [], response: [])
     result.description = try labeledDescription(call.arguments, context: "Call(\"\(name)\")")
+    result.deprecation = try labeledDeprecation(call.arguments, context: "Call(\"\(name)\")")
     var sawAccess = false
     var sawRequest = false
     var sawResponse = false
@@ -1167,7 +1225,11 @@ private func parseCall(_ call: FunctionCallExprSyntax) throws -> ParsedCall {
                             description:
                                 "Call(\"\(name)\"): CLI(.omitted) takes no options — no command is generated")
                     }
-                    result.cliOptions = try parseFields(closure, context: "Call(\"\(name)\") CLI options")
+                    result.cliOptions = try parseFields(
+                        closure,
+                        context: "Call(\"\(name)\") CLI options",
+                        allowsReserved: false
+                    )
                 }
             default:
                 throw SchemaMacroError(
@@ -1518,19 +1580,39 @@ private func isNamedPayload(_ payload: ParsedType) -> Bool {
     }
 }
 
-func parseFields(_ closure: ClosureExprSyntax, context: String) throws -> [ParsedField] {
+/// A fields block's `Field(...)` declarations, keyed around its
+/// `Reserved(...)` entries (see ``reservingKeys(_:keys:names:context:)``).
+/// `allowsReserved` is false where no field reaches the wire.
+func parseFields(
+    _ closure: ClosureExprSyntax,
+    context: String,
+    allowsReserved: Bool = true
+) throws -> [ParsedField] {
     var fields: [ParsedField] = []
+    var reservedKeys: Set<Int> = []
+    var reservedNames: Set<String> = []
     for item in closure.statements {
-        guard let call = item.item.as(FunctionCallExprSyntax.self), calleeName(call) == "Field"
+        guard let call = item.item.as(FunctionCallExprSyntax.self),
+            let callee = calleeName(call),
+            callee == "Field" || (callee == "Reserved" && allowsReserved)
         else {
             throw SchemaMacroError(
                 description:
-                    "\(context): only Field(...) declarations are supported (static subset)"
+                    allowsReserved
+                    ? "\(context): only Field(...) and Reserved(...) declarations are supported (static subset)"
+                    : "\(context): only Field(...) declarations are supported (static subset)"
             )
+        }
+        if callee == "Reserved" {
+            let reserved = try parseReserved(call, context: context)
+            reservedKeys.formUnion(reserved.keys)
+            reservedNames.formUnion(reserved.names)
+            continue
         }
         fields.append(try parseField(call, context: context))
     }
-    return fields
+    guard !reservedKeys.isEmpty || !reservedNames.isEmpty else { return fields }
+    return try reservingKeys(fields, keys: reservedKeys, names: reservedNames, context: context)
 }
 
 private func parseField(_ call: FunctionCallExprSyntax, context: String) throws -> ParsedField {
@@ -1538,12 +1620,21 @@ private func parseField(_ call: FunctionCallExprSyntax, context: String) throws 
     var description: String?
     var defaultValue: ParsedFieldDefault?
     var cliHint: ParsedCLIArgument?
+    var deprecation: String?
     // Peel the trailing labeled metadata arguments (`description:`,
-    // `default:`, and `cli:`), in any order.
+    // `deprecated:`, `default:`, and `cli:`), in any order.
     while let last = arguments.last, let label = last.label?.text,
-        label == "description" || label == "default" || label == "cli"
+        label == "description" || label == "deprecated" || label == "default" || label == "cli"
     {
-        if label == "description" {
+        if label == "deprecated" {
+            guard deprecation == nil else {
+                throw SchemaMacroError(
+                    description: "\(context): Field declares deprecated twice"
+                )
+            }
+            deprecation = try requireDeprecationLiteral(
+                last.expression, context: "\(context): Field")
+        } else if label == "description" {
             guard description == nil else {
                 throw SchemaMacroError(
                     description: "\(context): Field declares description twice")
@@ -1604,7 +1695,11 @@ private func parseField(_ call: FunctionCallExprSyntax, context: String) throws 
         return ParsedField(
             pinnedKey: pinnedKey, name: name,
             type: .structure(name: nestedName, fields: nestedFields),
-            description: description, defaultValue: defaultValue, cliHint: cliHint)
+            description: description,
+            defaultValue: defaultValue,
+            cliHint: cliHint,
+            deprecation: deprecation
+        )
     }
     guard let typeArgument = typeArguments.first, typeArguments.count == 1 else {
         throw SchemaMacroError(
@@ -1615,7 +1710,12 @@ private func parseField(_ call: FunctionCallExprSyntax, context: String) throws 
         pinnedKey: pinnedKey, name: name, type: type,
         description: description, defaultValue: defaultValue, cliHint: cliHint,
         constraints: try parseConstraints(
-            constraintExpressions, for: type, context: "\(context): Field(\"\(name)\")"))
+            constraintExpressions,
+            for: type,
+            context: "\(context): Field(\"\(name)\")"
+        ),
+        deprecation: deprecation
+    )
 }
 
 func parseType(_ expr: ExprSyntax, context: String) throws -> ParsedType {
@@ -1789,12 +1889,18 @@ func fieldLiterals(
 ) throws -> String {
     try keyed.map { field, key in
         var literal =
-            "TypeSchema.Field(key: \(key), name: \(quoted(field.name)), type: \(try schemaLiteral(field.type, namespace: namespace))"
+            "TypeSchema.Field(key: \(key), name: \(quoted(field.name)), type: \(try schemaLiteral(wireField(field).type, namespace: namespace))"
         if let description = field.description {
             literal += ", description: \(quoted(description))"
         }
         if let constraints = field.constraints {
             literal += ", constraints: \(constraints.literal)"
+        }
+        if let wireDefault = field.wireDefault {
+            literal += ", defaultValue: \(wireDefault.schemaLiteral)"
+        }
+        if let deprecation = field.deprecation {
+            literal += ", deprecation: \(quoted(deprecation))"
         }
         return literal + ")"
     }.joined(separator: ", ")
@@ -1852,21 +1958,47 @@ func generateStruct(
         lines.append(
             nested.split(separator: "\n").map { "    \($0)" }.joined(separator: "\n"))
     }
+    let fieldNames = Set(keyed.map(\.field.name))
     for (field, _) in keyed {
+        guard let deprecation = field.deprecation else {
+            if let description = field.description {
+                lines.append("    /// \(docCommentText(description))")
+            }
+            lines.append("    public var \(field.name): \(swiftType(field.type))")
+            continue
+        }
+        // A deprecated property warns wherever it is used, the generated
+        // code included, so that code uses private storage.
+        let storage = storageName(field)
+        guard !fieldNames.contains(storage) else {
+            throw SchemaMacroError(
+                description:
+                    "\(name): field \"\(field.name)\" is deprecated and keeps its value in \"\(storage)\", another field's name — rename one"
+            )
+        }
+        lines.append("    private var \(storage): \(swiftType(field.type))")
         if let description = field.description {
             lines.append("    /// \(docCommentText(description))")
         }
-        lines.append("    public var \(field.name): \(swiftType(field.type))")
+        lines.append("    \(deprecationAttribute(deprecation))")
+        lines.append("    public var \(field.name): \(swiftType(field.type)) {")
+        lines.append("        get { self.\(storage) }")
+        lines.append("        set { self.\(storage) = newValue }")
+        lines.append("    }")
     }
     var parameters: [String] = []
     var assignments: [String] = []
     for (field, _) in keyed {
-        parameters.append("\(field.name): \(swiftType(field.type))")
-        assignments.append("        self.\(field.name) = \(field.name)")
+        let defaultArgument = field.wireDefault.map { " = \($0.swiftExpression)" } ?? ""
+        parameters.append("\(field.name): \(swiftType(field.type))\(defaultArgument)")
+        assignments.append("        self.\(storageName(field)) = \(field.name)")
     }
     lines.append("    public init(\(parameters.joined(separator: ", "))) {")
     lines.append(contentsOf: assignments)
     lines.append("    }")
+    if keyed.contains(where: { $0.field.wireDefault != nil || $0.field.deprecation != nil }) {
+        lines.append(contentsOf: explicitCodableMembers(keyed).map { "    \($0)" })
+    }
     lines.append(contentsOf: mmPackStructMembers(keyed).map { "    \($0)" })
     lines.append(
         contentsOf: structConstraintMembers(keyed, constrained: constrained).map { "    \($0)" }
@@ -1880,6 +2012,33 @@ func generateStruct(
     }
     lines.append("}")
     return lines.joined(separator: "\n")
+}
+
+/// The `Codable` members of a struct whose fields synthesis cannot code: a
+/// field with a wire default decodes with its fallback, and a deprecated
+/// field lives in private storage. They code as synthesis does otherwise:
+/// `decode`/`encode` for a field that is not optional, `decodeIfPresent`/
+/// `encodeIfPresent` for one that is.
+private func explicitCodableMembers(_ keyed: [(field: ParsedField, key: Int)]) -> [String] {
+    var lines: [String] = []
+    lines.append("public init(from decoder: any Decoder) throws {")
+    lines.append("    let container = try decoder.container(keyedBy: CodingKeys.self)")
+    for (field, _) in keyed {
+        lines.append(
+            "    self.\(storageName(field)) = \(keyedFieldDecode(field, container: "container"))"
+        )
+    }
+    lines.append("}")
+    lines.append("public func encode(to encoder: any Encoder) throws {")
+    lines.append("    var container = encoder.container(keyedBy: CodingKeys.self)")
+    for (field, _) in keyed {
+        let method = if case .optional = field.type { "encodeIfPresent" } else { "encode" }
+        lines.append(
+            "    try container.\(method)(self.\(storageName(field)), forKey: .\(field.name))"
+        )
+    }
+    lines.append("}")
+    return lines
 }
 
 /// Nested structs declared via `Field("owner") { ... }` blocks, at any depth.
@@ -1910,7 +2069,7 @@ private func mmPackStructMembers(_ keyed: [(field: ParsedField, key: Int)]) -> [
     var lines: [String] = []
     lines.append("public func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {")
     lines.append(
-        contentsOf: mmPackEncodeFieldMap(keyed) { _, field in "self.\(field.name)" }
+        contentsOf: mmPackEncodeFieldMap(keyed) { _, field in "self.\(storageName(field))" }
             .map { "    \($0)" })
     lines.append("}")
     lines.append(
@@ -1927,7 +2086,7 @@ private func mmPackStructMembers(_ keyed: [(field: ParsedField, key: Int)]) -> [
         contentsOf: mmPackDecodeFieldMap(
             keyed,
             codingKeys: "CodingKeys",
-            target: { _, field in "self.\(field.name)" },
+            target: { _, field in "self.\(storageName(field))" },
             finish: ["return"]
         )
         .map { "    \($0)" })
@@ -1997,9 +2156,11 @@ private func mmPackDecodeFieldMap(
     lines.append("    var \(readNextKey)")
     for (field, key) in keyed {
         let value = "\(field.name)Value"
-        let read = mmPackReadField(field, codingKeys: codingKeys)
-        if case .optional = field.type {
-            lines.append("    let \(value): \(swiftType(field.type))")
+        // A field with a wire default reads as the optional the wire holds.
+        let wire = wireField(field)
+        let read = mmPackReadField(wire, codingKeys: codingKeys)
+        if case .optional = wire.type {
+            lines.append("    let \(value): \(swiftType(wire.type))")
             lines.append("    if case .int(\(key))? = key {")
             lines.append("        \(value) = \(read)")
             lines.append("        \(readNextKey)")
@@ -2024,7 +2185,8 @@ private func mmPackDecodeFieldMap(
     lines.append("        \(readNextKey)")
     lines.append("    }")
     for (index, (field, _)) in keyed.enumerated() {
-        lines.append("    \(target(index, field)) = \(field.name)Value")
+        let fallback = field.wireDefault.map { " ?? \($0.swiftExpression)" } ?? ""
+        lines.append("    \(target(index, field)) = \(field.name)Value\(fallback)")
     }
     lines.append(contentsOf: finish.map { "    \($0)" })
     lines.append("} catch {")
@@ -2055,14 +2217,22 @@ private func mmPackDecodeFieldMap(
     lines.append("let end = reader.position")
     for (index, (field, key)) in keyed.enumerated() {
         let position = "\(field.name)AtKey ?? \(field.name)AtName"
-        if case .optional = field.type {
+        let wire = wireField(field)
+        if case .optional = wire.type {
+            let read = mmPackReadField(wire, codingKeys: codingKeys)
             lines.append("if let position = \(position) {")
             lines.append("    reader.seek(to: position)")
-            lines.append(
-                "    \(target(index, field)) = \(mmPackReadField(field, codingKeys: codingKeys))"
-            )
+            if let wireDefault = field.wireDefault {
+                lines.append(
+                    "    \(target(index, field)) = (\(read)) ?? \(wireDefault.swiftExpression)"
+                )
+            } else {
+                lines.append("    \(target(index, field)) = \(read)")
+            }
             lines.append("} else {")
-            lines.append("    \(target(index, field)) = nil")
+            lines.append(
+                "    \(target(index, field)) = \(field.wireDefault?.swiftExpression ?? "nil")"
+            )
             lines.append("}")
         } else {
             lines.append("try reader.seek(toRequiredField: \(position), key: \(key))")
@@ -2189,24 +2359,40 @@ private func generateNamedType(
     _ type: ParsedTypeDecl, namespace: String, constrained: Set<String>
 ) throws -> String {
     let qualified = "\(namespace).\(type.name)"
+    let note = type.deprecation.map { deprecationDocLine($0) + "\n" } ?? ""
     switch type.payload {
         case .structure(let fields):
-            return try generateStruct(
-                name: type.name, fields: fields,
-                namespace: namespace, describedAs: .reference(qualified: qualified),
-                constrained: constrained)
+            return note
+                + (try generateStruct(
+                    name: type.name,
+                    fields: fields,
+                    namespace: namespace,
+                    describedAs: .reference(qualified: qualified),
+                    constrained: constrained
+                ))
         case .alias(let scalar, let constraints):
             return generateAlias(
-                type.name, scalar: scalar, constraints: constraints, qualified: qualified,
-                description: type.description)
+                type.name,
+                scalar: scalar,
+                constraints: constraints,
+                qualified: qualified,
+                description: type.description,
+                deprecation: type.deprecation
+            )
         case .enumeration(let cases):
             var lines: [String] = []
+            if let deprecation = type.deprecation {
+                lines.append(deprecationDocLine(deprecation))
+            }
             lines.append(
                 "public enum \(type.name): RawRepresentable, Codable, Hashable, Sendable, CaseIterable, SchemaDescribable, MMPackCodable, MMConstraintValidating {"
             )
             for enumCase in cases {
                 if let description = enumCase.description {
                     lines.append("    /// \(docCommentText(description))")
+                }
+                if let deprecation = enumCase.deprecation {
+                    lines.append("    \(deprecationDocLine(deprecation))")
                 }
                 lines.append("    case `\(enumCase.name)`")
             }
@@ -2269,9 +2455,14 @@ private func generateNamedType(
             lines.append("}")
             return lines.joined(separator: "\n")
         case .union(let cases):
-            return try generateUnion(
-                type.name, cases: cases, qualified: qualified, namespace: namespace,
-                constrained: constrained)
+            return note
+                + (try generateUnion(
+                    type.name,
+                    cases: cases,
+                    qualified: qualified,
+                    namespace: namespace,
+                    constrained: constrained
+                ))
     }
 }
 
@@ -2297,6 +2488,9 @@ private func generateUnion(
     for (unionCase, keyed) in keyedCases {
         if let description = unionCase.description {
             lines.append("    /// \(docCommentText(description))")
+        }
+        if let deprecation = unionCase.deprecation {
+            lines.append("    \(deprecationDocLine(deprecation))")
         }
         let values = keyed.map { field, _ in "\(field.name): \(swiftType(field.type))" }
         let payload = values.isEmpty ? "" : "(\(values.joined(separator: ", ")))"
@@ -2346,11 +2540,7 @@ private func generateUnion(
             "                let fields = try container.nestedContainer(keyedBy: \(unionCase.codingKeysName).self, forKey: .fields)"
         )
         let values = keyed.map { field, _ in
-            if case .optional(let wrapped) = field.type {
-                return
-                    "\(field.name): try fields.decodeIfPresent(\(swiftType(wrapped)).self, forKey: .\(field.name))"
-            }
-            return "\(field.name): try fields.decode(\(swiftType(field.type)).self, forKey: .\(field.name))"
+            "\(field.name): \(keyedFieldDecode(field, container: "fields"))"
         }
         lines.append("                self = .`\(unionCase.name)`(")
         lines.append(values.map { "                    \($0)" }.joined(separator: ",\n"))
@@ -2513,6 +2703,9 @@ private func definitionLiteral(_ type: ParsedTypeDecl, namespace: String) throws
                 if let description = enumCase.description {
                     literal += ", description: \(quoted(description))"
                 }
+                if let deprecation = enumCase.deprecation {
+                    literal += ", deprecation: \(quoted(deprecation))"
+                }
                 return literal + ")"
             }.joined(separator: ", ")
             schema = ".enumeration(cases: [\(caseLiterals)])"
@@ -2526,6 +2719,9 @@ private func definitionLiteral(_ type: ParsedTypeDecl, namespace: String) throws
                 if let description = unionCase.description {
                     literal += ", description: \(quoted(description))"
                 }
+                if let deprecation = unionCase.deprecation {
+                    literal += ", deprecation: \(quoted(deprecation))"
+                }
                 return literal + ")"
             }.joined(separator: ", ")
             schema = ".union(cases: [\(caseLiterals)])"
@@ -2538,6 +2734,9 @@ private func definitionLiteral(_ type: ParsedTypeDecl, namespace: String) throws
     }
     if case .alias(_, let constraints?) = type.payload {
         literal += ", constraints: \(constraints.literal)"
+    }
+    if let deprecation = type.deprecation {
+        literal += ", deprecation: \(quoted(deprecation))"
     }
     return literal + ")"
 }
@@ -2604,6 +2803,7 @@ private func documentationArgument(for call: ParsedCall) -> String? {
     if let text = call.responseStreamDescription {
         arguments.append("responseStream: \(quoted(text))")
     }
+    if let text = call.deprecation { arguments.append("deprecation: \(quoted(text))") }
     guard !arguments.isEmpty else { return nil }
     return "MethodDocumentation(\(arguments.joined(separator: ", ")))"
 }
@@ -2653,15 +2853,16 @@ private func descriptor(
             beforeSending: "checksConstraintsBeforeSending"
         )
     let shape = descriptorShape(for: call)
+    let note = call.deprecation.map { deprecationDocLine($0) + "\n" } ?? ""
     guard !call.errors.isEmpty else {
-        return """
+        return note + """
             public static let `\(call.descriptorName)` = \(shape.type)<\(shape.generics)>(
                 name: "\(name)", access: \(call.accessSource)\(documentation))
             """
     }
     // A call with declared errors: handlers return them, calls fail with
     // them, and its signature serves them.
-    return """
+    return note + """
         public static let `\(call.descriptorName)` = MethodWithErrors(
             \(shape.type)<\(shape.generics)>(
                 name: "\(name)", access: \(call.accessSource)\(documentation)),
@@ -2854,7 +3055,10 @@ private func commandDeclaration(
         lines.append("    public typealias Response = \(call.responseSwiftType)")
     }
     var configuration: [String] = ["commandName: \(quoted(call.cliCommandName))"]
-    if let abstract = call.description {
+    let abstract =
+        call.deprecation.map { deprecatedHelp(call.description, deprecation: $0) }
+        ?? call.description
+    if let abstract {
         configuration.append("abstract: \(quoted(abstract))")
     }
     if let aliases = call.cliOverlay?.aliases, !aliases.isEmpty {
@@ -2976,6 +3180,13 @@ private func commandDeclaration(
 
     lines.append("    public init() {}")
     lines.append("    public func run() async throws {")
+    lines.append(
+        contentsOf: deprecationWarnings(
+            for: call,
+            fields: requestTakesJSON ? [] : fields,
+            argumentTypeNames: argumentTypeNames
+        ).map { "        \($0)" }
+    )
     // Locals only inside the call closure: it is @Sendable, and referencing a
     // property would capture non-Sendable self.
     lines.append("        let entityArgument = entity ?? \"\"")
@@ -3070,6 +3281,67 @@ private func commandDeclaration(
     lines.append("    }")
     lines.append("}")
     return lines.joined(separator: "\n")
+}
+
+/// The warnings a command prints before it calls: the call's deprecation,
+/// and each deprecated field given on the command line. A field with a
+/// default cannot tell given from absent, so it warns only in its help.
+private func deprecationWarnings(
+    for call: ParsedCall,
+    fields: [ParsedField],
+    argumentTypeNames: Set<String>
+) -> [String] {
+    func message(_ subject: String, _ deprecation: String) -> String {
+        let text =
+            deprecation.isEmpty
+            ? "\(subject) is deprecated" : "\(subject) is deprecated: \(deprecation)"
+        return "MMCLIOutput.warn(\(quoted(text)))"
+    }
+    var lines: [String] = []
+    if let deprecation = call.deprecation {
+        lines.append(message(call.cliCommandName, deprecation))
+    }
+    for field in fields {
+        guard let deprecation = field.deprecation, !isInputField(field) else { continue }
+        if case .omitted = commandFieldForm(field, argumentTypeNames: argumentTypeNames) {
+            continue
+        }
+        let subject =
+            isPositional(field) ? "<\(cliOptionName(field))>" : "--\(cliOptionName(field))"
+        let condition: String?
+        if case .flag = field.cliHint {
+            condition = field.name
+        } else {
+            switch field.type {
+                case .array, .optional(.array): condition = "!\(field.name).isEmpty"
+                case .optional: condition = "\(field.name) != nil"
+                default: condition = field.defaultValue == nil ? "true" : nil
+            }
+        }
+        guard let condition else { continue }
+        if condition == "true" {
+            lines.append(message(subject, deprecation))
+        } else {
+            lines.append("if \(condition) { \(message(subject, deprecation)) }")
+        }
+    }
+    return lines
+}
+
+/// A wire enum's CLI conformance, naming its deprecated values so parsing
+/// one warns.
+private func enumArgumentConformance(_ type: String, cases: [ParsedCase]) -> String {
+    let deprecated = cases.compactMap { enumCase in
+        enumCase.deprecation.map { "\(quoted(enumCase.name)): \(quoted($0))" }
+    }
+    guard !deprecated.isEmpty else { return "extension \(type): MMCLIEnumArgument {}" }
+    return """
+        extension \(type): MMCLIEnumArgument {
+            public static var deprecatedValues: [String: String] {
+                [\(deprecated.joined(separator: ", "))]
+            }
+        }
+        """
 }
 
 /// The declared fields of a stream element, when knowable: inline fields, or
@@ -3168,7 +3440,10 @@ private func emitField(
     }
     var defaultAsFlagArgument: String?
     var defaultInitializer = ""
-    if let fieldDefault = field.defaultValue {
+    if let wireDefault = field.wireDefault {
+        // A wire default: the request's value when the option is absent.
+        defaultInitializer = " = \(wireDefault.swiftExpression)"
+    } else if let fieldDefault = field.defaultValue {
         let literal: String
         switch fieldDefault {
             case .string(let value): literal = quoted(value)
@@ -3206,7 +3481,10 @@ private func emitField(
         }
         nameArgument = "name: [\(names.joined(separator: ", "))]"
     }
-    let helpArgument = field.description.map { "help: \(quoted($0))" }
+    let help =
+        field.deprecation.map { deprecatedHelp(field.description, deprecation: $0) }
+        ?? field.description
+    let helpArgument = help.map { "help: \(quoted($0))" }
 
     func wrapperArguments(_ parts: [String?]) -> String {
         let present = parts.compactMap { $0 }
@@ -3252,7 +3530,7 @@ private func emitField(
         case .json(let swift):
             let isOptional = swift.hasSuffix("?")
             let base = isOptional ? String(swift.dropLast()) : swift
-            let jsonHelp = field.description.map { "\($0) (JSON)" } ?? "JSON value"
+            let jsonHelp = help.map { "\($0) (JSON)" } ?? "JSON value"
             let property = isOptional ? "String?" : "String"
             lines.append(
                 "    @Option\(wrapperArguments([nameArgument, defaultAsFlagArgument, "help: \(quoted(jsonHelp))"])) public var \(field.name): \(property)\(propertyInitializer)"

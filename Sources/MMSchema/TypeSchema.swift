@@ -70,7 +70,7 @@ public indirect enum TypeSchema: Sendable, Hashable {
     case unknown
 
     /// One field of a ``TypeSchema/structure(fields:)``.
-    public struct Field: Sendable, Hashable, Codable {
+    public struct Field: Sendable, Hashable {
         /// The integer `CodingKey` rawValue, if the type uses integer keys
         /// (the wire convention); `nil` for string-keyed types.
         public var key: Int?
@@ -84,19 +84,32 @@ public indirect enum TypeSchema: Sendable, Hashable {
         /// an optional is unwrapped; nil when it declares none. Part of the
         /// contract: served by discovery and hashed into the fingerprint.
         public var constraints: Constraints?
+        /// The value the field holds when its key is absent or nil; nil when
+        /// it declares none. A field with a default has an optional
+        /// ``type``. Part of the contract: served by discovery and hashed
+        /// into the fingerprint.
+        public var defaultValue: Default?
+        /// Why the field is deprecated, or nil when it is not. Documentation,
+        /// like ``description``: served by discovery, never hashed or
+        /// compared.
+        public var deprecation: String?
 
         public init(
             key: Int?,
             name: String,
             type: TypeSchema,
             description: String? = nil,
-            constraints: Constraints? = nil
+            constraints: Constraints? = nil,
+            defaultValue: Default? = nil,
+            deprecation: String? = nil
         ) {
             self.key = key
             self.name = name
             self.type = type
             self.description = description
             self.constraints = constraints
+            self.defaultValue = defaultValue
+            self.deprecation = deprecation
         }
 
         enum CodingKeys: Int, CodingKey {
@@ -105,6 +118,8 @@ public indirect enum TypeSchema: Sendable, Hashable {
             case type = 2
             case description = 3
             case constraints = 4
+            case defaultValue = 5
+            case deprecation = 6
         }
     }
 
@@ -117,17 +132,27 @@ public indirect enum TypeSchema: Sendable, Hashable {
         /// Human-readable documentation, served by discovery. Never part of
         /// the fingerprint or of compatibility comparisons.
         public var description: String?
+        /// Why the case is deprecated, or nil when it is not. Documentation,
+        /// like ``description``.
+        public var deprecation: String?
 
-        public init(name: String, fields: [Field] = [], description: String? = nil) {
+        public init(
+            name: String,
+            fields: [Field] = [],
+            description: String? = nil,
+            deprecation: String? = nil
+        ) {
             self.name = name
             self.fields = fields
             self.description = description
+            self.deprecation = deprecation
         }
 
         enum CodingKeys: Int, CodingKey {
             case name = 0
             case fields = 1
             case description = 2
+            case deprecation = 3
         }
     }
 
@@ -137,38 +162,56 @@ public indirect enum TypeSchema: Sendable, Hashable {
         /// Human-readable documentation, served by discovery. Never part of
         /// the fingerprint or of compatibility comparisons.
         public var description: String?
+        /// Why the case is deprecated, or nil when it is not. Documentation,
+        /// like ``description``.
+        public var deprecation: String?
 
-        public init(name: String, description: String? = nil) {
+        public init(name: String, description: String? = nil, deprecation: String? = nil) {
             self.name = name
             self.description = description
+            self.deprecation = deprecation
         }
 
         enum CodingKeys: Int, CodingKey {
             case name = 0
             case description = 1
+            case deprecation = 2
         }
     }
 }
 
 extension TypeSchema {
-    /// The same shape with every description removed — the form the
-    /// fingerprint hashes and `verify`/`SchemaDifference` compare, so doc
-    /// edits never register as schema drift.
+    /// The same shape with every description and deprecation removed — the
+    /// form the fingerprint hashes and `verify`/`SchemaDifference` compare,
+    /// so doc edits never register as schema drift.
     public var strippingDescriptions: TypeSchema {
         self.rewritten(
             field: {
-                Field(key: $0.key, name: $0.name, type: $0.type, constraints: $0.constraints)
+                Field(
+                    key: $0.key,
+                    name: $0.name,
+                    type: $0.type,
+                    constraints: $0.constraints,
+                    defaultValue: $0.defaultValue
+                )
             },
             enumCase: { EnumCase(name: $0.name) },
             unionCase: { UnionCase(name: $0.name, fields: $0.fields) }
         )
     }
 
-    /// The same shape with every field constraint removed: what a decoder
-    /// probe can see, since constraints are checked after decoding.
+    /// The same shape with every field constraint and default removed: what
+    /// a decoder probe can see, since constraints are checked after decoding
+    /// and a default is filled in where the decoder reads an optional.
     public var strippingConstraints: TypeSchema {
         self.rewritten(field: {
-            Field(key: $0.key, name: $0.name, type: $0.type, description: $0.description)
+            Field(
+                key: $0.key,
+                name: $0.name,
+                type: $0.type,
+                description: $0.description,
+                deprecation: $0.deprecation
+            )
         })
     }
 
@@ -192,7 +235,9 @@ extension TypeSchema {
                     name: original.name,
                     type: child(original.type),
                     description: original.description,
-                    constraints: original.constraints
+                    constraints: original.constraints,
+                    defaultValue: original.defaultValue,
+                    deprecation: original.deprecation
                 )
             )
         }
@@ -218,7 +263,8 @@ extension TypeSchema {
                             UnionCase(
                                 name: original.name,
                                 fields: original.fields.map(member),
-                                description: original.description
+                                description: original.description,
+                                deprecation: original.deprecation
                             )
                         )
                     }
@@ -239,6 +285,41 @@ extension TypeSchema {
     /// An array of a Swift type (`Field("tags", .array(Other.Name.self))`).
     public static func array(_ type: (some SchemaDescribable).Type) -> TypeSchema {
         .array(type.schema)
+    }
+}
+
+extension TypeSchema.Field: Codable {
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(self.key, forKey: .key)
+        try container.encode(self.name, forKey: .name)
+        try container.encode(self.type, forKey: .type)
+        try container.encodeIfPresent(self.description, forKey: .description)
+        try container.encodeIfPresent(self.constraints, forKey: .constraints)
+        try container.encodeIfPresent(self.defaultValue, forKey: .defaultValue)
+        try container.encodeIfPresent(self.deprecation, forKey: .deprecation)
+    }
+
+    /// A default or deprecation this peer cannot read decodes as absent,
+    /// like a key it does not know.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            key: try container.decodeIfPresent(Int.self, forKey: .key),
+            name: try container.decode(String.self, forKey: .name),
+            type: try container.decode(TypeSchema.self, forKey: .type),
+            description: try container.decodeIfPresent(String.self, forKey: .description),
+            constraints: try container.decodeIfPresent(
+                TypeSchema.Constraints.self,
+                forKey: .constraints
+            ),
+            defaultValue: (try? container.decodeIfPresent(
+                TypeSchema.Default.self,
+                forKey: .defaultValue
+            )) ?? nil,
+            deprecation: (try? container.decodeIfPresent(String.self, forKey: .deprecation))
+                ?? nil
+        )
     }
 }
 

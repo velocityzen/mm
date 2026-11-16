@@ -115,6 +115,12 @@ public struct MMCLIOutput: Sendable {
         MMCLIStatusSession.current?.diagnose(message)
     }
 
+    /// Writes a one-line warning to stderr: something the command did not
+    /// fail on, so it never becomes a failed command's reason.
+    public static func warn(_ message: String) {
+        Self.write("warning: \(message)\n", to: .standardError)
+    }
+
     /// The single write seam. A failed write (e.g. a closed pipe downstream)
     /// is ignored: there is nowhere left to report it.
     private static func write(_ text: String, to handle: FileHandle) {

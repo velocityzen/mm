@@ -41,17 +41,32 @@ extension MMBytes: ExpressibleByArgument {
 }
 
 public protocol MMCLIEnumArgument: ExpressibleByArgument, RawRepresentable, CaseIterable
-where RawValue == String {}
+where RawValue == String {
+    /// The deprecated cases' names, each with why it is deprecated (empty
+    /// when the contract gives no reason). Parsing one warns.
+    static var deprecatedValues: [String: String] { get }
+}
 
 extension MMCLIEnumArgument {
+    /// No deprecated cases.
+    public static var deprecatedValues: [String: String] { [:] }
+
     /// The declared cases — what help text and shell completions list.
     public static var allValueStrings: [String] {
         Self.allCases.map(\.rawValue)
     }
 
-    /// Parses via `init(rawValue:)`, which takes only a declared case's name.
+    /// Parses via `init(rawValue:)`, which takes only a declared case's
+    /// name, warning on stderr when the case is deprecated.
     public init?(argument: String) {
-        self.init(rawValue: argument)
+        guard let value = Self(rawValue: argument) else { return nil }
+        if let deprecation = Self.deprecatedValues[argument] {
+            MMCLIOutput.warn(
+                deprecation.isEmpty
+                    ? "\(argument) is deprecated" : "\(argument) is deprecated: \(deprecation)"
+            )
+        }
+        self = value
     }
 }
 

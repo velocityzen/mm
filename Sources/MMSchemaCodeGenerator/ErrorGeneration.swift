@@ -675,12 +675,7 @@ private func generateErrorEnum(
                     "                let fields = try container.nestedContainer(keyedBy: \(codingKeysName(errorCase)).self, forKey: .fields)"
                 )
                 let values = keyed.map { field, _ in
-                    if case .optional(let wrapped) = field.type {
-                        return
-                            "\(field.name): try fields.decodeIfPresent(\(swiftType(wrapped)).self, forKey: .\(field.name))"
-                    }
-                    return
-                        "\(field.name): try fields.decode(\(swiftType(field.type)).self, forKey: .\(field.name))"
+                    "\(field.name): \(keyedFieldDecode(field, container: "fields"))"
                 }
                 lines.append("                self = .`\(errorCase.name)`(")
                 lines.append(values.map { "                    \($0)" }.joined(separator: ",\n"))
@@ -795,7 +790,7 @@ func exitCodeConformances(for contract: ParsedContract, enclosingType: String) -
 /// generated type of the same name in the namespace cannot shadow them.
 private let dslCallees: Set<String> = [
     "Access", "Alias", "CLI", "Call", "Case", "Enum", "Error", "Errors", "Field", "Fields",
-    "Request", "RequestStream", "Response", "ResponseStream", "Type", "Union",
+    "Request", "RequestStream", "Reserved", "Response", "ResponseStream", "Type", "Union",
 ]
 
 /// The statements' source with every DSL callee written as

@@ -6,7 +6,9 @@ The runtime for schema-generated command-line tools: connection options, exit-co
 
 A top-level `CLI(.enabled)` entry in the `#schema("journal")` block turns on CLI generation. The `MMCLIGeneratorPlugin` build-tool plugin, applied to the command-line target, generates one swift-argument-parser command per non-omitted call and a namespace group (`Journal.Command`), as an extension of the namespace type. The API module that declares the schema, shared with the daemon, depends only on MMSchema. Names, `--help` text, and argument shapes come from the contract, adjusted by `CLI(...)` parts and `Field(..., cli:)` hints.
 
-- A `Field(..., default:)` literal makes its option hybrid (ArgumentParser's `defaultAsFlag`). Bare `--format` uses the default, `--format yaml` parses the value, and an absent option stays nil.
+- On an optional field, a `Field(..., default:)` literal makes its option hybrid (ArgumentParser's `defaultAsFlag`). Bare `--format` uses the default, `--format yaml` parses the value, and an absent option stays nil.
+- On a field that is not optional, `default:` is a wire default: the option may be left out, and then takes the default.
+- A deprecated call or option (`deprecated:` in the contract) is marked in `--help`. Running a deprecated call, or giving a deprecated option or enum value, prints a warning on stderr, and the command still runs. An option with a default cannot tell given from absent, so a deprecated one is marked in help only.
 - On calendar and clock fields, `default: .now` uses the time of invocation.
 - A `description:` on the schema becomes the group's abstract. Without it, the abstract is "Commands for the … namespace."
 

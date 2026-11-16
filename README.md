@@ -414,6 +414,36 @@ A contract can say more about a value than its shape. A field takes a `constrain
 - **A debug client checks before sending.** In debug builds of the module that declares the contract, the generated descriptors refuse a violating request with `MMCallError.invalidRequest(path:problem:)` and send nothing; the generated CLI exits 65. Release clients send what they are given and let the server answer.
 - **On the wire** constraints are Field key 4 and TypeDefinition key 3. Discovery serves them and the fingerprint covers them. See WireProtocol.md, section 8.4.
 
+## Schema evolution
+
+A contract changes without a version bump. Add fields with `.optional(...)` or a `default:`, retire removed ones with `Reserved`, and mark what is on its way out with `deprecated:`:
+
+```swift
+#schema("shelf") {
+    Enum("Size") {
+        Case("small")
+        Case("large")
+        Case("huge", deprecated: "use large")
+    }
+    Call("list", deprecated: "use search") {
+        Access { .read }
+        Request {
+            Field("query", .string)
+            Reserved(1, "author")
+            Field("limit", .int, constraints: .range(1...100), default: 50)
+            Field("size", "Size", default: "small")
+            Field("legacy", .optional(.string), deprecated: "ignored")
+        }
+        Response { Field("count", .uint) }
+    }
+}
+```
+
+- **A default on a field that is not optional is a wire default.** The field travels as an optional, so a peer that knows nothing of defaults reads it as one. The generated type holds the bare value (`limit: Int = 50`), reads an absent key or a `nil` as the default, and always writes the field. A default is a literal of the field's kind: a boolean, an integer, a floating number, a string, or an enum case's name. It keeps the field's constraints; `#schema` refuses one that does not, and one on a kind that takes no default (`bytes`, a date, an array, a structure). On an `.optional(...)` field, `default:` stays what it was: a CLI default that never reaches the wire.
+- **`Reserved` retires keys and names.** `Reserved(1, "author")` takes any mix of integer keys and string names. A later field may not pin a reserved key or take a reserved name, and unpinned fields skip reserved keys, so reserving a removed field keeps the keys after it where they were. Reservations are a declaration rule: never served, hashed or compared.
+- **`deprecated:` is documentation.** It goes on a field, an enum or union case, a type, or a call, with a reason or `""`. A deprecated generated struct field is `@available(*, deprecated)`, and the generated memberwise initializer still takes it. Everywhere else it is a doc-comment note. Discovery serves every deprecation (WireProtocol.md, section 8). The generated CLI marks deprecated calls and options in its help, and warns on stderr when a deprecated call runs or a deprecated option or enum value is given.
+- **The fingerprint** covers a default (a changed default is a contract change) and never a deprecation or a reservation. See WireProtocol.md, section 9.1.
+
 ## Authorization model
 
 Entities are dotted paths (`box.item`) in a tree. Each has an `EntityACL`, like a file: owner uid, group gid, and a 9-bit rwx/ugo mode.
@@ -539,4 +569,6 @@ swift package --package-path Benchmarks benchmark baseline compare main
 
 ## Versioning
 
-The wire protocol version is a single `u8`, currently **1**, independent of the package version. Packages follow semantic versioning. The protocol version changes only on wire-level breaks. Hello negotiation picks the lower version. A fingerprint mismatch triggers discovery, never a disconnect. Schemas evolve without version bumps: payloads are int-keyed maps, unknown keys are skipped, new fields must be optional, and an enum value or union case a peer does not declare is kept and written back unchanged.
+The wire protocol version is a single `u8`, currently **1**, independent of the package version. Packages follow semantic versioning. The protocol version changes only on wire-level breaks. Hello negotiation picks the lower version. A fingerprint mismatch triggers discovery, never a disconnect. Schemas evolve without version bumps: payloads are int-keyed maps, unknown keys are skipped, new fields must be optional or have a default, removed fields' keys and names are reserved, and an enum value or union case a peer does not declare is kept and written back unchanged. See [Schema evolution](#schema-evolution).
+
+A contract lock, a committed file that a build or test compares the current contract against to catch an accidental breaking change, is pending the contract diff it builds on (MM-72).

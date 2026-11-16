@@ -31,6 +31,8 @@ A contract also declares the rules values keep beyond their shape. A field takes
 
 A server checks them at ingress in every build, after decoding and before the handler, and its error names the failing field's path (`malformed params: limit: is 0, less than the minimum 1`). `#schema` generates the check for every type that holds a constrained value (``MMConstraintValidating``) and hands it to the call's descriptor (``MMConstraintCheck``). In debug builds of the declaring module, a client runs the same check before sending. ``SchemaValue/validated(against:resolver:path:checkingConstraints:)`` checks constraints on loose input, as the CLI does.
 
+A contract evolves without a version bump. A `default:` on a field that is not optional is a **wire default** (``TypeSchema/Default``): the field travels as an optional, the generated type holds the bare value, an absent key or a `nil` reads as the default, and the field is always written. A default is a literal of the field's kind that keeps its constraints, or a declaration is refused where it is written. ``Reserved(_:)`` retires a removed field's key and name so no later field takes either, and unpinned fields skip reserved keys. A `deprecated:` reason on a field, a case, a type or a call is documentation: discovery serves it, a deprecated generated struct field is `@available(*, deprecated)`, and the fingerprint never includes it. The fingerprint covers defaults, and never reservations.
+
 Shared named types live in `#schemaTypes` containers (``schemaTypes(_:_:)``) or in hand-written ``SchemaDescribable`` types.
 
 ``TypeSchema`` models wire shapes: structures with integer-keyed fields, string-valued enumerations, tagged unions, raw bytes (``MMBytes``), and nominal ``TypeDefinition`` references. `TypeSchema.of(_:)` reads the schema of a Swift type with a memoized decoder probe. If the probe cannot handle a type, conform it to ``SchemaDescribable`` instead.
@@ -95,13 +97,13 @@ Every server also serves the ``Builtins``:
 
 - ``Schema(_:description:_:)``
 - ``Types(_:_:)``
-- ``Call(_:description:_:)``
-- ``Enum(_:description:_:)``
-- ``Union(_:description:_:)``
-- ``Type(_:description:_:)``
-- ``Alias(_:_:constraints:description:)``
-- ``Case(_:description:)``
-- ``Case(_:description:_:)``
+- ``Call(_:description:deprecated:_:)``
+- ``Enum(_:description:deprecated:_:)``
+- ``Union(_:description:deprecated:_:)``
+- ``Type(_:description:deprecated:_:)``
+- ``Alias(_:_:constraints:description:deprecated:)``
+- ``Case(_:description:deprecated:)``
+- ``Case(_:description:deprecated:_:)``
 - ``Field``
 - ``Fields(_:)``
 - ``StreamOptions``
@@ -115,6 +117,13 @@ Every server also serves the ``Builtins``:
 - ``MMConstraintValidating``
 - ``MMConstraintCheck``
 - ``MMConstraintPath``
+
+### Schema evolution
+
+- ``FieldDefault``
+- ``TypeSchema/Default``
+- ``Reserved(_:)``
+- ``FieldReservation``
 
 ### Declared errors
 

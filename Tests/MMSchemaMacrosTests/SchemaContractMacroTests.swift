@@ -527,4 +527,96 @@ struct SchemaContractMacroTests {
             )
         }
     }
+
+    @Test("diagnostics: wire defaults, reserved keys and deprecations are checked at expansion")
+    func evolutionDiagnostics() {
+        // Each case: the block's declarations before the call, the put
+        // call's request fields, and the diagnosis.
+        let cases: [(top: String, fields: String, message: String)] = [
+            (
+                "", #"Field("limit", .int, default: 1.5)"#,
+                #"Call("put").Request: field "limit": the default 1.5 is no value of int"#
+            ),
+            (
+                "", #"Field("limit", .int, constraints: .range(1...10), default: 20)"#,
+                #"Call("put").Request: field "limit": the default 20 is more than the maximum 10"#
+            ),
+            (
+                "", #"Field("count", .uint, default: -1)"#,
+                #"Call("put").Request: field "count": the default -1 is no value of uint"#
+            ),
+            (
+                "", #"Field("score", .float, default: 1e39)"#,
+                #"Call("put").Request: field "score": the default 1e39 is beyond float"#
+            ),
+            (
+                "", #"Field("at", .timestamp, default: .now)"#,
+                #"Call("put").Request: field "at": .now is a CLI default, read when the command runs; a field that is not optional takes a fixed default"#
+            ),
+            (
+                "", #"Field("tags", .array(.string), default: "x")"#,
+                #"Call("put").Request: field "tags": a field of an array takes no default"#
+            ),
+            (
+                "", #"Field("slug", .string, constraints: .pattern("[a-z]+"), default: "A")"#,
+                #"Call("put").Request: field "slug": the default "A" does not match the pattern [a-z]+"#
+            ),
+            (
+                #"Enum("Level") { Case("low") }"#, #"Field("level", "Level", default: "high")"#,
+                #"Call("put").Request: field "level": the default must name a case of Level (low)"#
+            ),
+            (
+                #"Type("Inner") { Field("x", .int) }"#, #"Field("inner", "Inner", default: "x")"#,
+                #"Call("put").Request: field "inner": a field of Inner, a structure or union, takes no default"#
+            ),
+            (
+                #"Alias("Ratio", .double, constraints: .range(0...1))"#,
+                #"Field("ratio", "Ratio", default: 2)"#,
+                #"Call("put").Request: field "ratio" of Ratio: the default 2 is more than the maximum 1.0"#
+            ),
+            (
+                "", #"Field("meta", Other.Meta.self, default: "x")"#,
+                #"Call("put").Request: field "meta": Other.Meta is declared in another block, which this one cannot check a default against — a cross-schema reference takes no default"#
+            ),
+            (
+                "", #"Field(1, "a", .int); Reserved(1)"#,
+                #"put.Request: field key 1 is reserved (a)"#
+            ),
+            (
+                "", #"Reserved("old"); Field("old", .int)"#,
+                #"put.Request: field name "old" is reserved"#
+            ),
+            (
+                "", #"Reserved(-1)"#,
+                #"put.Request: Reserved(...) takes non-negative integer literals and non-empty string literals, not -1"#
+            ),
+            (
+                "", #"Field("_a", .int); Field("a", .int, deprecated: "use b")"#,
+                #"PutRequest: field "a" is deprecated and keeps its value in "_a", another field's name — rename one"#
+            ),
+            (
+                "", #"Field("text", .string, deprecated: "gone", cli: .input)"#,
+                #"Call("put"): field "text" is cli: .input, which the input runner writes, so it cannot be deprecated"#
+            ),
+        ]
+        for (top, fields, message) in cases {
+            let source = """
+                #schema("box") {
+                    \(top)
+                    Call("put") {
+                        Access(.write)
+                        Request {
+                            \(fields)
+                        }
+                    }
+                }
+                """
+            assertMacroExpansion(
+                source,
+                expandedSource: source,
+                diagnostics: [DiagnosticSpec(message: message, line: 1, column: 1)],
+                macros: macros
+            )
+        }
+    }
 }

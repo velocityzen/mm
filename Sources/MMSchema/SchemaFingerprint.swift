@@ -38,8 +38,9 @@
 ///   0 bool … 16 union, 255 unknown), then payload —
 ///   `optional`/`array`: child schema; `map`: key then value schema;
 ///   `structure`: `u32 LE` field count, then per field: `u8` flags (bit 0
-///   the key is present, bit 1 constraints follow), `i64 LE` key when
-///   present, name string, field schema, then the constraints when flagged;
+///   the key is present, bit 1 constraints follow, bit 2 a default
+///   follows), `i64 LE` key when present, name string, field schema, then
+///   the constraints and the default when flagged;
 ///   `enumeration`: `u32 LE` case count, then per case: name string;
 ///   `union`: `u32 LE` case count, then per case: name string and its field
 ///   list encoded as `structure`'s is;
@@ -57,8 +58,13 @@
 ///   are no constraints, and a field or definition without constraints
 ///   encodes exactly as it did before they existed, so every unconstrained
 ///   fingerprint keeps its value.
-/// - **descriptions are never hashed** — not the five signature doc slots, not
-///   field, case, or definition descriptions. Doc edits are not schema drift.
+/// - default: `u8` kind, then the value — 0 a boolean as `u8` 0 or 1, 1 an
+///   integer as `i64 LE`, 2 a floating number as its `f64` bit pattern
+///   `LE`, 3 a string. A field without a default encodes as it did before
+///   defaults existed.
+/// - **descriptions and deprecations are never hashed** — not the five
+///   signature doc slots, not field, case, or definition descriptions, not
+///   any deprecation. Doc edits are not schema drift.
 public enum SchemaFingerprint {
     /// Computes the fingerprint of a method set and the named types it
     /// references. Order-insensitive in both lists; see the stability
@@ -188,7 +194,10 @@ public enum SchemaFingerprint {
         appendUInt32(UInt32(fields.count), into: &bytes)
         for field in fields {
             let constraints = field.constraints.flatMap { $0.isEmpty ? nil : $0 }
-            bytes.append((field.key == nil ? 0 : 1) | (constraints == nil ? 0 : 2))
+            bytes.append(
+                (field.key == nil ? 0 : 1) | (constraints == nil ? 0 : 2)
+                    | (field.defaultValue == nil ? 0 : 4)
+            )
             if let key = field.key {
                 appendInt64(Int64(key), into: &bytes)
             }
@@ -196,6 +205,9 @@ public enum SchemaFingerprint {
             append(field.type, into: &bytes)
             if let constraints {
                 append(constraints, into: &bytes)
+            }
+            if let defaultValue = field.defaultValue {
+                append(defaultValue, into: &bytes)
             }
         }
     }
@@ -226,6 +238,23 @@ public enum SchemaFingerprint {
         }
         if let pattern = constraints.pattern {
             append(pattern, into: &bytes)
+        }
+    }
+
+    private static func append(_ defaultValue: TypeSchema.Default, into bytes: inout [UInt8]) {
+        switch defaultValue {
+            case .bool(let value):
+                bytes.append(0)
+                bytes.append(value ? 1 : 0)
+            case .integer(let value):
+                bytes.append(1)
+                appendInt64(value, into: &bytes)
+            case .floating(let value):
+                bytes.append(2)
+                appendUInt64(value.bitPattern, into: &bytes)
+            case .string(let value):
+                bytes.append(3)
+                append(value, into: &bytes)
         }
     }
 

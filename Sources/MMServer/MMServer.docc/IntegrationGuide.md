@@ -11,7 +11,7 @@ A `Method<Request, Response>` value holds a method's whole contract: the wire na
 Two wire rules matter:
 
 - **The target entity is in the open envelope, not the payload.** The router parses and authorizes it before reading any params byte. Handlers read it from `auth.entity` (the per-call context). Payloads are plain values, with no entity field and no reserved key.
-- **Structs encode as MessagePack maps with integer keys.** Decoders skip unknown keys, so evolution is append-only: new fields must be optional.
+- **Structs encode as MessagePack maps with integer keys.** Decoders skip unknown keys, so evolution is append-only: new fields must be optional or have a default (`Field("limit", .int, default: 50)`, a wire default), and a removed field's key and name stay `Reserved`.
 
 ### `#schema`: the declaration as the source of truth
 
@@ -650,7 +650,7 @@ Design around these semantics:
 
 - **Cross-connection fan-out is host logic.** Each `follow` call gets one correlated response stream. Delivering appends from *any* connection to every interested follower is the store's job: the example's `JournalStore.append` broadcasts through `FollowerHub`. The library provides the per-call stream, not publish/subscribe.
 - **Flow control is automatic and bounded.** The window starts at 8 items per direction. A slow consumer stops the producer at zero credit instead of growing memory, and a stalled stream never blocks sibling calls (no head-of-line blocking).
-- **Streaming methods *are* fingerprinted and discoverable**, unlike the removed notification mechanism. A response stream is part of the method signature (`server.schema` reports its element shape), so clients detect a reshape through the hello fingerprint and discovery, like any contract change. Element payloads still evolve append-only (new fields optional).
+- **Streaming methods *are* fingerprinted and discoverable**, unlike the removed notification mechanism. A response stream is part of the method signature (`server.schema` reports its element shape), so clients detect a reshape through the hello fingerprint and discovery, like any contract change. Element payloads still evolve append-only (new fields optional or defaulted).
 - **Termination is graceful by default.** END finishes a direction, STOP asks the peer to finish (`.peerStopped`), and the terminal is always the last frame. CANCEL and connection loss arrive as `.callEnded` or task cancellation. A relay over a quiet source needs the `sink.stopRequested()` watcher shown above. Full matrix: the [wire protocol specification](https://swiftpackageindex.com/velocityzen/mm/documentation/mmwire/wireprotocol) §4.2.
 
 ## 6. The client side

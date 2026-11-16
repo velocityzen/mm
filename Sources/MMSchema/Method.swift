@@ -61,27 +61,31 @@ public struct Method<Request: Codable & Sendable, Response: Codable & Sendable>:
 }
 
 /// The optional documentation a descriptor carries for its method and its four
-/// payload parts. Served by discovery via the ``MethodSignature`` doc slots;
-/// never part of the fingerprint or of compatibility comparisons.
+/// payload parts, and why the method is deprecated. Served by discovery via
+/// the ``MethodSignature`` doc slots; never part of the fingerprint or of
+/// compatibility comparisons.
 public struct MethodDocumentation: Sendable, Hashable {
     public var description: String?
     public var request: String?
     public var response: String?
     public var requestStream: String?
     public var responseStream: String?
+    public var deprecation: String?
 
     public init(
         description: String? = nil,
         request: String? = nil,
         response: String? = nil,
         requestStream: String? = nil,
-        responseStream: String? = nil
+        responseStream: String? = nil,
+        deprecation: String? = nil
     ) {
         self.description = description
         self.request = request
         self.response = response
         self.requestStream = requestStream
         self.responseStream = responseStream
+        self.deprecation = deprecation
     }
 
     /// Overlays the doc slots onto a probed signature.
@@ -92,6 +96,7 @@ public struct MethodDocumentation: Sendable, Hashable {
         documented.responseDescription = self.response
         documented.requestStreamDescription = self.requestStream
         documented.responseStreamDescription = self.responseStream
+        documented.deprecation = self.deprecation
         return documented
     }
 }
@@ -100,7 +105,7 @@ public struct MethodDocumentation: Sendable, Hashable {
 /// hashed into the schema fingerprint.
 ///
 /// Keys are grouped by what they describe: the method itself in the single
-/// digits (0–2), everything about the request direction in the 10s, and
+/// digits (0–3), everything about the request direction in the 10s, and
 /// everything about the response direction in the 20s — and every slot is
 /// immediately followed by its own doc slot (method 0–1 then 2, request 10
 /// then 11, request stream 12 then 13, and likewise in the 20s). The stream
@@ -116,6 +121,10 @@ public struct MethodSignature: Sendable, Hashable, Codable {
     /// five doc slots (keys 2, 11, 13, 21, 23) are never part of the
     /// fingerprint or of compatibility comparisons.
     public var description: String?
+    /// Why the method is deprecated, or nil when it is not. Documentation,
+    /// like ``description``: served by discovery (key 3), never hashed or
+    /// compared.
+    public var deprecation: String?
     public var request: TypeSchema
     /// Documentation of the request payload.
     public var requestDescription: String?
@@ -150,10 +159,12 @@ public struct MethodSignature: Sendable, Hashable, Codable {
         requestDescription: String? = nil,
         responseDescription: String? = nil,
         requestStreamDescription: String? = nil,
-        responseStreamDescription: String? = nil
+        responseStreamDescription: String? = nil,
+        deprecation: String? = nil
     ) {
         self.name = name
         self.access = access
+        self.deprecation = deprecation
         self.request = request
         self.response = response
         self.requestStream = requestStream
@@ -170,6 +181,7 @@ public struct MethodSignature: Sendable, Hashable, Codable {
         case name = 0
         case access = 1
         case description = 2
+        case deprecation = 3
         case request = 10
         case requestDescription = 11
         case requestStream = 12
@@ -183,9 +195,9 @@ public struct MethodSignature: Sendable, Hashable, Codable {
 }
 
 extension MethodSignature {
-    /// The same signature with every description removed — the form the
-    /// fingerprint hashes and `verify`/`SchemaDifference` compare, so doc
-    /// edits never register as schema drift.
+    /// The same signature with every description and deprecation removed —
+    /// the form the fingerprint hashes and `verify`/`SchemaDifference`
+    /// compare, so doc edits never register as schema drift.
     public var strippingDescriptions: MethodSignature {
         MethodSignature(
             name: self.name,

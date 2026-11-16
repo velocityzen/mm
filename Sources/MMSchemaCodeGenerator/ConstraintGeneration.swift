@@ -222,7 +222,7 @@ private func parseRange(
 
 /// An integer literal as Swift reads it: decimal, or `0x`, `0o`, `0b`, with
 /// an optional leading minus.
-private func integerLiteral(_ text: String) -> Int64? {
+func integerLiteral(_ text: String) -> Int64? {
     let negative = text.hasPrefix("-")
     let body = negative ? String(text.dropFirst()) : text
     let radix: Int
@@ -314,7 +314,7 @@ extension ParsedConstraints {
 }
 
 /// The kind's name in constraint diagnostics, as the runtime names it.
-private func kindName(_ type: ParsedType) -> String {
+func kindName(_ type: ParsedType) -> String {
     switch type {
         case .bool: "bool"
         case .int: "int"
@@ -364,14 +364,29 @@ func parseAliasDecl(_ call: FunctionCallExprSyntax) throws -> ParsedTypeDecl {
     }
     var arguments = Array(call.arguments.dropFirst())
     var description: String?
-    if let last = arguments.last, last.label?.text == "description" {
-        description = try requireDescriptionLiteral(last.expression, context: context)
+    var deprecation: String?
+    while let last = arguments.last, let label = last.label?.text,
+        label == "description" || label == "deprecated"
+    {
+        if label == "description" {
+            guard description == nil else {
+                throw SchemaMacroError(description: "\(context) declares description twice")
+            }
+            description = try requireDescriptionLiteral(last.expression, context: context)
+        } else {
+            guard deprecation == nil else {
+                throw SchemaMacroError(description: "\(context) declares deprecated twice")
+            }
+            deprecation = try requireDeprecationLiteral(last.expression, context: context)
+        }
         arguments.removeLast()
     }
     let (leading, constraintExpressions) = splitConstraintArguments(arguments)
     guard leading.count == 1, let typeArgument = leading.first, typeArgument.label == nil else {
         throw SchemaMacroError(
-            description: "\(context) takes a scalar kind, then constraints:, then description:")
+            description:
+                "\(context) takes a scalar kind, then constraints:, then description: and deprecated:"
+        )
     }
     let type = try parseType(typeArgument.expression, context: context)
     guard isScalarKind(type) else {
@@ -380,7 +395,11 @@ func parseAliasDecl(_ call: FunctionCallExprSyntax) throws -> ParsedTypeDecl {
     }
     let constraints = try parseConstraints(constraintExpressions, for: type, context: context)
     return ParsedTypeDecl(
-        name: name, description: description, payload: .alias(type, constraints))
+        name: name,
+        description: description,
+        payload: .alias(type, constraints),
+        deprecation: deprecation
+    )
 }
 
 // MARK: - Which values hold constraints
@@ -522,7 +541,7 @@ func structConstraintMembers(
         body.append(
             contentsOf: constraintCheckLines(
                 field,
-                value: "self.\(field.name)",
+                value: "self.\(storageName(field))",
                 path: "MMConstraintPath.member(\(quoted(field.name)), under: path)",
                 checker: "MMConstraintCheckers.`\(field.name)`",
                 constrained: constrained
@@ -610,7 +629,8 @@ func generateAlias(
     scalar: ParsedType,
     constraints: ParsedConstraints?,
     qualified: String,
-    description: String?
+    description: String?,
+    deprecation: String?
 ) -> String {
     let raw = swiftType(scalar)
     var conformances = [
@@ -647,6 +667,9 @@ func generateAlias(
     var lines: [String] = []
     if let description {
         lines.append("/// \(docCommentText(description))")
+    }
+    if let deprecation {
+        lines.append(deprecationDocLine(deprecation))
     }
     lines.append("public struct \(name): \(conformances.joined(separator: ", ")) {")
     lines.append("    public var rawValue: \(raw)")

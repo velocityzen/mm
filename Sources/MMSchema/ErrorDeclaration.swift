@@ -146,7 +146,7 @@ public enum ErrorsBuilder: MMListBuilding {
 
 /// An `Errors { ... }` block: the namespace's errors at the top level of a
 /// ``Schema(_:description:_:)``, or a call's own errors inside a
-/// ``Call(_:description:_:)``.
+/// ``Call(_:description:deprecated:_:)``.
 public struct ErrorsDeclaration: Sendable, Hashable {
     let cases: [ErrorCaseDeclaration]
 }
@@ -248,7 +248,7 @@ struct ErrorResolutionScope {
     let structures: [String: [Field]]
     /// Every named type of the block, for the field references inside the
     /// cases.
-    let localTypes: Set<String>
+    let localTypes: [String: TypeDeclaration.Payload]
 
     /// Resolves cases in declaration order. `context` names the block in
     /// failure messages.

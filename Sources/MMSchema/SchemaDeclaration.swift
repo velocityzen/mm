@@ -62,8 +62,8 @@ public struct SchemaDeclaration: Sendable, Hashable {
     /// The declared method signatures, full wire names (`journal.append`),
     /// in declaration order.
     public let signatures: [MethodSignature]
-    /// The named types the block declares (``Enum(_:description:_:)`` /
-    /// ``Union(_:description:_:)`` / ``Type(_:description:_:)``), qualified
+    /// The named types the block declares (``Enum(_:description:deprecated:_:)`` /
+    /// ``Union(_:description:deprecated:_:)`` / ``Type(_:description:deprecated:_:)``), qualified
     /// names included, in declaration order.
     public let types: [TypeDefinition]
 
@@ -419,7 +419,7 @@ private func probeMismatch(
 }
 
 /// One declared method, before the namespace prefix is applied. Produced by
-/// ``Call(_:description:_:)`` inside a ``Schema(_:_:)`` block.
+/// ``Call(_:description:deprecated:_:)`` inside a ``Schema(_:_:)`` block.
 public struct MethodDeclaration: Sendable, Hashable {
     public let name: String
     public let access: AccessMode
@@ -438,6 +438,9 @@ public struct MethodDeclaration: Sendable, Hashable {
     public let responseDescription: String?
     public let requestStreamDescription: String?
     public let responseStreamDescription: String?
+    /// Why the call is deprecated, or nil when it is not. Documentation,
+    /// like the descriptions.
+    public let deprecation: String?
     /// The CLI presentation overlay, when the call declares one. Local to the
     /// declaration: never forwarded into ``MethodSignature``, never on the
     /// wire — consumed by `#schema`'s CLI generation.
@@ -447,9 +450,9 @@ public struct MethodDeclaration: Sendable, Hashable {
     public let errors: [ErrorCaseDeclaration]
 }
 
-/// One declared named type, produced by ``Enum(_:description:_:)``,
-/// ``Union(_:description:_:)``, ``Type(_:description:_:)`` or
-/// ``Alias(_:_:constraints:description:)`` inside a
+/// One declared named type, produced by ``Enum(_:description:deprecated:_:)``,
+/// ``Union(_:description:deprecated:_:)``, ``Type(_:description:deprecated:_:)`` or
+/// ``Alias(_:_:constraints:description:deprecated:)`` inside a
 /// ``Schema(_:_:)`` or ``Types(_:_:)`` block. The enclosing block qualifies
 /// the name with its namespace.
 public struct TypeDeclaration: Sendable, Hashable {
@@ -462,20 +465,27 @@ public struct TypeDeclaration: Sendable, Hashable {
 
     let name: String
     let description: String?
+    let deprecation: String?
     let payload: Payload
 }
 
-/// One declared case of an ``Enum(_:description:_:)``. The name is the wire
+/// One declared case of an ``Enum(_:description:deprecated:_:)``. The name is the wire
 /// value (string-valued enums, fixed decision).
 public struct EnumCaseDeclaration: Sendable, Hashable {
     let name: String
     let description: String?
+    let deprecation: String?
 }
 
 /// Declares one enum case: `Case("high", description: "wakes the pager")`.
-public func Case(_ name: String, description: String? = nil) -> EnumCaseDeclaration {
+/// `deprecated:` says why the case is deprecated.
+public func Case(
+    _ name: String,
+    description: String? = nil,
+    deprecated deprecation: String? = nil
+) -> EnumCaseDeclaration {
     precondition(!name.isEmpty, "enum case names cannot be empty")
-    return EnumCaseDeclaration(name: name, description: description)
+    return EnumCaseDeclaration(name: name, description: description, deprecation: deprecation)
 }
 
 @resultBuilder
@@ -503,6 +513,7 @@ public enum EnumCasesBuilder: MMListBuilding {
 public func Enum(
     _ name: String,
     description: String? = nil,
+    deprecated deprecation: String? = nil,
     @EnumCasesBuilder _ cases: () -> [EnumCaseDeclaration]
 ) -> TypeDeclaration {
     let caseList = cases()
@@ -513,15 +524,17 @@ public func Enum(
     return TypeDeclaration(
         name: validTypeName(name),
         description: description,
+        deprecation: deprecation,
         payload: .enumeration(caseList)
     )
 }
 
-/// One declared case of a ``Union(_:description:_:)``: its name (the wire
+/// One declared case of a ``Union(_:description:deprecated:_:)``: its name (the wire
 /// tag) and its own fields, keyed from 0 independently of the other cases.
 public struct UnionCaseDeclaration: Sendable, Hashable {
     let name: String
     let description: String?
+    let deprecation: String?
     let fields: [Field]
 }
 
@@ -531,10 +544,16 @@ public struct UnionCaseDeclaration: Sendable, Hashable {
 public func Case(
     _ name: String,
     description: String? = nil,
+    deprecated deprecation: String? = nil,
     @SchemaFieldsBuilder _ fields: () -> [Field]
 ) -> UnionCaseDeclaration {
     precondition(!name.isEmpty, "union case names cannot be empty")
-    return UnionCaseDeclaration(name: name, description: description, fields: fields())
+    return UnionCaseDeclaration(
+        name: name,
+        description: description,
+        deprecation: deprecation,
+        fields: fields()
+    )
 }
 
 @resultBuilder
@@ -551,7 +570,14 @@ public enum UnionCasesBuilder: MMListBuilding {
     public static func buildExpression(
         _ enumCase: EnumCaseDeclaration
     ) -> [UnionCaseDeclaration] {
-        [UnionCaseDeclaration(name: enumCase.name, description: enumCase.description, fields: [])]
+        [
+            UnionCaseDeclaration(
+                name: enumCase.name,
+                description: enumCase.description,
+                deprecation: enumCase.deprecation,
+                fields: []
+            )
+        ]
     }
 }
 
@@ -574,6 +600,7 @@ public enum UnionCasesBuilder: MMListBuilding {
 public func Union(
     _ name: String,
     description: String? = nil,
+    deprecated deprecation: String? = nil,
     @UnionCasesBuilder _ cases: () -> [UnionCaseDeclaration]
 ) -> TypeDeclaration {
     let caseList = cases()
@@ -584,6 +611,7 @@ public func Union(
     return TypeDeclaration(
         name: validTypeName(name),
         description: description,
+        deprecation: deprecation,
         payload: .union(caseList)
     )
 }
@@ -616,11 +644,13 @@ public func Union(
 public func Type(
     _ name: String,
     description: String? = nil,
+    deprecated deprecation: String? = nil,
     @SchemaFieldsBuilder _ fields: () -> [Field]
 ) -> TypeDeclaration {
     TypeDeclaration(
         name: validTypeName(name),
         description: description,
+        deprecation: deprecation,
         payload: .structure(fields())
     )
 }
@@ -643,7 +673,8 @@ public func Alias(
     _ name: String,
     _ type: TypeSchema,
     constraints rules: Constraint...,
-    description: String? = nil
+    description: String? = nil,
+    deprecated deprecation: String? = nil
 ) -> TypeDeclaration {
     precondition(
         type.isScalarKind,
@@ -652,6 +683,7 @@ public func Alias(
     return TypeDeclaration(
         name: validTypeName(name),
         description: description,
+        deprecation: deprecation,
         payload: .alias(type, combinedConstraints(rules, for: type, context: "Alias(\"\(name)\")"))
     )
 }
@@ -701,21 +733,40 @@ public struct FieldDefault: Sendable, Hashable,
 /// fields take their integer key from declaration order; pinned fields keep
 /// the pin (see ``SchemaDeclaration`` — Keys). Every form takes an optional
 /// trailing `description:` — served by discovery, never part of the
-/// fingerprint or of compatibility comparisons.
+/// fingerprint or of compatibility comparisons — and `deprecated:`, why the
+/// field is deprecated, served and kept out of comparisons the same way.
 ///
-/// An optional field may declare a `default:` literal — declaration-level
-/// metadata like the description: never on the wire (an absent field still
-/// decodes as nil), but generators apply it. `#schema`'s CLI generation
-/// turns it into a hybrid option automatically (ArgumentParser's
-/// `defaultAsFlag`): bare `--format` means the default, `--format yaml`
-/// parses the value, absent stays nil.
+/// A `default:` on a field that is not optional is a wire default:
+/// `Field("limit", .int, default: 50)` travels as an optional whose
+/// ``TypeSchema/Field/defaultValue`` is 50, and the code `#schema`
+/// generates holds a plain `Int` that reads 50 when the key is absent, so a
+/// peer may leave it out and a field added later reads its default from a
+/// peer that never wrote it. The default is a value of the field's kind
+/// that keeps its constraints: a boolean, an integer, a floating number or
+/// a string, or for a named type declared in the same block a case name
+/// (an enum) or a value of its scalar (an alias).
+///
+/// An optional field's `default:` is declaration-level metadata like the
+/// description: never on the wire (an absent field still decodes as nil),
+/// but generators apply it. `#schema`'s CLI generation turns it into a
+/// hybrid option automatically (ArgumentParser's `defaultAsFlag`): bare
+/// `--format` means the default, `--format yaml` parses the value, absent
+/// stays nil.
 public struct Field: Sendable, Hashable {
     let pinnedKey: Int?
     let name: String
+    /// The wire shape: the declared type, made optional when the field has
+    /// a wire default.
     let type: TypeSchema
     let description: String?
+    /// Why the field is deprecated; nil when it is not.
+    let deprecation: String?
     /// The declared default; see the type-level note.
     let defaultValue: FieldDefault?
+    /// The value an absent key reads as, for a field that is not optional
+    /// with a `default:`. A named type's default is checked against the
+    /// declaration when the enclosing block assembles.
+    let wireDefault: TypeSchema.Default?
     /// CLI presentation hint, consumed by `#schema`'s CLI generation; never
     /// part of the wire contract (dropped when the declaration's shapes are
     /// assembled).
@@ -723,6 +774,9 @@ public struct Field: Sendable, Hashable {
     /// The rules the value keeps beyond its shape; see
     /// ``TypeSchema/Constraints``.
     let constraints: TypeSchema.Constraints?
+    /// Set when this entry is a ``Reserved(_:)`` among the fields rather
+    /// than a field; the other properties are then empty.
+    let reservation: FieldReservation?
 
     /// An auto-keyed field of any wire shape: `Field("line", .string)`,
     /// `Field("note", .optional(.string))`, `Field("tags", .array(.string))`.
@@ -733,6 +787,7 @@ public struct Field: Sendable, Hashable {
         _ type: TypeSchema,
         constraints rules: Constraint...,
         description: String? = nil,
+        deprecated deprecation: String? = nil,
         default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
@@ -742,6 +797,7 @@ public struct Field: Sendable, Hashable {
             type: type,
             constraints: combinedConstraints(rules, for: type, context: "Field(\"\(name)\")"),
             description: description,
+            deprecated: deprecation,
             default: defaultValue,
             cli: cli
         )
@@ -754,6 +810,7 @@ public struct Field: Sendable, Hashable {
         _ type: TypeSchema,
         constraints rules: Constraint...,
         description: String? = nil,
+        deprecated deprecation: String? = nil,
         default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
@@ -764,6 +821,7 @@ public struct Field: Sendable, Hashable {
             type: type,
             constraints: combinedConstraints(rules, for: type, context: "Field(\"\(name)\")"),
             description: description,
+            deprecated: deprecation,
             default: defaultValue,
             cli: cli
         )
@@ -775,16 +833,83 @@ public struct Field: Sendable, Hashable {
         type: TypeSchema,
         constraints: TypeSchema.Constraints?,
         description: String?,
+        deprecated deprecation: String?,
         default defaultValue: FieldDefault?,
         cli: CLIArgument?
     ) {
         self.pinnedKey = pinnedKey
         self.name = name
-        self.type = type
         self.description = description
+        self.deprecation = deprecation
         self.defaultValue = defaultValue
         self.cli = cli
         self.constraints = constraints
+        self.reservation = nil
+        if case .optional = type {
+            self.type = type
+            self.wireDefault = nil
+        } else if let defaultValue {
+            self.type = .optional(type)
+            self.wireDefault = Self.wireDefault(
+                defaultValue,
+                for: type,
+                constraints: constraints,
+                field: name
+            )
+        } else {
+            self.type = type
+            self.wireDefault = nil
+        }
+    }
+
+    /// The entry a ``Reserved(_:)`` adds to a fields block.
+    init(reservation: FieldReservation) {
+        self.pinnedKey = nil
+        self.name = ""
+        self.type = .unknown
+        self.description = nil
+        self.deprecation = nil
+        self.defaultValue = nil
+        self.wireDefault = nil
+        self.cli = nil
+        self.constraints = nil
+        self.reservation = reservation
+    }
+
+    /// A non-optional field's `default:` as its wire default. A reference to
+    /// a type of the same block keeps the literal for the block to check; a
+    /// reference to another block's type cannot be checked, so it takes no
+    /// default.
+    private static func wireDefault(
+        _ literal: FieldDefault,
+        for type: TypeSchema,
+        constraints: TypeSchema.Constraints?,
+        field: String
+    ) -> TypeSchema.Default {
+        let value: TypeSchema.Default
+        switch literal.kind {
+            case .boolean(let boolean): value = .bool(boolean)
+            case .integer(let integer): value = .integer(integer)
+            case .floating(let floating): value = .floating(floating)
+            case .string(let string): value = .string(string)
+            case .now:
+                preconditionFailure(
+                    "Field(\"\(field)\"): .now is a CLI default, read when the command runs; a field that is not optional takes a fixed default"
+                )
+        }
+        if case .reference(let typeName) = type {
+            precondition(
+                !typeName.contains("."),
+                "Field(\"\(field)\"): \"\(typeName)\" is declared in another block, which this one cannot check a default against — a cross-schema reference takes no default"
+            )
+            return value
+        }
+        switch value.fitted(to: type, constraints: constraints) {
+            case .success(let fitted):
+                return fitted
+            case .failure(let refusal):
+                preconditionFailure("Field(\"\(field)\"): \(refusal)")
+        }
     }
 
     /// An auto-keyed field referencing a named type by name:
@@ -796,12 +921,18 @@ public struct Field: Sendable, Hashable {
         _ name: String,
         _ typeName: String,
         description: String? = nil,
+        deprecated deprecation: String? = nil,
         default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
         self.init(
-            name, .reference(typeName), description: description,
-            default: defaultValue, cli: cli)
+            name,
+            .reference(typeName),
+            description: description,
+            deprecated: deprecation,
+            default: defaultValue,
+            cli: cli
+        )
     }
 
     /// A key-pinned named-type reference.
@@ -810,12 +941,19 @@ public struct Field: Sendable, Hashable {
         _ name: String,
         _ typeName: String,
         description: String? = nil,
+        deprecated deprecation: String? = nil,
         default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
         self.init(
-            key, name, .reference(typeName), description: description,
-            default: defaultValue, cli: cli)
+            key,
+            name,
+            .reference(typeName),
+            description: description,
+            deprecated: deprecation,
+            default: defaultValue,
+            cli: cli
+        )
     }
 
     /// A field referencing a named type through its generated Swift type —
@@ -826,10 +964,18 @@ public struct Field: Sendable, Hashable {
         _ name: String,
         _ type: (some SchemaDescribable).Type,
         description: String? = nil,
+        deprecated deprecation: String? = nil,
         default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
-        self.init(name, type.schema, description: description, default: defaultValue, cli: cli)
+        self.init(
+            name,
+            type.schema,
+            description: description,
+            deprecated: deprecation,
+            default: defaultValue,
+            cli: cli
+        )
     }
 
     /// A key-pinned Swift-type reference.
@@ -838,21 +984,37 @@ public struct Field: Sendable, Hashable {
         _ name: String,
         _ type: (some SchemaDescribable).Type,
         description: String? = nil,
+        deprecated deprecation: String? = nil,
         default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
         self.init(
-            key, name, type.schema, description: description, default: defaultValue, cli: cli)
+            key,
+            name,
+            type.schema,
+            description: description,
+            deprecated: deprecation,
+            default: defaultValue,
+            cli: cli
+        )
     }
 
     /// An auto-keyed nested structure: `Field("owner") { Field("uid", .uint) }`.
     public init(
         _ name: String,
         description: String? = nil,
+        deprecated deprecation: String? = nil,
         cli: CLIArgument? = nil,
         @SchemaFieldsBuilder _ fields: () -> [Field]
     ) {
-        self.init(name, Fields(fields), description: description, default: nil, cli: cli)
+        self.init(
+            name,
+            Fields(fields),
+            description: description,
+            deprecated: deprecation,
+            default: nil,
+            cli: cli
+        )
     }
 
     /// A key-pinned nested structure.
@@ -860,10 +1022,19 @@ public struct Field: Sendable, Hashable {
         _ key: Int,
         _ name: String,
         description: String? = nil,
+        deprecated deprecation: String? = nil,
         cli: CLIArgument? = nil,
         @SchemaFieldsBuilder _ fields: () -> [Field]
     ) {
-        self.init(key, name, Fields(fields), description: description, default: nil, cli: cli)
+        self.init(
+            key,
+            name,
+            Fields(fields),
+            description: description,
+            deprecated: deprecation,
+            default: nil,
+            cli: cli
+        )
     }
 }
 
@@ -881,9 +1052,12 @@ public enum SchemaFieldsBuilder: MMListBuilding {
 
     public static func buildExpression(_ field: Field) -> [Field] { [field] }
     public static func buildExpression(_ fields: [Field]) -> [Field] { fields }
+    public static func buildExpression(_ reservation: FieldReservation) -> [Field] {
+        [Field(reservation: reservation)]
+    }
 }
 
-/// One element inside a ``Call(_:description:_:)`` block: `Access`,
+/// One element inside a ``Call(_:description:deprecated:_:)`` block: `Access`,
 /// `Request`, `RequestStream`, `Response`, `ResponseStream`, `Errors` or the
 /// presentation-only `CLI`.
 public struct MethodPart: Sendable {
@@ -1103,6 +1277,7 @@ public enum MethodDeclarationBuilder: MMListBuilding {
 public func Call(
     _ name: String,
     description: String? = nil,
+    deprecated deprecation: String? = nil,
     @MethodDeclarationBuilder _ parts: () -> [MethodPart]
 ) -> MethodDeclaration {
     var access: AccessMode?
@@ -1153,14 +1328,15 @@ public func Call(
         responseDescription: response?.description,
         requestStreamDescription: requestStream?.description,
         responseStreamDescription: responseStream?.description,
+        deprecation: deprecation,
         cli: cli,
         errors: errors ?? []
     )
 }
 
-/// One entry of a ``Schema(_:_:)`` block: a ``Call(_:description:_:)`` method,
-/// an ``Enum(_:description:_:)`` / ``Union(_:description:_:)`` /
-/// ``Type(_:description:_:)`` named type, a named
+/// One entry of a ``Schema(_:_:)`` block: a ``Call(_:description:deprecated:_:)`` method,
+/// an ``Enum(_:description:deprecated:_:)`` / ``Union(_:description:deprecated:_:)`` /
+/// ``Type(_:description:deprecated:_:)`` named type, a named
 /// ``Error(_:exitCode:description:_:)``, or the namespace's ``Errors(_:)``.
 public struct SchemaEntry: Sendable {
     enum Kind {
@@ -1228,7 +1404,7 @@ public func Schema(
         if case .type(let type) = entry.kind { type } else { nil }
     }
     let types = assembleTypes(typeDeclarations, namespace: prefix.rawValue)
-    let localNames = Set(typeDeclarations.map(\.name))
+    let localTypes = localTypeTable(typeDeclarations)
     let errorScope = errorResolutionScope(
         entries: entries,
         typeDeclarations: typeDeclarations,
@@ -1261,18 +1437,18 @@ public func Schema(
             request: qualifyReferences(
                 in: method.request,
                 namespace: prefix.rawValue,
-                localTypes: localNames
+                localTypes: localTypes
             ),
             response: qualifyReferences(
                 in: method.response,
                 namespace: prefix.rawValue,
-                localTypes: localNames
+                localTypes: localTypes
             ),
             requestStream: method.requestStream.map {
-                qualifyReferences(in: $0, namespace: prefix.rawValue, localTypes: localNames)
+                qualifyReferences(in: $0, namespace: prefix.rawValue, localTypes: localTypes)
             },
             responseStream: method.responseStream.map {
-                qualifyReferences(in: $0, namespace: prefix.rawValue, localTypes: localNames)
+                qualifyReferences(in: $0, namespace: prefix.rawValue, localTypes: localTypes)
             },
             errors: flattenedErrors(
                 namespace: namespaceErrors,
@@ -1283,7 +1459,8 @@ public func Schema(
             requestDescription: method.requestDescription,
             responseDescription: method.responseDescription,
             requestStreamDescription: method.requestStreamDescription,
-            responseStreamDescription: method.responseStreamDescription
+            responseStreamDescription: method.responseStreamDescription,
+            deprecation: method.deprecation
         )
     }
     return SchemaDeclaration(
@@ -1323,7 +1500,7 @@ private func errorResolutionScope(
         namespace: namespace,
         namedErrors: Dictionary(uniqueKeysWithValues: namedErrors.map { ($0.name, $0) }),
         structures: structures,
-        localTypes: Set(typeNames)
+        localTypes: localTypeTable(typeDeclarations)
     )
 }
 
@@ -1434,7 +1611,7 @@ private func assembleTypes(
     if let duplicate = firstDuplicate(declarations.map(\.name)) {
         preconditionFailure("\"\(namespace)\" declares type \"\(duplicate)\" twice")
     }
-    let localNames = Set(declarations.map(\.name))
+    let localTypes = localTypeTable(declarations)
     return declarations.map { declaration in
         let schema: TypeSchema
         switch declaration.payload {
@@ -1442,12 +1619,16 @@ private func assembleTypes(
                 schema = qualifyReferences(
                     in: .structure(fields: assignKeys(fields)),
                     namespace: namespace,
-                    localTypes: localNames
+                    localTypes: localTypes
                 )
             case .enumeration(let cases):
                 schema = .enumeration(
                     cases: cases.map {
-                        TypeSchema.EnumCase(name: $0.name, description: $0.description)
+                        TypeSchema.EnumCase(
+                            name: $0.name,
+                            description: $0.description,
+                            deprecation: $0.deprecation
+                        )
                     }
                 )
             case .union(let cases):
@@ -1457,27 +1638,39 @@ private func assembleTypes(
                             TypeSchema.UnionCase(
                                 name: $0.name,
                                 fields: assignKeys($0.fields),
-                                description: $0.description
+                                description: $0.description,
+                                deprecation: $0.deprecation
                             )
                         }
                     ),
                     namespace: namespace,
-                    localTypes: localNames
+                    localTypes: localTypes
                 )
             case .alias(let scalar, let constraints):
                 return TypeDefinition(
                     name: "\(namespace).\(declaration.name)",
                     schema: scalar,
                     description: declaration.description,
-                    constraints: constraints
+                    constraints: constraints,
+                    deprecation: declaration.deprecation
                 )
         }
         return TypeDefinition(
             name: "\(namespace).\(declaration.name)",
             schema: schema,
-            description: declaration.description
+            description: declaration.description,
+            deprecation: declaration.deprecation
         )
     }
+}
+
+/// A block's type declarations by unqualified name: what its references
+/// resolve to and its named-type defaults are checked against.
+func localTypeTable(_ declarations: [TypeDeclaration]) -> [String: TypeDeclaration.Payload] {
+    Dictionary(
+        declarations.map { ($0.name, $0.payload) },
+        uniquingKeysWith: { first, _ in first }
+    )
 }
 
 /// The first name that appears more than once, or nil — the shared
@@ -1492,55 +1685,107 @@ package func firstDuplicate(_ names: some Sequence<String>) -> String? {
 }
 
 /// Rewrites undotted references to their block-qualified form, validating
-/// they resolve locally; dotted (cross-schema) references pass through.
+/// they resolve locally; dotted (cross-schema) references pass through. A
+/// field's default on a local named type is checked against its declaration
+/// here: an enum's must name one of its cases, an alias's must be a value of
+/// its scalar that keeps its constraints.
 func qualifyReferences(
     in schema: TypeSchema,
     namespace: String,
-    localTypes: Set<String>
+    localTypes: [String: TypeDeclaration.Payload]
 ) -> TypeSchema {
     // One rewrite rule on the shared structure-preserving walk: unqualified
     // local references gain the namespace; dotted references pass through.
-    schema.rewritten(node: { rebuilt in
-        guard case .reference(let name) = rebuilt, !name.contains(".") else {
-            return rebuilt
+    schema.rewritten(
+        node: { rebuilt in
+            guard case .reference(let name) = rebuilt, !name.contains(".") else {
+                return rebuilt
+            }
+            precondition(
+                localTypes[name] != nil,
+                "reference to \"\(name)\" does not resolve to an Enum/Type declared in \"\(namespace)\" — qualify cross-schema references (\"other.\(name)\")"
+            )
+            return .reference("\(namespace).\(name)")
+        },
+        field: { field in
+            // A field's own type is rewritten first, so a local reference
+            // already carries the namespace. Only a field that is not
+            // optional takes a default on a reference, and only a local one.
+            guard let defaultValue = field.defaultValue,
+                case .optional(.reference(let qualified)) = field.type,
+                qualified.hasPrefix("\(namespace).")
+            else { return field }
+            let name = String(qualified.dropFirst(namespace.count + 1))
+            guard let payload = localTypes[name] else { return field }
+            var checked = field
+            checked.defaultValue = namedTypeDefault(
+                defaultValue,
+                of: payload,
+                field: field.name,
+                typeName: name
+            )
+            return checked
         }
-        precondition(
-            localTypes.contains(name),
-            "reference to \"\(name)\" does not resolve to an Enum/Type declared in \"\(namespace)\" — qualify cross-schema references (\"other.\(name)\")"
-        )
-        return .reference("\(namespace).\(name)")
-    })
+    )
 }
 
-/// Assigns declaration-order keys to unpinned fields, skipping pinned and
-/// reserved values; duplicate pins are programmer error.
-func assignKeys(
-    _ fields: [Field],
-    startingAt first: Int = 0,
-    reserving reserved: Set<Int> = []
-) -> [TypeSchema.Field] {
-    var used = reserved
-    for field in fields {
-        if let pin = field.pinnedKey {
-            precondition(used.insert(pin).inserted, "duplicate field key \(pin) (\(field.name))")
-        }
+/// A default on a field of a local named type, fitted to the type: the
+/// literal as written becomes a case name for an enum, or a value of the
+/// scalar for an alias, checked against the alias's constraints.
+private func namedTypeDefault(
+    _ literal: TypeSchema.Default,
+    of payload: TypeDeclaration.Payload,
+    field: String,
+    typeName: String
+) -> TypeSchema.Default {
+    let kind: TypeSchema
+    let constraints: TypeSchema.Constraints?
+    switch payload {
+        case .enumeration(let cases):
+            kind = .enumeration(cases: cases.map { TypeSchema.EnumCase(name: $0.name) })
+            constraints = nil
+        case .alias(let scalar, let aliasConstraints):
+            kind = scalar
+            constraints = aliasConstraints
+        case .structure:
+            kind = .structure(fields: [])
+            constraints = nil
+        case .union:
+            kind = .union(cases: [])
+            constraints = nil
     }
-    var next = first
-    return fields.map { field in
-        let key: Int
-        if let pin = field.pinnedKey {
-            key = pin
-        } else {
-            while used.contains(next) { next += 1 }
-            key = next
-            used.insert(next)
-        }
-        return TypeSchema.Field(
-            key: key,
-            name: field.name,
-            type: field.type,
-            description: field.description,
-            constraints: field.constraints
-        )
+    switch literal.fitted(to: kind, constraints: constraints) {
+        case .success(let fitted):
+            return fitted
+        case .failure(let refusal):
+            preconditionFailure("Field(\"\(field)\") of \(typeName): \(refusal)")
+    }
+}
+
+/// Assigns keys to a fields block's fields (see ``fieldKeys(for:reservedKeys:reservedNames:)``)
+/// and drops its ``Reserved(_:)`` entries; a conflict is programmer error.
+func assignKeys(_ entries: [Field]) -> [TypeSchema.Field] {
+    let reservations = entries.compactMap(\.reservation)
+    let fields = entries.filter { $0.reservation == nil }
+    let keys = fieldKeys(
+        for: fields.map { ($0.pinnedKey, $0.name) },
+        reservedKeys: Set(reservations.flatMap(\.keys)),
+        reservedNames: Set(reservations.flatMap(\.names))
+    )
+    switch keys {
+        case .failure(let conflict):
+            preconditionFailure("\(conflict)")
+        case .success(let keys):
+            return zip(fields, keys).map { field, key in
+                TypeSchema.Field(
+                    key: key,
+                    name: field.name,
+                    type: field.type,
+                    description: field.description,
+                    constraints: field.constraints,
+                    defaultValue: field.wireDefault,
+                    deprecation: field.deprecation
+                )
+            }
     }
 }

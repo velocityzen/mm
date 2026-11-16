@@ -16,9 +16,10 @@
         ///
         /// Mutation check: a map's key and value written to each other's
         /// keys, datetime given the date tag, a field's description moved to
-        /// key 4, or a union case's fields and description keys swapped,
-        /// fails here at 100 cases. The last three keep the round trip
-        /// below whole, since encoder and decoder agree on them.
+        /// key 4, a union case's fields and description keys swapped, or a
+        /// field's default and deprecation keys swapped, fails here at 100
+        /// cases. The last four keep the round trip below whole, since
+        /// encoder and decoder agree on them.
         @Test
         func schemasEncodeAsDocumented() throws {
             try property(
@@ -36,7 +37,10 @@
                     "an empty case name": 1_000, "an empty enumeration": 1_000,
                     "an empty field name": 1_000, "an empty reference name": 1_000,
                     "an empty structure": 1_000, "an empty union": 1_000, "an enumeration": 1_000,
-                    "an optional": 1_000, "unknown": 1_000,
+                    "an optional": 1_000, "unknown": 1_000, "a boolean default": 1_000,
+                    "an integer default": 1_000, "a floating default": 1_000,
+                    "a whole floating default": 1_000, "a string default": 1_000,
+                    "a deprecated field": 1_000, "a deprecated case": 1_000,
                 ]
             ) { tc in
                 let schema = try #draw(FingerprintGenerators.schemas, from: tc)
@@ -51,8 +55,9 @@
         }
 
         /// Any schema, and any named type definition, decodes from its
-        /// MessagePack form back to itself, every name and description byte
-        /// for byte.
+        /// MessagePack form back to itself, every name, description and
+        /// deprecation byte for byte, and every field default as the kind it
+        /// was: a whole floating default stays floating, never an integer.
         ///
         /// Mutation check: date decoded as datetime, a map's key and value
         /// swapped, or a union no longer decoded, fails here at 100 cases.
@@ -73,10 +78,15 @@
                     "an empty case name": 1_000, "an empty enumeration": 1_000,
                     "an empty field name": 1_000, "an empty reference name": 1_000,
                     "an empty structure": 1_000, "an empty union": 1_000, "an enumeration": 1_000,
-                    "an optional": 1_000, "unknown": 1_000,
+                    "an optional": 1_000, "unknown": 1_000, "a boolean default": 1_000,
+                    "an integer default": 1_000, "a floating default": 1_000,
+                    "a whole floating default": 1_000, "a string default": 1_000,
+                    "a deprecated field": 1_000, "a deprecated case": 1_000,
+                    "a deprecated definition": 1_000,
                 ]
             ) { tc in
                 let definition = try #draw(FingerprintGenerators.definitions, from: tc)
+                if definition.deprecation != nil { try tc.event("a deprecated definition") }
                 for label in kindLabels(of: definition.schema).sorted() {
                     try tc.event(label)
                 }
@@ -266,12 +276,9 @@
         cuts: inout [TypeResolutionFailure: Int]
     ) -> TypeSchema {
         func field(_ pair: (field: TypeSchema.Field, value: TypeSchema)) -> TypeSchema.Field {
-            TypeSchema.Field(
-                key: pair.field.key,
-                name: pair.field.name,
-                type: pair.value,
-                description: pair.field.description
-            )
+            var field = pair.field
+            field.type = pair.value
+            return field
         }
         switch step {
             case .bool: return .bool
@@ -295,7 +302,8 @@
                         TypeSchema.UnionCase(
                             name: $0.unionCase.name,
                             fields: $0.fields.map(field),
-                            description: $0.unionCase.description
+                            description: $0.unionCase.description,
+                            deprecation: $0.unionCase.deprecation
                         )
                     }
                 )
@@ -341,12 +349,9 @@
         mutating func inlined(_ schema: TypeSchema, inFlight: Set<String>) -> TypeSchema {
             func fields(_ fields: [TypeSchema.Field]) -> [TypeSchema.Field] {
                 fields.map {
-                    TypeSchema.Field(
-                        key: $0.key,
-                        name: $0.name,
-                        type: inlined($0.type, inFlight: inFlight),
-                        description: $0.description
-                    )
+                    var field = $0
+                    field.type = inlined($0.type, inFlight: inFlight)
+                    return field
                 }
             }
             switch schema {
@@ -365,7 +370,8 @@
                             TypeSchema.UnionCase(
                                 name: $0.name,
                                 fields: fields($0.fields),
-                                description: $0.description
+                                description: $0.description,
+                                deprecation: $0.deprecation
                             )
                         }
                     )
@@ -695,8 +701,8 @@
     }
 
     /// A field as its `CodingKeys` lay it out: 0 the integer key, 1 the
-    /// name, 2 the type, 3 the description, each optional one left out
-    /// when absent.
+    /// name, 2 the type, 3 the description, 5 the default as the bare
+    /// value, 6 the deprecation, each optional one left out when absent.
     struct DocumentedField: Encodable {
         let field: TypeSchema.Field
         let type: DocumentedSchema
@@ -712,10 +718,19 @@
             try container.encode(field.name, forKey: WireKey(1))
             try container.encode(type, forKey: WireKey(2))
             try container.encodeIfPresent(field.description, forKey: WireKey(3))
+            switch field.defaultValue {
+                case .bool(let value)?: try container.encode(value, forKey: WireKey(5))
+                case .integer(let value)?: try container.encode(value, forKey: WireKey(5))
+                case .floating(let value)?: try container.encode(value, forKey: WireKey(5))
+                case .string(let value)?: try container.encode(value, forKey: WireKey(5))
+                case nil: break
+            }
+            try container.encodeIfPresent(field.deprecation, forKey: WireKey(6))
         }
     }
 
-    /// An enumeration case: 0 the name, 1 the description when present.
+    /// An enumeration case: 0 the name, 1 the description and 2 the
+    /// deprecation when present.
     struct DocumentedEnumCase: Encodable {
         let enumCase: TypeSchema.EnumCase
 
@@ -725,11 +740,12 @@
             var container = encoder.container(keyedBy: WireKey.self)
             try container.encode(enumCase.name, forKey: WireKey(0))
             try container.encodeIfPresent(enumCase.description, forKey: WireKey(1))
+            try container.encodeIfPresent(enumCase.deprecation, forKey: WireKey(2))
         }
     }
 
-    /// A union case: 0 the name, 1 the fields, 2 the description when
-    /// present.
+    /// A union case: 0 the name, 1 the fields, 2 the description and 3 the
+    /// deprecation when present.
     struct DocumentedUnionCase: Encodable {
         let unionCase: TypeSchema.UnionCase
         let fields: [DocumentedField]
@@ -744,6 +760,7 @@
             try container.encode(unionCase.name, forKey: WireKey(0))
             try container.encode(fields, forKey: WireKey(1))
             try container.encodeIfPresent(unionCase.description, forKey: WireKey(2))
+            try container.encodeIfPresent(unionCase.deprecation, forKey: WireKey(3))
         }
     }
 
@@ -766,6 +783,18 @@
                 default: break
             }
             if field.description != nil { labels.insert("a documented field") }
+            if field.deprecation != nil { labels.insert("a deprecated field") }
+            switch field.defaultValue {
+                case .bool?: labels.insert("a boolean default")
+                case .integer?: labels.insert("an integer default")
+                case .floating(let value)?:
+                    labels.insert(
+                        value.rounded() == value && abs(value) < 0x1p63
+                            ? "a whole floating default" : "a floating default"
+                    )
+                case .string?: labels.insert("a string default")
+                case nil: break
+            }
         }
         for place in nodes(of: schema) {
             if place.path.count >= 3 { labels.insert("a node three deep") }
@@ -785,6 +814,7 @@
                     for enumCase in cases {
                         text(enumCase.name, as: "case name")
                         if enumCase.description != nil { labels.insert("a documented case") }
+                        if enumCase.deprecation != nil { labels.insert("a deprecated case") }
                     }
                 case .union(let cases):
                     labels.insert(cases.isEmpty ? "an empty union" : "a union")
@@ -792,6 +822,7 @@
                         text(unionCase.name, as: "case name")
                         if unionCase.fields.isEmpty { labels.insert("a union case without fields") }
                         if unionCase.description != nil { labels.insert("a documented case") }
+                        if unionCase.deprecation != nil { labels.insert("a deprecated case") }
                         unionCase.fields.forEach(field)
                     }
                 case .reference(let name):

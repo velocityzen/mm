@@ -32,17 +32,16 @@
         ]
     }
 
-    /// The schema's every description, field, case and nested, set to
-    /// `text`.
+    /// The schema's every description and deprecation, field, case and
+    /// nested, set to `text`.
     func describing(_ schema: TypeSchema, _ text: String?) -> TypeSchema {
         func fields(_ fields: [TypeSchema.Field]) -> [TypeSchema.Field] {
             fields.map {
-                TypeSchema.Field(
-                    key: $0.key,
-                    name: $0.name,
-                    type: describing($0.type, text),
-                    description: text
-                )
+                var field = $0
+                field.type = describing($0.type, text)
+                field.description = text
+                field.deprecation = text
+                return field
             }
         }
         switch schema {
@@ -53,7 +52,9 @@
             case .structure(let list): return .structure(fields: fields(list))
             case .enumeration(let cases):
                 return .enumeration(
-                    cases: cases.map { TypeSchema.EnumCase(name: $0.name, description: text) }
+                    cases: cases.map {
+                        TypeSchema.EnumCase(name: $0.name, description: text, deprecation: text)
+                    }
                 )
             case .union(let cases):
                 return .union(
@@ -61,7 +62,8 @@
                         TypeSchema.UnionCase(
                             name: $0.name,
                             fields: fields($0.fields),
-                            description: text
+                            description: text,
+                            deprecation: text
                         )
                     }
                 )
@@ -82,7 +84,8 @@
             requestDescription: text,
             responseDescription: text,
             requestStreamDescription: text,
-            responseStreamDescription: text
+            responseStreamDescription: text,
+            deprecation: text
         )
     }
 
@@ -102,12 +105,9 @@
     /// replaced.
     func replacingChild(_ index: Int, of schema: TypeSchema, with child: TypeSchema) -> TypeSchema {
         func replaced(_ field: TypeSchema.Field) -> TypeSchema.Field {
-            TypeSchema.Field(
-                key: field.key,
-                name: field.name,
-                type: child,
-                description: field.description
-            )
+            var field = field
+            field.type = child
+            return field
         }
         switch schema {
             case .optional: return .optional(child)
@@ -123,11 +123,7 @@
                     if remaining < cases[caseIndex].fields.count {
                         var fields = cases[caseIndex].fields
                         fields[remaining] = replaced(fields[remaining])
-                        cases[caseIndex] = TypeSchema.UnionCase(
-                            name: cases[caseIndex].name,
-                            fields: fields,
-                            description: cases[caseIndex].description
-                        )
+                        cases[caseIndex].fields = fields
                         return .union(cases: cases)
                     }
                     remaining -= cases[caseIndex].fields.count
@@ -166,6 +162,7 @@
         case fieldsSwapped = "two fields swapped"
         case fieldDropped = "a field dropped"
         case fieldAdded = "a field added"
+        case fieldDefaultChanged = "a field's default changed"
         case enumCaseRenamed = "an enum case renamed"
         case enumCasesSwapped = "two enum cases swapped"
         case enumCaseDropped = "an enum case dropped"
@@ -177,6 +174,7 @@
 
         static let fieldEdits: [SchemaEdit] = [
             .fieldRenamed, .fieldKeyChanged, .fieldsSwapped, .fieldDropped, .fieldAdded,
+            .fieldDefaultChanged,
         ]
 
         /// Whether the edit can be made at this node.
@@ -184,7 +182,8 @@
             switch (self, node) {
                 case (.fieldRenamed, .structure(let fields)),
                     (.fieldKeyChanged, .structure(let fields)),
-                    (.fieldDropped, .structure(let fields)):
+                    (.fieldDropped, .structure(let fields)),
+                    (.fieldDefaultChanged, .structure(let fields)):
                     !fields.isEmpty
                 case (.fieldsSwapped, .structure(let fields)): fields.count >= 2
                 case (.fieldAdded, .structure): true
@@ -300,6 +299,17 @@
 
         static let descriptions: Gen<String?> = .optional(.string())
 
+        /// A field's default of each kind: booleans, integers and floating
+        /// numbers around their edges, whole floating numbers among them,
+        /// and the names.
+        static let defaults: Gen<TypeSchema.Default> = .oneOf(
+            Gen<Bool>.bool().map { .bool($0) },
+            SchemaValueGenerators.int64s(edgeRate: 0.3).map { .integer($0) },
+            SchemaValueGenerators.doubles(edgeRate: 0.3).map { .floating($0) },
+            Gen<Int64>.integer(in: -3...3).map { .floating(Double($0)) },
+            names.map { .string($0) }
+        )
+
         static let keys: Gen<Int?> = .optional(
             .oneOf(.int(), .element(of: [0, 1, -1, .min, .max]))
         )
@@ -318,18 +328,31 @@
                     key: try tc.draw(keys),
                     name: try tc.draw(names),
                     type: try tc.draw(schemas),
-                    description: try tc.draw(descriptions)
+                    description: try tc.draw(descriptions),
+                    defaultValue: try tc.draw(.optional(defaults)),
+                    deprecation: try tc.draw(descriptions)
                 )
             }
         }
 
-        static let enumCases: Gen<TypeSchema.EnumCase> = Hegel.zip(names, descriptions)
-            .map { TypeSchema.EnumCase(name: $0, description: $1) }
+        static let enumCases: Gen<TypeSchema.EnumCase> = Hegel.zip(
+            names,
+            descriptions,
+            descriptions
+        )
+        .map { TypeSchema.EnumCase(name: $0, description: $1, deprecation: $2) }
 
         static func unions(_ schemas: Gen<TypeSchema>) -> Gen<TypeSchema> {
             Gen<[TypeSchema.UnionCase]>.array(
-                of: Hegel.zip(names, .array(of: fields(schemas), count: 0...3), descriptions)
-                    .map { TypeSchema.UnionCase(name: $0, fields: $1, description: $2) }
+                of: Hegel.zip(
+                    names,
+                    .array(of: fields(schemas), count: 0...3),
+                    descriptions,
+                    descriptions
+                )
+                .map {
+                    TypeSchema.UnionCase(name: $0, fields: $1, description: $2, deprecation: $3)
+                }
             )
             .map { .union(cases: $0) }
         }
@@ -377,7 +400,8 @@
                 requestDescription: try tc.draw(descriptions),
                 responseDescription: try tc.draw(descriptions),
                 requestStreamDescription: try tc.draw(descriptions),
-                responseStreamDescription: try tc.draw(descriptions)
+                responseStreamDescription: try tc.draw(descriptions),
+                deprecation: try tc.draw(descriptions)
             )
         }
 
@@ -385,7 +409,8 @@
             TypeDefinition(
                 name: try tc.draw(names),
                 schema: try tc.draw(schemas),
-                description: try tc.draw(descriptions)
+                description: try tc.draw(descriptions),
+                deprecation: try tc.draw(descriptions)
             )
         }
 
@@ -418,7 +443,8 @@
                         TypeDefinition(
                             name: $0.name,
                             schema: describing($0.schema, text),
-                            description: text
+                            description: text,
+                            deprecation: text
                         )
                     },
                     tc
@@ -436,22 +462,24 @@
             switch edit {
                 case .fieldRenamed:
                     let index = try pick(fields.count, tc)
-                    let field = fields[index]
-                    fields[index] = TypeSchema.Field(
-                        key: field.key,
-                        name: try tc.draw(names),
-                        type: field.type
-                    )
+                    fields[index].name = try tc.draw(names)
                 case .fieldKeyChanged:
                     let index = try pick(fields.count, tc)
-                    let field = fields[index]
                     var key = try tc.draw(keys)
-                    if key == field.key { key = key == nil ? 0 : nil }
-                    fields[index] = TypeSchema.Field(key: key, name: field.name, type: field.type)
+                    if key == fields[index].key { key = key == nil ? 0 : nil }
+                    fields[index].key = key
                 case .fieldsSwapped:
                     try swapTwo(&fields, tc)
                 case .fieldDropped:
                     fields.remove(at: try pick(fields.count, tc))
+                case .fieldDefaultChanged:
+                    // Added, dropped, or another value, of its kind or not.
+                    let index = try pick(fields.count, tc)
+                    var value = try tc.draw(.optional(defaults))
+                    if value == fields[index].defaultValue {
+                        value = value == nil ? .bool(false) : nil
+                    }
+                    fields[index].defaultValue = value
                 default:
                     let added = try tc.draw(FingerprintGenerators.fields(leaves))
                     fields.insert(added, at: try tc.draw(Gen<Int>.int(in: 0...fields.count)))
@@ -588,20 +616,44 @@
     @Suite("SchemaFingerprint properties", .hegel, .offTheCooperativePool)
     struct SchemaFingerprintProperties {
         /// Reordering the signatures and the type definitions, and
-        /// rewriting or removing every description, leaves the fingerprint
-        /// as it was, duplicate method names included.
+        /// rewriting or removing every description and deprecation, leaves
+        /// the fingerprint as it was, duplicate method names and field
+        /// defaults included.
         ///
         /// Mutation check: dropping the tie-break on the full encoding, so
-        /// two methods of one name stay in the order they came in, or
-        /// hashing an enum case's description, fails here.
+        /// two methods of one name stay in the order they came in, hashing
+        /// an enum case's description, or hashing a field's deprecation,
+        /// fails here.
         @Test
         func fingerprintIgnoresOrderAndDescriptions() throws {
-            try property(reachingAfter: ["duplicate method names": 1_000]) { tc in
+            try property(
+                reachingAfter: [
+                    "duplicate method names": 1_000, "a field default": 1_000,
+                    "a deprecation": 1_000,
+                ]
+            ) { tc in
                 let set = try #draw(FingerprintGenerators.sets(signatureCount: 0...6), from: tc)
                 let restated = try FingerprintGenerators.restated(set, tc)
                 try tc.event("signatures", value: Double(set.signatures.count))
                 if Set(set.signatures.map(\.name)).count < set.signatures.count {
                     try tc.event("duplicate method names")
+                }
+                let schemas =
+                    set.signatures.flatMap {
+                        [$0.request, $0.response]
+                            + [$0.requestStream, $0.responseStream, $0.errors].compactMap { $0 }
+                    } + set.types.map(\.schema)
+                let labels = schemas.reduce(into: Set<String>()) {
+                    $0.formUnion(kindLabels(of: $1))
+                }
+                if labels.contains(where: { $0.hasSuffix(" default") }) {
+                    try tc.event("a field default")
+                }
+                if !labels.isDisjoint(with: ["a deprecated field", "a deprecated case"])
+                    || set.signatures.contains(where: { $0.deprecation != nil })
+                    || set.types.contains(where: { $0.deprecation != nil })
+                {
+                    try tc.event("a deprecation")
                 }
                 #expect(restated.fingerprint == set.fingerprint)
             }
@@ -609,19 +661,20 @@
 
         /// Two sets fingerprint the same exactly when their wire forms, with
         /// no order and no descriptions, are the same: one edit inside a
-        /// schema, a field's name, key or place, a field or a case added or
+        /// schema, a field's name, key, default or place, a field or a case added or
         /// dropped, a case renamed or moved, or a schema replaced, changes
         /// the fingerprint unless it changes nothing on the wire.
         ///
-        /// Mutation check: leaving a field's key or a union case's fields
-        /// out of the hash fails here.
+        /// Mutation check: leaving a field's key, a union case's fields or
+        /// a field's default out of the hash fails here.
         @Test
         func fingerprintSeesEverySchemaEdit() throws {
             try property(
                 reaching: ["the wire form changed"],
                 reachingAfter: [
                     "a field added": 1_000, "a field dropped": 1_000, "a field key changed": 1_000,
-                    "a field renamed": 1_000, "a schema replaced": 1_000,
+                    "a field renamed": 1_000, "a field's default changed": 1_000,
+                    "a schema replaced": 1_000,
                     "a union case dropped": 1_000, "a union case renamed": 1_000,
                     "an enum case dropped": 1_000, "an enum case renamed": 1_000,
                     "two enum cases swapped": 1_000, "two fields swapped": 1_000,

@@ -282,9 +282,9 @@ String keys are supported as a fallback: a field without an integer key encodes 
 
 A decoder MUST skip map entries with unrecognized keys **structurally**: it walks the value without materializing it, for any MessagePack family at any depth (str, bin, arrays, maps, ext, any width). This applies at every nesting level. Keys that can never match a field are also skipped with their values, not treated as errors: integers outside the `i64` key space (section 5.1), strings with invalid UTF-8, and keys that are neither integers nor strings.
 
-### 5.3 Evolution contract: new fields must be optional
+### 5.3 Evolution contract: new fields are optional or have a default
 
-To evolve a struct, add new fields with new keys and make them **optional**. A missing optional field decodes as absent (nil), and so does an explicit MessagePack `nil`. A missing **non-optional** field is a decode error (`keyNotFound`). Never reuse or renumber keys. Never change the type of an existing field.
+To evolve a struct, add new fields with new keys, and make each one **optional** or give it a **default** (Field key 5, section 8.3). A missing optional field decodes as absent (nil), and so does an explicit MessagePack `nil`. A field with a default is optional on the wire, so a peer that knows nothing of defaults reads it as an optional. A peer that knows the default reads an absent key or a `nil` as the default, and always writes the field. A missing **non-optional** field without a default is a decode error (`keyNotFound`). Never reuse or renumber keys. A declaration SHOULD reserve a removed field's key and name, so that no later field takes either. Never change the type of an existing field.
 
 **Duplicate keys: the first occurrence wins.** A decoder keeps the first value for a key and skips later duplicates.
 
@@ -461,6 +461,7 @@ The methods list is scoped by the request's entity and filtered by the requestin
 | 0 | name | string (for example, `journal.append`) |
 | 1 | access | u8: raw access bits (section 7.3); unknown bits preserved |
 | 2 | description | string, **optional**: human-readable method documentation |
+| 3 | deprecation | string, **optional**: why the method is deprecated; present only for a deprecated method, and possibly empty |
 | 10 | request | TypeSchema: opening-request shape |
 | 11 | requestDescription | string, **optional** |
 | 12 | requestStream | TypeSchema, **optional**: element shape the client may stream (present only for methods with a request stream) |
@@ -471,7 +472,7 @@ The methods list is scoped by the request's entity and filtered by the requestin
 | 23 | responseStreamDescription | string, **optional** |
 | 30 | errors | TypeSchema, **optional**: the errors the method declares, as a `union` (section 8.3) with one case per error, named by its wire case name and carrying its fields (section 6.2). Present only for methods that declare errors. Case descriptions are documentation, like the description slots. |
 
-An unset optional slot is absent (its key is omitted). Readers skip unknown keys, per the evolution rule. A method may have any combination of the four parts (request, response, requestStream, responseStream). The five description slots (keys 2, 11, 13, 21, 23) are documentation only: discovery serves them, but they are **never** hashed into the fingerprint and never used in compatibility comparisons. A documentation edit is not schema drift.
+An unset optional slot is absent (its key is omitted). Readers skip unknown keys, per the evolution rule. A method may have any combination of the four parts (request, response, requestStream, responseStream). The five description slots (keys 2, 11, 13, 21, 23) and the deprecation (key 3) are documentation only: discovery serves them, but they are **never** hashed into the fingerprint and never used in compatibility comparisons. A documentation edit is not schema drift.
 
 `TypeDefinition` is an int-keyed struct: the definition that a `reference` (section 8.3) resolves to. Names are **nominal**: the qualified name (`journal.Priority`) is part of the contract and is hashed into the fingerprint (section 9.1), so renaming a type is a schema change. Servers check at startup that every reference in their registered schemas resolves.
 
@@ -481,6 +482,7 @@ An unset optional slot is absent (its key is omitted). Readers skip unknown keys
 | 1 | schema | TypeSchema: a `structure`, `enumeration`, or `union`, or a scalar kind for a **named scalar** (section 8.4) |
 | 2 | description | string, **optional**; documentation only |
 | 3 | constraints | Constraints (section 8.4), **optional**: the rules every value of a named scalar keeps. Part of the contract, and hashed (section 9.1) |
+| 4 | deprecation | string, **optional**: why the type is deprecated; documentation only |
 
 ### 8.2 `server.entity`
 
@@ -551,11 +553,13 @@ The VPTS **null** encoding (`0x00`) is never a value. Optionality uses MessagePa
 
 In **JSON projections** of wire values (discovery tooling, the CLI's parameter and output trees), the three kinds map to canonical ISO 8601 / RFC 3339 strings: `2026-07-21`, `2026-07-21T14:30:00.5`, `2026-07-21T14:30:00Z`. The fraction appears only when non-zero (1 to 9 digits, trailing zeros removed). `T` and `Z` are uppercase, and offset zero is `Z`. Parsers of this projection accept only two variations: lowercase `t`/`z`, and `±00:00` as an alias of `Z`. This string form never appears on the wire.
 
-A `structure` lists its fields in **declaration order** (the order in which the type's decoder requests them). `Field` is an int-keyed struct: key 0 = `key` (the field's integer wire key, or nil/absent for string-keyed fields), key 1 = `name` (string), key 2 = `type` (TypeSchema), key 3 = `description` (string, **optional**, documentation only), key 4 = `constraints` (Constraints, section 8.4, **optional**; part of the contract, and hashed).
+A `structure` lists its fields in **declaration order** (the order in which the type's decoder requests them). `Field` is an int-keyed struct: key 0 = `key` (the field's integer wire key, or nil/absent for string-keyed fields), key 1 = `name` (string), key 2 = `type` (TypeSchema), key 3 = `description` (string, **optional**, documentation only), key 4 = `constraints` (Constraints, section 8.4, **optional**; part of the contract, and hashed), key 5 = `defaultValue` (the bare value, **optional**; part of the contract, and hashed), key 6 = `deprecation` (string, **optional**, documentation only; possibly empty).
 
-An `enumeration` is a closed set of **string-valued** cases. The wire value of an enum-typed field is the case name as a MessagePack string (fixed decision). Renaming a case breaks the wire. Reordering does not, but it changes the fingerprint, like field order. Decoders MUST map an unrecognized value to a local fallback case instead of failing (the wire-enum rule of section 6.1). The fallback keeps the value, and a peer SHOULD write it back unchanged, so a value a later contract adds passes through an older peer. `EnumCase` is an int-keyed struct: key 0 = `name` (string, the wire value), key 1 = `description` (string, **optional**). Cases appear in declaration order.
+**Field defaults.** A field with a `defaultValue` has an `optional` type. The default is the value a reader fills in where the key is absent or holds `nil`. It is a value of the field's kind: a bool for `bool`, an integer for `int` and `uint` (not negative for `uint`), a floating number for `float` and `double`, a string for `string`, a case name for an `enumeration`, and for a reference to a named scalar, a value of its scalar. It keeps the field's or the type's constraints, a `float`'s as the 32-bit value a reader holds. Other kinds take no default. The value is written bare: a MessagePack bool, integer, float64 or string. An integer reads as an integer and any other number as a floating number, so a floating default is written as a float64 even when it is whole. A reader that cannot read a default skips it, as it skips an unknown key.
 
-A `union` is a closed set of **tagged** cases, each with its own fields. The wire value of a union-typed field is a MessagePack map: key 0 = the case name (string), key 1 = the case's fields as a structure value (integer-keyed like any structure). Key 1 is omitted when the case declares no fields. Renaming a case breaks the wire, as does any change to a case's fields that would break a structure. Decoders MUST map an unrecognized case name to a local fallback case instead of failing (the wire-enum rule of section 6.1), checking its fields as a skipped value is checked (sections 5.2 and 5.6). The fallback keeps the case name and the fields' exact bytes, and a peer SHOULD write them back unchanged: key 0 with the name and, when fields were present, key 1 with those bytes. `UnionCase` is an int-keyed struct: key 0 = `name` (string), key 1 = `fields` (array of Field, as in `structure`; empty for none), key 2 = `description` (string, **optional**). Cases appear in declaration order.
+An `enumeration` is a closed set of **string-valued** cases. The wire value of an enum-typed field is the case name as a MessagePack string (fixed decision). Renaming a case breaks the wire. Reordering does not, but it changes the fingerprint, like field order. Decoders MUST map an unrecognized value to a local fallback case instead of failing (the wire-enum rule of section 6.1). The fallback keeps the value, and a peer SHOULD write it back unchanged, so a value a later contract adds passes through an older peer. `EnumCase` is an int-keyed struct: key 0 = `name` (string, the wire value), key 1 = `description` (string, **optional**), key 2 = `deprecation` (string, **optional**, documentation only). Cases appear in declaration order.
+
+A `union` is a closed set of **tagged** cases, each with its own fields. The wire value of a union-typed field is a MessagePack map: key 0 = the case name (string), key 1 = the case's fields as a structure value (integer-keyed like any structure). Key 1 is omitted when the case declares no fields. Renaming a case breaks the wire, as does any change to a case's fields that would break a structure. Decoders MUST map an unrecognized case name to a local fallback case instead of failing (the wire-enum rule of section 6.1), checking its fields as a skipped value is checked (sections 5.2 and 5.6). The fallback keeps the case name and the fields' exact bytes, and a peer SHOULD write them back unchanged: key 0 with the name and, when fields were present, key 1 with those bytes. `UnionCase` is an int-keyed struct: key 0 = `name` (string), key 1 = `fields` (array of Field, as in `structure`; empty for none), key 2 = `description` (string, **optional**), key 3 = `deprecation` (string, **optional**, documentation only). Cases appear in declaration order.
 
 A `reference` names a `TypeDefinition` (section 8.1) served with the method list. Discovery responses are self-contained (every reference resolves within the response).
 
@@ -618,7 +622,7 @@ A path joins field names and map keys with `.`, writes an array element as `[ind
 
 The 8-byte fingerprint in the hello is a stable, cross-platform hash of the server's method set **and named-type table**. The set includes the builtins `server.schema` and `server.entity` (section 8), fingerprinted like any application method (canonical signatures in section 9.5). Independent implementations MUST compute identical values for the same set of method signatures and type definitions. The fingerprint is **FNV-1a 64** over a canonical byte encoding of the sorted signatures, followed by the sorted type definitions.
 
-**Descriptions are never hashed.** The canonical encoding includes none of: the five signature description slots (keys 2, 11, 13, 21, 23), field descriptions (Field key 3), enum-case and union-case descriptions (declared errors' included), or definition descriptions. Documentation edits never change the fingerprint.
+**Descriptions and deprecations are never hashed.** The canonical encoding includes none of: the five signature description slots (keys 2, 11, 13, 21, 23), field descriptions (Field key 3), enum-case and union-case descriptions (declared errors' included), definition descriptions, or any deprecation (MethodSignature key 3, Field key 6, EnumCase key 2, UnionCase key 3, TypeDefinition key 4). Documentation edits never change the fingerprint.
 
 ### 9.1 Canonical encoding
 
@@ -632,7 +636,7 @@ A simple tagged, length-prefixed byte encoding, intentionally **not** MessagePac
 
 - `optional` (7), `array` (8): the child schema.
 - `map` (9): the key schema, then the value schema.
-- `structure` (10): `u32 LE` field count, then for each field, in declaration order: `u8` flags (bit 0 set if the field has an integer key, bit 1 set if it declares constraints), `i64 LE` key when present, the field name (string), the field schema, then the field's **constraints** when flagged.
+- `structure` (10): `u32 LE` field count, then for each field, in declaration order: `u8` flags (bit 0 set if the field has an integer key, bit 1 set if it declares constraints, bit 2 set if it declares a default), `i64 LE` key when present, the field name (string), the field schema, then the field's **constraints** when flagged, then its **default** when flagged.
 - `enumeration` (11): `u32 LE` case count, then for each case, in declaration order: the case name (string).
 - `reference` (12): the qualified type name (string).
 - `union` (16): `u32 LE` case count, then for each case, in declaration order: the case name (string), then its fields encoded exactly as a `structure`'s payload (count, then each field).
@@ -641,6 +645,8 @@ A simple tagged, length-prefixed byte encoding, intentionally **not** MessagePac
 **type definition** := `u8` tag `3` ‖ the qualified name (string) ‖ the definition's schema; or, for a definition that declares constraints, `u8` tag `5` ‖ the qualified name (string) ‖ the definition's schema ‖ its **constraints**. Type-definition entries follow the signature stream (see 9.2). An empty type table emits nothing, so a fingerprint without types keeps its value from before types were added.
 
 **constraints** := `u8` flags for the rules present (bit 0 minimum, bit 1 maximum, bit 2 minimumLength, bit 3 maximumLength, bit 4 pattern), then each present rule in that order: a bound as `u8` `0` then `i64 LE` for an integer, or `u8` `1` then the IEEE 754 `f64` bit pattern `LE` for a floating bound; a length as `i64 LE`; the pattern as a string. Constraints without any rule are no constraints. A field or definition without constraints encodes exactly as it did before constraints were added (flags bit 1 clear, tag 3), so every unconstrained fingerprint keeps its value.
+
+**default** := `u8` kind (`0` bool, `1` integer, `2` floating, `3` string), then the value: a bool as `u8` `0` or `1`; an integer as `i64 LE`; a floating number as the IEEE 754 `f64` bit pattern `LE`; a string as a string. A field without a default encodes exactly as it did before defaults were added (flags bit 2 clear), so every fingerprint without defaults keeps its value.
 
 ### 9.2 Sorting and hashing
 
@@ -705,6 +711,11 @@ Pinned fingerprint for a **constrained** set, which tests field constraints (fla
 - Signature: `shelf.put`, access write (2), request `structure[{0, "slug", reference("shelf.Slug")}, {1, "limit", optional(int), minimum 1 (integer), maximum 1000 (integer)}, {2, "ratio", double, minimum 0.0 (floating), maximum 1.0 (floating)}]`, response `structure[]`.
 - Type definition: `shelf.Slug` = `string`, minimumLength 1, maximumLength 8, pattern `[a-z0-9-]+`.
 
+Pinned fingerprint for a **defaulted** set, which tests field defaults of each kind (flags bit 2), a default after constraints, and a default on a reference (verified independently against a model written from section 9.1): the set below MUST fingerprint to **`0xa46a57e6975801ba`**.
+
+- Signature: `shelf.list`, access read (4), request `structure[{0, "limit", optional(int), minimum 1 (integer), maximum 100 (integer), default 50 (integer)}, {1, "ratio", optional(double), default 0.5 (floating)}, {2, "on", optional(bool), default true}, {3, "shelf", optional(reference("shelf.Shelf")), default "top" (string)}]`, response `structure[{0, "count", uint}]`.
+- Type definition: `shelf.Shelf` = `enumeration["top", "attic"]`.
+
 ### 9.5 Builtin canonical signatures
 
 The builtins (section 8) are in the fingerprinted set, so a real server's fingerprint can be reproduced only with their exact canonical signatures, given here.
@@ -713,8 +724,8 @@ The builtins (section 8) are in the fingerprinted set, so a real server's finger
 
 `server.schema`: name `server.schema`, access read (4), request `structure[]` (empty, the same as the `server.entity` request, because targets are in the envelope), response `structure[{0, "fingerprint", uint}, {1, "methods", array(MethodSignature)}, {2, "types", optional(array(TypeDefinition))}, {3, "namespaces", optional(array(NamespaceSignature))}]`.
 
-- `MethodSignature` hashes as `structure[{0, "name", string}, {1, "access", uint}, {2, "description", optional(string)}, {10, "request", TypeSchema}, {11, "requestDescription", optional(string)}, {12, "requestStream", optional(TypeSchema)}, {13, "requestStreamDescription", optional(string)}, {20, "response", TypeSchema}, {21, "responseDescription", optional(string)}, {22, "responseStream", optional(TypeSchema)}, {23, "responseStreamDescription", optional(string)}, {30, "errors", optional(TypeSchema)}]`. In the *type*, the stream, description, and errors slots are always-present optional fields. In the wire encoding of a concrete signature, an absent slot omits its key.
-- `TypeDefinition` hashes as `structure[{0, "name", string}, {1, "schema", TypeSchema}, {2, "description", optional(string)}, {3, "constraints", optional(Constraints)}]`.
+- `MethodSignature` hashes as `structure[{0, "name", string}, {1, "access", uint}, {2, "description", optional(string)}, {3, "deprecation", optional(string)}, {10, "request", TypeSchema}, {11, "requestDescription", optional(string)}, {12, "requestStream", optional(TypeSchema)}, {13, "requestStreamDescription", optional(string)}, {20, "response", TypeSchema}, {21, "responseDescription", optional(string)}, {22, "responseStream", optional(TypeSchema)}, {23, "responseStreamDescription", optional(string)}, {30, "errors", optional(TypeSchema)}]`. In the *type*, the stream, description, deprecation, and errors slots are always-present optional fields. In the wire encoding of a concrete signature, an absent slot omits its key.
+- `TypeDefinition` hashes as `structure[{0, "name", string}, {1, "schema", TypeSchema}, {2, "description", optional(string)}, {3, "constraints", optional(Constraints)}, {4, "deprecation", optional(string)}]`.
 - `Constraints` hashes as `structure[{0, "minimum", optional(unknown)}, {1, "maximum", optional(unknown)}, {2, "minimumLength", optional(int)}, {3, "maximumLength", optional(int)}, {4, "pattern", optional(string)}]`. A bound is `unknown` because it is an integer or a floating number, whichever the value is.
 - `NamespaceSignature` hashes as `structure[{0, "name", string}, {1, "description", string}]`.
 - A `TypeSchema`-typed field uses the pinned schema `structure[{0, "tag", uint}, {1, "first", unknown}, {2, "second", unknown}]`. The payload slots are `unknown` (tag 255) because their shape depends on the tag, which a static schema cannot express.
@@ -850,3 +861,4 @@ Non-canonical decode-only vectors: `cc05` → 5, `d30000000000000005` → 5, `d9
 | three-signature set of §9.4 | `0x401118443279fc06` |
 | declared-errors set of §9.4 | `0xafdf97619cbd5f59` |
 | constrained set of §9.4 | `0x5cfed00a36d1f62b` |
+| defaulted set of §9.4 | `0xa46a57e6975801ba` |
