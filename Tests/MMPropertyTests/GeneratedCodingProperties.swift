@@ -93,10 +93,13 @@
         return deepEnough
     }
 
-    /// Any nesting limit, often one below, at or above `depth`.
+    /// Any nesting limit, often one below, at or above `depth`, and often
+    /// anywhere below it, so a share of cases fails however deep the drawn
+    /// values nest.
     func nestingLimits(around depth: Int) -> Gen<Int> {
         .oneOf(
             .element(of: [depth - 1, depth, depth + 1]),
+            .int(in: 0...max(0, depth - 1)),
             .int(in: 0...128),
             .int()
         )

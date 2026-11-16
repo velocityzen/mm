@@ -498,7 +498,8 @@ public enum EnumCasesBuilder: MMListBuilding {
 ///
 /// The wire value is the case name; renaming a case is a wire break,
 /// reordering is not (though it changes the fingerprint, like field order).
-/// Decoders map unrecognized values to their local `unknown` case.
+/// Decoders map unrecognized values to their local `unknown` case, which
+/// keeps the value so it encodes back unchanged.
 public func Enum(
     _ name: String,
     description: String? = nil,
@@ -568,7 +569,8 @@ public enum UnionCasesBuilder: MMListBuilding {
 /// On the wire a value is `{0: "<case>", 1: {<the case's fields>}}`, key 1
 /// left out for a field-less case. Renaming a case is a wire break,
 /// reordering is not (though it changes the fingerprint, like field order).
-/// Decoders map unrecognized case names to their local `unknown` case.
+/// Decoders map unrecognized case names to their local `unknown` case,
+/// which keeps the name and the fields' bytes so it encodes back unchanged.
 public func Union(
     _ name: String,
     description: String? = nil,

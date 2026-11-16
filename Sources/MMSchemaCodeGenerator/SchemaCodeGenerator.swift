@@ -33,8 +33,8 @@ package enum SchemaCodeGenerator {
     ///   field descriptions and named-type references reach discovery (the
     ///   call's target entity is envelope metadata, never a payload field),
     /// - one Swift type per `Enum` / `Type` declaration (`String`-raw enums
-    ///   with a generated `unknown` case; structs), self-described as their
-    ///   qualified `.reference`,
+    ///   with a generated `unknown(String)` case keeping an undeclared value;
+    ///   structs), self-described as their qualified `.reference`,
     /// - the typed descriptor per call (`Method` / `ServerStreamMethod` /
     ///   `ClientStreamMethod` / `BidirectionalStreamMethod`), carrying the
     ///   declared documentation,
@@ -160,8 +160,8 @@ package enum SchemaCodeGenerator {
         guard contract.cliMode.enabled else { return nil }
         try validateCLI(calls: contract.calls, argumentTypeNames: argumentTypeNames(in: contract))
         let members = generateCommands(for: contract, enclosingType: enclosingType)
-        // MMCLIEnumArgument hides the `unknown` fallback from help and
-        // refuses it as input.
+        // MMCLIEnumArgument takes only the declared values: `unknown` is
+        // never in help, and no input decodes to it.
         let topLevel = contract.types.compactMap { type -> String? in
             switch type.payload {
                 case .enumeration:
@@ -2101,7 +2101,8 @@ private func mmPackReadReachesDecodable(_ type: ParsedType) -> Bool {
 }
 
 /// The members giving a generated enum its MessagePack code: its raw value as
-/// a string, decoding unrecognized values to `unknown`, as its `Codable` does.
+/// a string, decoding unrecognized values to `unknown` with the value, as its
+/// `Codable` does.
 private func mmPackEnumMembers(_ name: String) -> [String] {
     [
         "public func encode<Writer: MMPackWriter>(mmPack writer: inout Writer) throws {",
@@ -2109,7 +2110,7 @@ private func mmPackEnumMembers(_ name: String) -> [String] {
         "}",
         "public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {",
         "    let raw = try reader.readString()",
-        "    self = \(name)(rawValue: raw) ?? .unknown",
+        "    self = \(name)(rawValue: raw) ?? .unknown(raw)",
         "}",
     ]
 }
@@ -2201,7 +2202,7 @@ private func generateNamedType(
         case .enumeration(let cases):
             var lines: [String] = []
             lines.append(
-                "public enum \(type.name): String, Codable, Sendable, CaseIterable, SchemaDescribable, MMPackCodable, MMConstraintValidating {"
+                "public enum \(type.name): RawRepresentable, Codable, Hashable, Sendable, CaseIterable, SchemaDescribable, MMPackCodable, MMConstraintValidating {"
             )
             for enumCase in cases {
                 if let description = enumCase.description {
@@ -2209,11 +2210,56 @@ private func generateNamedType(
                 }
                 lines.append("    case `\(enumCase.name)`")
             }
-            lines.append("    /// Unrecognized wire values decode here (house wire-enum rule).")
-            lines.append("    case unknown")
+            lines.append(
+                "    /// A wire value this contract does not declare, kept so it encodes back unchanged"
+            )
+            lines.append("    /// (house wire-enum rule).")
+            lines.append("    case unknown(String)")
+            lines.append("    /// The declared case named `rawValue`; nil for any other value.")
+            lines.append("    public init?(rawValue: String) {")
+            lines.append("        switch rawValue {")
+            for enumCase in cases {
+                lines.append(
+                    "            case \(quoted(enumCase.name)): self = .`\(enumCase.name)`"
+                )
+            }
+            lines.append("            default: return nil")
+            lines.append("        }")
+            lines.append("    }")
+            lines.append(
+                "    /// The wire value: a declared case's name, or the value `unknown` keeps."
+            )
+            lines.append("    public var rawValue: String {")
+            lines.append("        switch self {")
+            for enumCase in cases {
+                lines.append("            case .`\(enumCase.name)`: \(quoted(enumCase.name))")
+            }
+            lines.append("            case .unknown(let raw): raw")
+            lines.append("        }")
+            lines.append("    }")
+            lines.append(
+                "    /// Equal when they write the same wire value, so a map never holds two keys that"
+            )
+            lines.append(
+                "    /// write the same text: an `unknown` holding a declared case's name equals that case."
+            )
+            lines.append("    public static func == (lhs: Self, rhs: Self) -> Bool {")
+            lines.append("        lhs.rawValue == rhs.rawValue")
+            lines.append("    }")
+            lines.append("    public func hash(into hasher: inout Hasher) {")
+            lines.append("        hasher.combine(self.rawValue)")
+            lines.append("    }")
+            lines.append("    /// The declared cases, in declaration order.")
+            lines.append("    public static var allCases: [\(type.name)] {")
+            lines.append("        [\(cases.map { ".`\($0.name)`" }.joined(separator: ", "))]")
+            lines.append("    }")
             lines.append("    public init(from decoder: any Decoder) throws {")
             lines.append("        let raw = try decoder.singleValueContainer().decode(String.self)")
-            lines.append("        self = \(type.name)(rawValue: raw) ?? .unknown")
+            lines.append("        self = \(type.name)(rawValue: raw) ?? .unknown(raw)")
+            lines.append("    }")
+            lines.append("    public func encode(to encoder: any Encoder) throws {")
+            lines.append("        var container = encoder.singleValueContainer()")
+            lines.append("        try container.encode(self.rawValue)")
             lines.append("    }")
             lines.append(contentsOf: mmPackEnumMembers(type.name).map { "    \($0)" })
             lines.append(contentsOf: constraintViolationFunction([]).map { "    \($0)" })
@@ -2230,9 +2276,10 @@ private func generateNamedType(
 }
 
 /// A `Union` as a Swift enum with one case per declared case — its fields as
-/// labeled associated values — plus the `unknown` fallback. Its `Codable`
-/// writes the wire map (key 0 the case name, key 1 the case's fields, left
-/// out for a case with none) and its MessagePack code writes the same bytes.
+/// labeled associated values — plus the `unknown` fallback, which keeps an
+/// undeclared case's name and its fields' bytes. Its `Codable` writes the wire
+/// map (key 0 the case name, key 1 the case's fields, left out for a case with
+/// none) and its MessagePack code writes the same bytes.
 private func generateUnion(
     _ name: String,
     cases: [ParsedUnionCase],
@@ -2255,8 +2302,14 @@ private func generateUnion(
         let payload = values.isEmpty ? "" : "(\(values.joined(separator: ", ")))"
         lines.append("    case `\(unionCase.name)`\(payload)")
     }
-    lines.append("    /// Unrecognized wire case names decode here (house wire-enum rule).")
-    lines.append("    case unknown")
+    lines.append(
+        "    /// A case this contract does not declare: its name, and its fields' bytes as they"
+    )
+    lines.append(
+        "    /// arrived, nil when it came without any. It encodes back unchanged (house"
+    )
+    lines.append("    /// wire-enum rule).")
+    lines.append("    case unknown(tag: String, fields: MMPackRawValue?)")
     lines.append("    public static var schema: TypeSchema {")
     lines.append("        .reference(\(quoted(qualified)))")
     lines.append("    }")
@@ -2303,8 +2356,13 @@ private func generateUnion(
         lines.append(values.map { "                    \($0)" }.joined(separator: ",\n"))
         lines.append("                )")
     }
-    lines.append("            default:")
-    lines.append("                self = .unknown")
+    // A coder other than MessagePack's reads the fields as base64 text; any
+    // other value there is dropped, so an undeclared case never fails.
+    lines.append("            case let tag:")
+    lines.append(
+        "                let fields = container.contains(.fields) ? try? container.decode(MMPackRawValue.self, forKey: .fields) : nil"
+    )
+    lines.append("                self = .unknown(tag: tag, fields: fields)")
     lines.append("        }")
     lines.append("    }")
     lines.append("    public func encode(to encoder: any Encoder) throws {")
@@ -2322,8 +2380,9 @@ private func generateUnion(
             lines.append("                try fields.\(method)(field\(index), forKey: .\(field.name))")
         }
     }
-    lines.append("            case .unknown:")
-    lines.append("                try container.encode(\"unknown\", forKey: .`case`)")
+    lines.append("            case .unknown(let tag, let fields):")
+    lines.append("                try container.encode(tag, forKey: .`case`)")
+    lines.append("                try container.encodeIfPresent(fields, forKey: .fields)")
     lines.append("        }")
     lines.append("    }")
     lines.append(contentsOf: mmPackUnionMembers(keyedCases).map { "    \($0)" })
@@ -2362,10 +2421,14 @@ private func mmPackUnionMembers(
             contentsOf: mmPackEncodeFieldMap(keyed) { index, _ in "field\(index)" }
                 .map { "            \($0)" })
     }
-    lines.append("        case .unknown:")
-    lines.append("            writer.writeMapHeader(count: 1)")
+    lines.append("        case .unknown(let tag, let fields):")
+    lines.append("            writer.writeMapHeader(count: fields == nil ? 1 : 2)")
     lines.append("            writer.writeInt(0)")
-    lines.append("            writer.writeString(\"unknown\")")
+    lines.append("            writer.writeString(tag)")
+    lines.append("            if let fields {")
+    lines.append("                writer.writeInt(1)")
+    lines.append("                writer.writeRawValue(fields)")
+    lines.append("            }")
     lines.append("    }")
     lines.append("}")
     lines.append(
@@ -2402,8 +2465,13 @@ private func mmPackUnionMembers(
             "            self = try reader.readField(CodingKeys.fields) { reader in try Self.mmPack\(capitalizedFirst(unionCase.name))(&reader, depth: depth + 1) }"
         )
     }
-    lines.append("        default:")
-    lines.append("            self = .unknown")
+    lines.append("        case let tag:")
+    lines.append("            var fields: MMPackRawValue?")
+    lines.append("            if let position = fieldsAtKey ?? fieldsAtName {")
+    lines.append("                reader.seek(to: position)")
+    lines.append("                fields = try reader.readRawValue(depth: depth + 1)")
+    lines.append("            }")
+    lines.append("            self = .unknown(tag: tag, fields: fields)")
     lines.append("    }")
     lines.append("    reader.seek(to: end)")
     lines.append("}")

@@ -214,15 +214,19 @@ struct SchemaMacroTypesTests {
         #expect(breaks == [])
     }
 
-    @Test("the generated enum decodes case names and falls back to unknown")
+    @Test("the generated enum decodes case names and keeps an unrecognized value in unknown")
     func enumBehavior() throws {
         #expect(Shop.Size(rawValue: "small") == .small)
+        #expect(Shop.Size(rawValue: "xxl") == nil)
         let decoded = try JSONDecoder().decode(Shop.Size.self, from: Data("\"large\"".utf8))
         #expect(decoded == .large)
         let unrecognized = try JSONDecoder().decode(Shop.Size.self, from: Data("\"xxl\"".utf8))
-        #expect(unrecognized == .unknown)
+        #expect(unrecognized == .unknown("xxl"))
+        #expect(unrecognized.rawValue == "xxl")
         let encoded = try JSONEncoder().encode(Shop.Size.small)
         #expect(String(decoding: encoded, as: UTF8.self) == "\"small\"")
+        let reencoded = try JSONEncoder().encode(unrecognized)
+        #expect(String(decoding: reencoded, as: UTF8.self) == "\"xxl\"")
     }
 
     @Test("generated named types self-describe as their qualified reference")

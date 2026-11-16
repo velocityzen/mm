@@ -50,7 +50,8 @@ import MMSchema
 public enum Echo: MethodNamespace {
     #schema("echo", description: "Echoes values back, loudly on request.") {
         // Named types are part of the contract: string-valued wire enums
-        // (with a generated `unknown` fallback case) and referenceable
+        // (with a generated `unknown` case that keeps any value the
+        // contract does not declare) and referenceable
         // structs. Descriptions are served by discovery. The contract
         // documents itself. Descriptions never affect compatibility.
         Enum("Mode", description: "How the echo responds") {
@@ -538,4 +539,4 @@ swift package --package-path Benchmarks benchmark baseline compare main
 
 ## Versioning
 
-The wire protocol version is a single `u8`, currently **1**, independent of the package version. Packages follow semantic versioning. The protocol version changes only on wire-level breaks. Hello negotiation picks the lower version. A fingerprint mismatch triggers discovery, never a disconnect. Schemas evolve without version bumps: payloads are int-keyed maps, unknown keys are skipped, and new fields must be optional.
+The wire protocol version is a single `u8`, currently **1**, independent of the package version. Packages follow semantic versioning. The protocol version changes only on wire-level breaks. Hello negotiation picks the lower version. A fingerprint mismatch triggers discovery, never a disconnect. Schemas evolve without version bumps: payloads are int-keyed maps, unknown keys are skipped, new fields must be optional, and an enum value or union case a peer does not declare is kept and written back unchanged.

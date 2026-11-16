@@ -96,10 +96,12 @@ public macro schema(
 ///
 /// Generated members:
 /// - One Swift type per declaration — `Enum` becomes a `String`-raw enum with
-///   a generated `unknown` case (unrecognized wire values decode to it; the
-///   house wire-enum rule), `Type` becomes a struct like `#schema`'s, and
-///   `Union` becomes an enum with one case per declared `Case`, its fields as
-///   labeled associated values, plus `unknown` — all
+///   a generated `unknown(String)` case (an unrecognized wire value decodes
+///   to it and encodes back unchanged; the house wire-enum rule), `Type`
+///   becomes a struct like `#schema`'s, and `Union` becomes an enum with one
+///   case per declared `Case`, its fields as labeled associated values, plus
+///   `unknown(tag:fields:)`, keeping an unrecognized case's name and its
+///   fields' bytes — all
 ///   `SchemaDescribable` as `.reference("<namespace>.<Name>")`, which is how
 ///   other schemas' fields carry the reference
 ///   (`Field("meta", CommonTypes.LineMeta.self)`).

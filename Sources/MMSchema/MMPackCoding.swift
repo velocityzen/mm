@@ -22,6 +22,8 @@ public protocol MMPackWriter {
     mutating func writeArrayHeader(count: Int)
     /// Writes the smallest map header for `count`; the caller writes the entries.
     mutating func writeMapHeader(count: Int)
+    /// Writes the value's bytes as they are.
+    mutating func writeRawValue(_ value: MMPackRawValue)
     /// Writes `value` through its `Encodable` conformance: the path for the
     /// types the macros generate no code for (maps and external types).
     mutating func writeEncodable<Value: Encodable>(_ value: Value) throws
@@ -64,6 +66,9 @@ public protocol MMPackReader {
     mutating func readMapKey(depth: Int) throws -> MMPackMapKey
     /// Steps over one value, checking its structure and nesting.
     mutating func skipValue(depth: Int) throws
+    /// Steps over one value as ``skipValue(depth:)`` does, and returns its
+    /// bytes.
+    mutating func readRawValue(depth: Int) throws -> MMPackRawValue
     /// Reads `type` through its `Decodable` conformance: the path for the
     /// types the macros generate no code for (maps and external types).
     mutating func readDecodable<Value: Decodable>(_ type: Value.Type, depth: Int) throws -> Value

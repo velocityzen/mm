@@ -20,8 +20,8 @@ The `Call` part functions (`Access`, `Request`, `Response`, `RequestStream`, `Re
 The `#schema` macro (see ``schema(_:description:_:)``) takes the same declaration at compile time. It generates:
 
 - integer-keyed request, response, and element structs
-- string-valued wire enums with an `unknown` fallback
-- tagged unions (`Union`, whose `Case`s carry their own fields), also with an `unknown` fallback
+- string-valued wire enums with an `unknown(String)` fallback that keeps an undeclared value
+- tagged unions (`Union`, whose `Case`s carry their own fields), with an `unknown(tag:fields:)` fallback that keeps an undeclared case's name and its fields' bytes (``MMPackRawValue``)
 - the typed descriptors, `all`, and `types`
 - the re-emitted contract
 
@@ -191,6 +191,7 @@ Every server also serves the ``Builtins``:
 ### Bytes
 
 - ``MMBytes``
+- ``MMPackRawValue``
 
 ### Time
 

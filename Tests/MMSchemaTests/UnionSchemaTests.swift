@@ -160,11 +160,17 @@ struct UnionSchemaTests {
         #expect(blobJSON == #"{"case":"blob","fields":{"data":"AP8=","meta":{"mime":"a\/b"}}}"#)
         #expect(try JSONDecoder().decode(Post.Event.self, from: Data(blobJSON.utf8)) == blob)
 
+        // JSON carries an undeclared case's fields as the base64 of their
+        // MessagePack bytes; fields in any other form are dropped.
         let future = try JSONDecoder().decode(
             Post.Event.self,
             from: Data(#"{"case":"edited","fields":{"x":1}}"#.utf8)
         )
-        #expect(future == .unknown)
+        #expect(future == .unknown(tag: "edited", fields: nil))
+        let kept = Post.Event.unknown(tag: "edited", fields: MMPackRawValue([0x81, 0x00, 0x01]))
+        let keptJSON = String(decoding: try sortedJSON(kept), as: UTF8.self)
+        #expect(keptJSON == #"{"case":"edited","fields":"gQAB"}"#)
+        #expect(try JSONDecoder().decode(Post.Event.self, from: Data(keptJSON.utf8)) == kept)
     }
 
     @Test("a union schema round-trips through its own wire encoding, descriptions included")

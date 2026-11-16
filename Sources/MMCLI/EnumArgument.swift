@@ -6,9 +6,10 @@ import MMSchema
 /// command needs to accept the enum as an argument.
 ///
 /// Generated wire enums are `String`-raw (case name = wire value) and carry
-/// an `unknown` fallback case for forward compatibility. That case is a
-/// decoding artifact, never a value a caller may send, so this protocol's
-/// defaults hide it from help/completions and refuse it as input.
+/// an `unknown(String)` fallback for values their contract does not declare.
+/// It is never in `allCases`, and `init(rawValue:)` returns nil for any value
+/// but a declared case's, so help and completions list the declared cases and
+/// the command line takes only those.
 /// The calendar/clock kinds as typed command arguments: parsed by the value
 /// types' own strict ISO parsers, so a generated `Field("day", .date)`
 /// becomes a plain `--day 2026-07-21` option.
@@ -43,16 +44,13 @@ public protocol MMCLIEnumArgument: ExpressibleByArgument, RawRepresentable, Case
 where RawValue == String {}
 
 extension MMCLIEnumArgument {
-    /// Every case except the `unknown` fallback — what help text and shell
-    /// completions list.
+    /// The declared cases — what help text and shell completions list.
     public static var allValueStrings: [String] {
-        Self.allCases.map(\.rawValue).filter { $0 != "unknown" }
+        Self.allCases.map(\.rawValue)
     }
 
-    /// Parses via `init(rawValue:)`, refusing the `unknown` fallback so it
-    /// cannot be smuggled onto the wire from the command line.
+    /// Parses via `init(rawValue:)`, which takes only a declared case's name.
     public init?(argument: String) {
-        guard argument != "unknown" else { return nil }
         self.init(rawValue: argument)
     }
 }

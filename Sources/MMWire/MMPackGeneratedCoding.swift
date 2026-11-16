@@ -250,6 +250,11 @@ struct MPGeneratedWriter: MMPackWriter {
     }
 
     @usableFromInline
+    mutating func writeRawValue(_ value: MMPackRawValue) {
+        self.buffer.writeBytes(value.bytes)
+    }
+
+    @usableFromInline
     mutating func writeEncodable<Value: Encodable>(_ value: Value) throws {
         try MMPackEncoder().encode(value, into: &self.buffer).get()
     }
@@ -361,6 +366,11 @@ struct MPGeneratedReader: MMPackReader {
     @usableFromInline
     mutating func skipValue(depth: Int) throws {
         try self.buffer.skipMessagePackValue(currentDepth: depth, cap: self.cap).get()
+    }
+
+    @usableFromInline
+    mutating func readRawValue(depth: Int) throws -> MMPackRawValue {
+        try mpReadRawValue(from: &self.buffer, depth: depth, cap: self.cap)
     }
 
     /// Decodes from the value's exact slice, as a keyed container hands one

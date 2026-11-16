@@ -751,7 +751,7 @@ struct DynamicUnionTests {
             ),
             (Feed.TailRequest(from: .live, token: []), #"{"from":{"case":"live"},"token":""}"#),
             (
-                Feed.TailRequest(from: .unknown, token: []),
+                Feed.TailRequest(from: .unknown(tag: "unknown", fields: nil), token: []),
                 #"{"from":{"case":"unknown"},"token":""}"#
             ),
         ] {

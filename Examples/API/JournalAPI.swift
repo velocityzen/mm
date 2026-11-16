@@ -27,7 +27,8 @@ import MMSchema
 /// the payload), and stream elements are plain values.
 /// Named types (`Enum`/`Type`) are part of the contract too: `Priority` is a
 /// string-valued wire enum (the generated Swift enum gains an `unknown` case
-/// for unrecognized values), `LineMeta` a named struct other fields reference.
+/// that keeps an unrecognized value), `LineMeta` a named struct other fields
+/// reference.
 /// `Alias("Author")` names a scalar: a string on the wire, with rules every
 /// value keeps. Those rules, and a field's own `constraints:` (`line` holds
 /// at most 4096 Unicode scalars), are part of the contract: the daemon refuses

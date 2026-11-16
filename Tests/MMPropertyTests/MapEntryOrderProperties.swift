@@ -116,18 +116,18 @@
         return .success(dictionary)
     }
 
-    /// A `[Catalog.Condition: Int]` decoded from the entries one at a time,
-    /// in wire order: a key that fails to decode fails the map, a key that
-    /// decodes to one already read keeps the first value without reading
-    /// its own, and then the first value that fails to decode fails it.
-    func expectedConditionKeyedMap(
+    /// A `[Key: Int]` decoded from the entries one at a time, in wire order:
+    /// a key that fails to decode fails the map, a key that decodes to one
+    /// already read keeps the first value without reading its own, and then
+    /// the first value that fails to decode fails it.
+    func expectedValueKeyedMap<Key: Decodable & Hashable>(
+        _ type: Key.Type,
         _ entries: [WireMapEntry]
-    ) -> Result<[Catalog.Condition: Int], MMWireError> {
-        var dictionary: [Catalog.Condition: Int] = [:]
+    ) -> Result<[Key: Int], MMWireError> {
+        var dictionary: [Key: Int] = [:]
         for entry in firstOccurrences(entries) {
-            let key: Catalog.Condition
-            switch MMPackDecoder().decode(Catalog.Condition.self, from: wireBytes(entry.key.write))
-            {
+            let key: Key
+            switch MMPackDecoder().decode(Key.self, from: wireBytes(entry.key.write)) {
                 case .failure(let error): return .failure(error)
                 case .success(let decoded): key = decoded
             }
@@ -183,8 +183,44 @@
         )
     }
 
+    /// A map key that reads text without regard to letter case, so that
+    /// different wire keys decode to the same key, as a generated enum's
+    /// keys no longer do.
+    struct CaseFoldedKey: RawRepresentable, Codable, Hashable, Sendable {
+        let rawValue: String
+
+        init(rawValue: String) {
+            self.rawValue = rawValue.lowercased()
+        }
+
+        init(from decoder: any Decoder) throws {
+            self.init(rawValue: try decoder.singleValueContainer().decode(String.self))
+        }
+
+        func encode(to encoder: any Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(self.rawValue)
+        }
+    }
+
+    /// Keys for a `[CaseFoldedKey: Int]`: text in more than one letter case,
+    /// and with `integerKeys` integers, which it refuses.
+    func caseFoldedKeys(keySpace: Int, integerKeys: Bool) -> Gen<WireMapKey> {
+        let index = Gen<Int>.int(in: 0..<keySpace)
+        let text = Gen<WireMapKey>.oneOf(
+            Gen<String>.element(of: ["new", "New", "NEW", "used", "Used"]).map {
+                WireMapKey.text($0)
+            },
+            index.map { WireMapKey.text("k\($0)") },
+            index.map { WireMapKey.text("K\($0)") },
+            Gen<String>.string(count: 0...8).map { WireMapKey.text($0) }
+        )
+        guard integerKeys else { return text }
+        return .oneOf(text, text, index.map { WireMapKey.integer(Int64($0)) })
+    }
+
     /// Keys for a `[Catalog.Condition: Int]`: the cases' names and other
-    /// text, which the generated enum reads as `unknown`, and with
+    /// text, which the generated enum keeps in `unknown`, and with
     /// `integerKeys` integers, which it refuses.
     func conditionKeys(keySpace: Int, integerKeys: Bool) -> Gen<WireMapKey> {
         let index = Gen<Int>.int(in: 0..<keySpace)
@@ -287,10 +323,11 @@
         }
 
         /// Decoding a wire map into a dictionary whose keys decode as values
-        /// (here a generated enum, which reads unknown text as `unknown`)
-        /// reads its keys in wire order, whatever its size: the first key or
-        /// value that fails to decode fails it, and keys that decode to the
-        /// same key keep the value of the first one read.
+        /// (a generated enum, which keeps text it does not declare in
+        /// `unknown`, or a key that ignores letter case) reads its keys in
+        /// wire order, whatever its size: the first key or value that fails
+        /// to decode fails it, and keys that decode to the same key keep the
+        /// value of the first one read.
         @Test
         func valueKeyedMapsReadTheirEntriesInWireOrder() throws {
             try property(
@@ -303,40 +340,49 @@
                     "a key that fails": 1_000, "a map the decoder searches in order": 1_000,
                     "a repeated key whose later value fails": 1_000,
                     "failed with numberOutOfRange": 1_000, "failed with typeMismatch": 1_000,
+                    "generated enum keys": 1_000,
                 ]
             ) { tc in
                 let keySpace = try #draw(wireMapKeySpaces, from: tc)
                 let integerKeys = try #draw(.bool(probability: 0.25), from: tc)
                 let badValues = try #draw(.bool(probability: 0.6), from: tc)
+                let caseFolded = try #draw(.bool(probability: 0.7), from: tc)
                 let count = try #draw(wireMapEntryCounts, from: tc)
+                let keys =
+                    caseFolded
+                    ? caseFoldedKeys(keySpace: keySpace, integerKeys: integerKeys)
+                    : conditionKeys(keySpace: keySpace, integerKeys: integerKeys)
                 let entries = try #draw(
                     .array(
-                        of: Hegel.zip(
-                            conditionKeys(keySpace: keySpace, integerKeys: integerKeys),
-                            wireMapValues(badValues: badValues)
-                        )
-                        .map { WireMapEntry(key: $0.0, value: $0.1) },
+                        of: Hegel.zip(keys, wireMapValues(badValues: badValues))
+                            .map { WireMapEntry(key: $0.0, value: $0.1) },
                         count: count...count
                     ),
                     from: tc
                 )
                 try recordMapEvents(entries, in: tc)
-                let keys = firstOccurrences(entries).map {
-                    MMPackDecoder().decode(Catalog.Condition.self, from: wireBytes($0.key.write))
+
+                func check<Key: Decodable & Hashable>(_ type: Key.Type) throws {
+                    let keys = firstOccurrences(entries).map {
+                        MMPackDecoder().decode(Key.self, from: wireBytes($0.key.write))
+                    }
+                    if keys.contains(where: { (try? $0.get()) == nil }) {
+                        try tc.event("a key that fails")
+                    }
+                    let decodedKeys = keys.compactMap { try? $0.get() }
+                    if Set(decodedKeys).count < decodedKeys.count {
+                        try tc.event("keys that decode to the same key")
+                    }
+                    let decoded = MMPackDecoder().decode([Key: Int].self, from: wireMap(entries))
+                    try tc.event(outcome(decoded))
+                    #expect(decoded == expectedValueKeyedMap(Key.self, entries))
                 }
-                if keys.contains(where: { (try? $0.get()) == nil }) {
-                    try tc.event("a key that fails")
+                if caseFolded {
+                    try check(CaseFoldedKey.self)
+                } else {
+                    try tc.event("generated enum keys")
+                    try check(Catalog.Condition.self)
                 }
-                let decodedKeys = keys.compactMap { try? $0.get() }
-                if Set(decodedKeys).count < decodedKeys.count {
-                    try tc.event("keys that decode to the same key")
-                }
-                let decoded = MMPackDecoder().decode(
-                    [Catalog.Condition: Int].self,
-                    from: wireMap(entries)
-                )
-                try tc.event(outcome(decoded))
-                #expect(decoded == expectedConditionKeyedMap(entries))
             }
         }
     }

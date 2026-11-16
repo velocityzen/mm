@@ -30,6 +30,14 @@ func mpReadBytes(from buffer: inout ByteBuffer) throws -> MMBytes {
     MMBytes(try buffer.readMessagePackBinary().get().readableBytesView)
 }
 
+/// Reads an ``MMPackRawValue``: one value of any family, its structure and
+/// nesting checked as a skipped value's are, as its bytes.
+func mpReadRawValue(from buffer: inout ByteBuffer, depth: Int, cap: Int) throws -> MMPackRawValue {
+    MMPackRawValue(
+        try buffer.sliceMessagePackValue(currentDepth: depth, cap: cap).get().readableBytesView
+    )
+}
+
 /// Reads a `bin` holding a VPTS encoding that is not the null timestamp.
 private func mpReadVPTS(from buffer: inout ByteBuffer) throws -> MMVPTS {
     let bin = try buffer.readMessagePackBinary().get()
@@ -240,10 +248,16 @@ final class MPDecodingState {
     }
 
     /// Values whose bytes the coder reads itself: `ByteBuffer` (a zero-copy
-    /// `bin`/`str` slice), ``MMBytes``, the wire time kinds, and the standard
+    /// `bin`/`str` slice), ``MMBytes``, ``MMPackRawValue`` (one value of any
+    /// family, sitting at `depth`), the wire time kinds, and the standard
     /// scalars.
     /// Returns nil for every other type.
-    static func readDirectly<T>(_ type: T.Type, from buffer: inout ByteBuffer) throws -> T? {
+    static func readDirectly<T>(
+        _ type: T.Type,
+        from buffer: inout ByteBuffer,
+        depth: Int,
+        cap: Int
+    ) throws -> T? {
         if type == ByteBuffer.self {
             // Guarded force cast: the == check above proves T is ByteBuffer;
             // the type system cannot carry a metatype comparison into the
@@ -252,6 +266,9 @@ final class MPDecodingState {
         }
         if type == MMBytes.self {
             return (try mpReadBytes(from: &buffer) as! T)
+        }
+        if type == MMPackRawValue.self {
+            return (try mpReadRawValue(from: &buffer, depth: depth, cap: cap) as! T)
         }
         if let value = try vptsValue(type, from: &buffer) {
             return value
@@ -268,7 +285,7 @@ final class MPDecodingState {
         cap: Int
     ) throws -> T {
         var cursor = buffer
-        if let value = try Self.readDirectly(type, from: &cursor) {
+        if let value = try Self.readDirectly(type, from: &cursor, depth: depth, cap: cap) {
             return value
         }
         return try MPDecodingState(cap: cap).decodeComposite(
@@ -288,7 +305,7 @@ final class MPDecodingState {
         key: (any CodingKey)?
     ) throws -> T {
         var cursor = buffer
-        if let value = try Self.readDirectly(type, from: &cursor) {
+        if let value = try Self.readDirectly(type, from: &cursor, depth: depth, cap: self.cap) {
             return value
         }
         return try self.decodeComposite(type, from: buffer, depth: depth, parent: parent, key: key)
@@ -721,7 +738,14 @@ extension MPDecoderImplementation: SingleValueDecodingContainer {
     }
 
     func decode<T: Decodable>(_ type: T.Type) throws -> T {
-        if let value = try self.readValue({ try MPDecodingState.readDirectly(type, from: &$0) }) {
+        let position = try self.state.position(of: self.frame)
+        let depth = self.state.stack[position].depth
+        if let value = try MPDecodingState.readDirectly(
+            type,
+            from: &self.state.stack[position].buffer,
+            depth: depth,
+            cap: self.state.cap
+        ) {
             return value
         }
         return try mpDecode(T.self, from: self)

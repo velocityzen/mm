@@ -178,11 +178,11 @@ struct GeneratedCodingTests {
     // GeneratedCodingProperties, which runs on macOS and Linux. The fixed
     // payloads here run on every platform.
 
-    @Test("an unknown enum case, an empty response and an absent optional have fixed bytes")
+    @Test("an unknown enum value, an empty response and an absent optional have fixed bytes")
     func fixedBytes() {
         #expect(
-            encodedThroughGeneratedCode(Catalog.Condition.unknown)
-                == .success(mpBytes("a7756e6b6e6f776e"))
+            encodedThroughGeneratedCode(Catalog.Condition.unknown("worn"))
+                == .success(mpBytes("a4776f726e"))
         )
         #expect(encodedThroughGeneratedCode(Catalog.RelayResponse()) == .success(mpBytes("80")))
         #expect(encodedThroughGeneratedCode(Catalog.Item?.none) == .success(mpBytes("c0")))
@@ -256,15 +256,21 @@ struct GeneratedCodingTests {
         )
     }
 
-    @Test("unions: tag before fields, keys by integer or name, unknown cases decode to unknown")
+    @Test("unions: tag before fields, keys by integer or name, unknown cases keep tag and fields")
     func unionRules() {
         #expect(
             encodedThroughGeneratedCode(Catalog.Shipment.pending)
                 == .success(mpBytes("8100a770656e64696e67"))
         )
         #expect(
-            encodedThroughGeneratedCode(Catalog.Shipment.unknown)
-                == .success(mpBytes("8100a7756e6b6e6f776e"))
+            encodedThroughGeneratedCode(Catalog.Shipment.unknown(tag: "lost", fields: nil))
+                == .success(mpBytes("8100a46c6f7374"))
+        )
+        #expect(
+            encodedThroughGeneratedCode(
+                Catalog.Shipment.unknown(tag: "lost", fields: MMPackRawValue([0x81, 0x00, 0xc3]))
+            )
+                == .success(mpBytes("8200a46c6f7374" + "01" + "8100c3"))
         )
         #expect(
             encodedThroughGeneratedCode(Catalog.Shipment.split(parts: [], box: .init(label: "")))
@@ -292,6 +298,11 @@ struct GeneratedCodingTests {
             "8101" + "80",
             "810005",
             "c3",
+            // {0: "returned", 1: {0: "ups"}}, then by name, then with a nil
+            // fields value: an unrecognized case keeps its fields' bytes.
+            "8200a872657475726e656401" + "8100a3757073",
+            "82a463617365a872657475726e6564a66669656c6473" + "8100a3757073",
+            "8200a872657475726e656401c0",
         ].map(mpBytes)
         for payload in payloads {
             #expect(
@@ -306,7 +317,24 @@ struct GeneratedCodingTests {
         )
         #expect(
             decodedThroughGeneratedCode(Catalog.Shipment.self, from: payloads[3])
-                == .success(.unknown)
+                == .success(.unknown(tag: "returned", fields: nil))
+        )
+        let returned = Catalog.Shipment.unknown(
+            tag: "returned",
+            fields: MMPackRawValue([0x81, 0x00, 0xa3, 0x75, 0x70, 0x73])
+        )
+        #expect(
+            decodedThroughGeneratedCode(Catalog.Shipment.self, from: payloads[14])
+                == .success(returned)
+        )
+        #expect(
+            decodedThroughGeneratedCode(Catalog.Shipment.self, from: payloads[15])
+                == .success(returned)
+        )
+        #expect(encodedThroughGeneratedCode(returned) == .success(payloads[14]))
+        #expect(
+            decodedThroughGeneratedCode(Catalog.Shipment.self, from: payloads[16])
+                == .success(.unknown(tag: "returned", fields: MMPackRawValue([0xc0])))
         )
         #expect(
             decodedThroughGeneratedCode(Catalog.Shipment.self, from: payloads[6])

@@ -192,7 +192,13 @@
             }
         }
 
-        static let condition: Gen<Catalog.Condition> = .allCases
+        /// The declared cases, and values the contract does not declare,
+        /// which a newer peer sends and `unknown` keeps.
+        static let condition: Gen<Catalog.Condition> = .oneOf(
+            .allCases,
+            .allCases,
+            Gen<String>.string().map { Catalog.Condition(rawValue: $0) ?? .unknown($0) }
+        )
 
         /// A fixarray holds up to 15 elements.
         func list<Element>(of element: Gen<Element>) -> Gen<[Element]> {
@@ -276,7 +282,7 @@
                 maxDepth: self.shape.shipmentDepth,
                 leaf: .oneOf(
                     .just(.pending),
-                    .just(.unknown),
+                    self.undeclaredShipment,
                     Gen { tc in
                         try .shipped(
                             carrier: tc.draw(self.text),
@@ -295,6 +301,19 @@
                     }
                 }
             )
+        }
+
+        /// A case the contract does not declare, as a newer peer sends it:
+        /// its name never a declared one, and no fields or a fields map.
+        var undeclaredShipment: Gen<Catalog.Shipment> {
+            Gen { tc in
+                let name = try tc.draw(self.text)
+                let tag =
+                    ["pending", "shipped", "split", "held"].contains(name) ? name + "+" : name
+                let fields = try tc.draw(.optional(self.map(keys: Self.integer, values: self.text)))
+                    .map { try MMPackRawValue(MMPackEncoder().encode($0).get().readableBytesView) }
+                return .unknown(tag: tag, fields: fields)
+            }
         }
 
         /// A held shipment: duties under any integer keys, and either seal.

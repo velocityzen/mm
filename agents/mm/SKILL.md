@@ -258,7 +258,7 @@ A top-level `CLI(.enabled)` entry in the schema block generates one swift-argume
   - `.flag`: bools.
   - `.option("name", short: "n")`. `short: .auto` derives `-n` from the long name.
   - `.omitted`: optional fields only.
-  - Unset: `--field-name` options. Wire enums become typed options (the `unknown` fallback is hidden and refused). Structure, map, and named-type fields take JSON literals.
+  - Unset: `--field-name` options. Wire enums become typed options taking only the declared values (the `unknown` fallback is never offered or accepted). Structure, map, and named-type fields take JSON literals.
   - `Field(..., default: <literal>)` on an optional field makes a hybrid option: bare `--format` uses the default, `--format yaml` parses, absent stays nil. Calendar/clock fields take `default: .now` (invocation time). Defaults are declaration metadata, never wire behavior.
 - The overlay is presentation-only. It is stored on `MethodDeclaration`, never forwarded to `MethodSignature`, so it cannot affect discovery, fingerprints, or compatibility.
 - Every command gets the shared connection options (`--socket`/`--tcp`, timeouts, `--output json|json-pretty|raw`), an optional `<entity>` positional (after any single-value positional fields), and sysexits-style exit codes (denied → 77, usage → 64, transport → 69, SIGINT → 130).

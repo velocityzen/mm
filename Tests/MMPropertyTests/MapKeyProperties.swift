@@ -71,11 +71,11 @@
             .element(of: [UInt64(Int64.max) + 1, .max])
         )
 
-        /// Most often the cases a schema declares, sometimes `unknown` too,
-        /// which a Swift peer holds for a name it doesn't know.
+        /// Most often the cases a schema declares, sometimes names it does
+        /// not, which a Swift peer keeps in `unknown`.
         static let conditions: Gen<Catalog.Condition> = .oneOf(
             .element(of: [.new, .used]),
-            .allCases
+            .element(of: [.new, .used, .unknown("unknown"), .unknown("worn")])
         )
 
         /// A few entries, or more than the 32 a decoder searches in order:
@@ -205,17 +205,21 @@
                         json: maps.rendered
                     )
                 }
-                if maps.conditions.keys.contains(.unknown) {
+                let undeclared = maps.conditions.keys.filter {
+                    Catalog.Condition.allCases.contains($0) == false
+                }
+                .map(\.rawValue).sorted()
+                if let firstUndeclared = undeclared.first {
                     try tc.event("an unknown condition key, which the CLI refuses")
                     #expect(throws: (any Error).self, "the CLI sent \(maps)") {
                         try request.get()
                     }
                     switch maps.rendered.validated(against: KeyedMaps.schema, resolver: resolver) {
                         case .success:
-                            Issue.record("validated took the key unknown")
+                            Issue.record("validated took the key \(firstUndeclared)")
                         case .failure(let error):
                             #expect(
-                                error.path == "conditions.unknown"
+                                error.path == "conditions.\(firstUndeclared)"
                                     && error.problem == "key is not one of: new, used",
                                 "validated refused \(maps) as \(error)"
                             )
