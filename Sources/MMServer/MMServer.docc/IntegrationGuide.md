@@ -114,8 +114,9 @@ Enum("Priority", description: "How urgent a line is") {
     Case("normal")
     Case("urgent", description: "Surfaces immediately to followers")
 }
+Alias("Author", .string, constraints: .length(1...64), description: "Who wrote a line")
 Type("LineMeta", description: "Attribution carried with a line") {
-    Field("author", .string, description: "Who wrote the line")
+    Field("author", "Author", description: "Who wrote the line")
     Field("priority", "Priority")
 }
 Type("ChangeEvent", description: "One appended line, as delivered to followers") {
@@ -139,6 +140,29 @@ Rules for named types:
 - Shared types outside any method namespace go in a `#schemaTypes("common") { Enum/Type... }` container on a `TypeNamespace` enum (or a runtime `Types("common") { ... }` block). Register the container on the server with the `Types(Container.self)` builder element.
 
 Cross-schema references in a `#schema` block use the Swift type (`Field("x", Other.Name.self)`), because the macro cannot know the Swift type behind a dotted wire name. Compiler limitation: a macro argument cannot reference members that another container's macro generates **in the same module**. (The compiler does not expand one macro's arbitrary names while it type-checks another macro's arguments.) Put shared `#schemaTypes` containers in their own module, or reference hand-written `SchemaDescribable` types.
+
+### Constraints and named scalars
+
+A field can declare rules its value keeps beyond its shape, and `Alias` declares a **named scalar**, a scalar kind with rules of its own. The example's `Author` is a string of 1 to 64 Unicode scalars, and `append`'s `line` holds at most 4096:
+
+```swift
+Alias("Author", .string, constraints: .length(1...64), description: "Who wrote a line")
+Field("line", .string, constraints: .length(...4096), description: "The line text", cli: .input)
+```
+
+- A **range** is inclusive, either end may be open (`.range(1...)`, `.range(...0.5)`), and takes integer bounds on `int` and `uint`, floating ones on `float` and `double` (integer bounds on a floating field become floating).
+- A **length** is inclusive and counts a string's Unicode scalars (`"café"` is 4 precomposed, 5 decomposed), a byte string's bytes, an array's elements, or a map's entries. `.nonEmpty` is `.length(1...)`.
+- A **pattern** is a regular expression the whole string matches, as if written `^...$`. Keep it to the syntax ECMAScript and PCRE share, so every peer reads it alike.
+- A list holds at most one rule of each kind. `#schema` refuses at compile time a rule on a kind that does not take it, bounds that cross, a negative length, a pattern that does not compile, and constraints on a field of a named type (the type carries them). The runtime DSL refuses the same with a precondition.
+- `Alias` names a scalar kind only. `#schema` generates a wrapper struct (`Journal.Author("ada")`, `.rawValue`) that encodes as the bare scalar, so the wire is unchanged.
+
+Constraints are part of the contract: discovery serves them (Field key 4, TypeDefinition key 3) and the fingerprint covers them. Where they are checked:
+
+- **The server, at ingress, in every build.** After the params decode and before the handler runs, the route runs the descriptor's check. A violating request is answered with `malformedParams` (code 3) whose message names the failing field: `malformed params: line: has length 5000, more than the maximum length 4096`. A violating request-stream item ends the call with `streamViolation` (code 6): `stream violation: [3].line: ...`. Params that do not decode get the same kind of message from a walk over their bytes: `malformed params: meta.priority: expected string, got integer`. On the client these arrive as `MMCallError.malformedParams(MMError)` and `.streamViolation(MMError)`.
+- **The client, before sending, in debug builds of the declaring module.** The generated descriptors carry the check with `beforeSending` set under `#if DEBUG`. A violating request comes back as `MMCallError.invalidRequest(path:problem:)` with nothing sent, and a violating stream element cancels the stream call. A release build sends what it is given and the server answers. The generated CLI follows the same rule and exits 65 either way.
+- **By hand.** Every generated type conforms to `MMConstraintValidating`: `request.constraintViolation(at: "")` returns the first violation, the one the server would name. `SchemaValue.validated(against:resolver:checkingConstraints: true)` does the same for loose input such as parsed JSON.
+
+A hand-written descriptor enforces constraints only when it carries a check: pass `requestCheck: MMConstraintCheck(beforeSending:)` for a request type that conforms to `MMConstraintValidating`, or `MMConstraintCheck(beforeSending:) { request in ... }` with a closure of your own. A descriptor with a request stream takes `elementCheck:` for its elements the same way.
 
 ### What `#schema` generates, written by hand
 

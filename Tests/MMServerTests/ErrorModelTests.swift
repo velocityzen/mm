@@ -38,7 +38,7 @@ struct ErrorModelTests {
         )
     }
 
-    @Test("params that are not a map are malformedParams")
+    @Test("params that are not a map are malformedParams, and the message says what they are")
     func paramsNotAMap() async {
         let router = self.makeRouter()
         var params = ByteBuffer()
@@ -51,7 +51,7 @@ struct ErrorModelTests {
             reply
                 == .response(
                     msgid: 7,
-                    error: MMError(code: 3, message: "malformed params"),
+                    error: MMError(code: 3, message: "malformed params: expected map, got integer"),
                     result: nil
                 )
         )

@@ -13,9 +13,11 @@
 /// A map with integer keys: **0** the qualified name (string), **1** the
 /// underlying ``TypeSchema`` (a `structure` for `Type` declarations, an
 /// `enumeration` for `Enum` declarations, a `union` for `Union`
-/// declarations), **2** the optional description.
+/// declarations, a scalar kind for `Alias` declarations), **2** the optional
+/// description, **3** the optional ``TypeSchema/Constraints`` every value of
+/// the type keeps (named scalars only).
 /// The description is documentation only — served by discovery, never hashed
-/// or compared.
+/// or compared. The constraints are part of the contract.
 public struct TypeDefinition: Sendable, Hashable, Codable {
     /// The qualified name (`<namespace>.<TypeName>`).
     public var name: String
@@ -24,17 +26,28 @@ public struct TypeDefinition: Sendable, Hashable, Codable {
     /// Human-readable documentation, served by discovery. Never part of the
     /// fingerprint or of compatibility comparisons.
     public var description: String?
+    /// The rules every value of a named scalar keeps beyond its shape; nil
+    /// when it declares none. Part of the contract: served by discovery and
+    /// hashed into the fingerprint.
+    public var constraints: TypeSchema.Constraints?
 
-    public init(name: String, schema: TypeSchema, description: String? = nil) {
+    public init(
+        name: String,
+        schema: TypeSchema,
+        description: String? = nil,
+        constraints: TypeSchema.Constraints? = nil
+    ) {
         self.name = name
         self.schema = schema
         self.description = description
+        self.constraints = constraints
     }
 
     enum CodingKeys: Int, CodingKey {
         case name = 0
         case schema = 1
         case description = 2
+        case constraints = 3
     }
 }
 
@@ -42,7 +55,11 @@ extension TypeDefinition {
     /// The same definition with every description removed — the form the
     /// fingerprint hashes and `verify`/`SchemaDifference` compare.
     public var strippingDescriptions: TypeDefinition {
-        TypeDefinition(name: self.name, schema: self.schema.strippingDescriptions)
+        TypeDefinition(
+            name: self.name,
+            schema: self.schema.strippingDescriptions,
+            constraints: self.constraints
+        )
     }
 }
 

@@ -411,7 +411,7 @@
             )
             let (server, stream) = MMRequestStream<Int>.make(
                 msgid: 1,
-                decoding: MMPackDecoder().decoding(Int.self),
+                decoding: checkedDecoding(MMPackDecoder().decoding(Int.self), nil),
                 frameSink: { envelope in
                     link.withLockedValue { $0 }?.clientReceives(envelope) ?? false
                 },

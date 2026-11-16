@@ -14,7 +14,11 @@ struct ExitMappingTests {
         arguments: [
             (MMCallError.denied, Int32(77)),
             (MMCallError.unknownMethod, Int32(64)),
-            (MMCallError.malformedParams, Int32(65)),
+            (MMCallError.malformedParams(MMError(code: 3, message: "malformed params")), Int32(65)),
+            (
+                MMCallError.invalidRequest(path: "limit", problem: "is 0, less than the minimum 1"),
+                Int32(65)
+            ),
             (MMCallError.remote(MMError(code: 64, message: "nope")), Int32(1)),
             (MMCallError.remoteInternal, Int32(70)),
             (MMCallError.streamViolation(MMError(code: 6, message: "gap")), Int32(70)),
@@ -36,6 +40,28 @@ struct ExitMappingTests {
             for: .unknownMethod, method: "journal.zap", entity: "journal.notes")
         #expect(message.contains("journal.zap"))
         #expect(message.contains("try `discover`"))
+    }
+
+    @Test("a refused request names the method and the server's message")
+    func malformedParamsMessage() {
+        let message = MMCLIFailure.message(
+            for: .malformedParams(
+                MMError(code: 3, message: "malformed params: limit: is 0, less than the minimum 1")
+            ),
+            method: "journal.tail",
+            entity: "journal.notes"
+        )
+        #expect(message == "journal.tail: malformed params: limit: is 0, less than the minimum 1")
+    }
+
+    @Test("an invalid request names the method, the path and the problem")
+    func invalidRequestMessage() {
+        let message = MMCLIFailure.message(
+            for: .invalidRequest(path: "limit", problem: "is 0, less than the minimum 1"),
+            method: "journal.tail",
+            entity: "journal.notes"
+        )
+        #expect(message == "journal.tail: invalid request: limit: is 0, less than the minimum 1")
     }
 
     @Test("remote errors render code and message")

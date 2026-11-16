@@ -37,16 +37,26 @@
 /// - schema: `u8` case tag (the same tag values as the Codable wire encoding:
 ///   0 bool … 16 union, 255 unknown), then payload —
 ///   `optional`/`array`: child schema; `map`: key then value schema;
-///   `structure`: `u32 LE` field count, then per field: `u8` key-presence flag
-///   (1/0), `i64 LE` key when present, name string, field schema;
+///   `structure`: `u32 LE` field count, then per field: `u8` flags (bit 0
+///   the key is present, bit 1 constraints follow), `i64 LE` key when
+///   present, name string, field schema, then the constraints when flagged;
 ///   `enumeration`: `u32 LE` case count, then per case: name string;
 ///   `union`: `u32 LE` case count, then per case: name string and its field
 ///   list encoded as `structure`'s is;
 ///   `reference`: the qualified name string.
 /// - type definitions: after the signature stream, definitions sorted by name
 ///   (byte-wise, tie-break full encoding), each as `u8` tag **3** + name
-///   string + schema. An empty type table appends nothing, so every type-free
-///   fingerprint keeps its pre-types value.
+///   string + schema, or, for a definition with constraints, `u8` tag **5** +
+///   name string + schema + constraints. An empty type table appends
+///   nothing, so every type-free fingerprint keeps its pre-types value.
+/// - constraints: `u8` flags for the rules present (bit 0 minimum, bit 1
+///   maximum, bit 2 minimum length, bit 3 maximum length, bit 4 pattern),
+///   then each present rule in that order — a bound as `u8` 0 + `i64 LE` for
+///   an integer or `u8` 1 + the `f64` bit pattern `LE` for a floating one, a
+///   length as `i64 LE`, the pattern as a string. Constraints with no rule
+///   are no constraints, and a field or definition without constraints
+///   encodes exactly as it did before they existed, so every unconstrained
+///   fingerprint keeps its value.
 /// - **descriptions are never hashed** — not the five signature doc slots, not
 ///   field, case, or definition descriptions. Doc edits are not schema drift.
 public enum SchemaFingerprint {
@@ -81,12 +91,16 @@ public enum SchemaFingerprint {
         return bytes
     }
 
-    /// The canonical byte encoding of one type definition (tag 3 + name +
-    /// schema).
+    /// The canonical byte encoding of one type definition: tag 3 + name +
+    /// schema, or tag 5 + name + schema + constraints.
     private static func canonical(_ definition: TypeDefinition) -> [UInt8] {
-        var bytes: [UInt8] = [3]
+        let constraints = definition.constraints.flatMap { $0.isEmpty ? nil : $0 }
+        var bytes: [UInt8] = [constraints == nil ? 3 : 5]
         append(definition.name, into: &bytes)
         append(definition.schema, into: &bytes)
+        if let constraints {
+            append(constraints, into: &bytes)
+        }
         return bytes
     }
 
@@ -173,15 +187,50 @@ public enum SchemaFingerprint {
     private static func append(_ fields: [TypeSchema.Field], into bytes: inout [UInt8]) {
         appendUInt32(UInt32(fields.count), into: &bytes)
         for field in fields {
+            let constraints = field.constraints.flatMap { $0.isEmpty ? nil : $0 }
+            bytes.append((field.key == nil ? 0 : 1) | (constraints == nil ? 0 : 2))
             if let key = field.key {
-                bytes.append(1)
                 appendInt64(Int64(key), into: &bytes)
-            } else {
-                bytes.append(0)
             }
             append(field.name, into: &bytes)
             append(field.type, into: &bytes)
+            if let constraints {
+                append(constraints, into: &bytes)
+            }
         }
+    }
+
+    private static func append(
+        _ constraints: TypeSchema.Constraints,
+        into bytes: inout [UInt8]
+    ) {
+        var flags: UInt8 = 0
+        if constraints.minimum != nil { flags |= 1 }
+        if constraints.maximum != nil { flags |= 2 }
+        if constraints.minimumLength != nil { flags |= 4 }
+        if constraints.maximumLength != nil { flags |= 8 }
+        if constraints.pattern != nil { flags |= 16 }
+        bytes.append(flags)
+        for bound in [constraints.minimum, constraints.maximum].compactMap({ $0 }) {
+            switch bound {
+                case .integer(let value):
+                    bytes.append(0)
+                    appendInt64(value, into: &bytes)
+                case .floating(let value):
+                    bytes.append(1)
+                    appendUInt64(value.bitPattern, into: &bytes)
+            }
+        }
+        for length in [constraints.minimumLength, constraints.maximumLength].compactMap({ $0 }) {
+            appendInt64(Int64(length), into: &bytes)
+        }
+        if let pattern = constraints.pattern {
+            append(pattern, into: &bytes)
+        }
+    }
+
+    private static func appendUInt64(_ value: UInt64, into bytes: inout [UInt8]) {
+        withUnsafeBytes(of: value.littleEndian) { bytes.append(contentsOf: $0) }
     }
 
     /// Stable 64-bit FNV-1a; implemented in-repo because it is a wire

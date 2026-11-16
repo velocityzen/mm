@@ -1,4 +1,5 @@
 import Logging
+import MMSchema
 import MMWire
 import NIOConcurrencyHelpers
 import NIOCore
@@ -668,6 +669,25 @@ extension ClientStreamState {
             self.hasResponseStream && !state.terminated
         }
         if shouldSend { await self.sinks.sendStop() }
+    }
+
+    /// Ends the call here with ``MMCallError/invalidRequest(path:problem:)``
+    /// for a request element that broke a declared constraint, refused
+    /// before sending, and sends a CANCEL so the server's handler stops
+    /// waiting for the rest. The path names the element by the seq it would
+    /// have had, as the server would: `[3].text`. The connection drops the
+    /// server's code-7 terminal. After the terminal it is a no-op.
+    func refuse(_ violation: SchemaValueError) async {
+        let (shouldSend, seq) = self.state.withLockedValue { (!$0.terminated, $0.nextOutSeq) }
+        self.resolve(
+            .failure(
+                .invalidRequest(
+                    path: MMConstraintPath.item(seq, path: violation.path),
+                    problem: violation.problem
+                )
+            )
+        )
+        if shouldSend { await self.sinks.sendCancel() }
     }
 
     /// Sends a CANCEL (kind 6) and resolves every local surface as `.cancelled`.

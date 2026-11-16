@@ -56,3 +56,18 @@ extension MMCLIEnumArgument {
         self.init(rawValue: argument)
     }
 }
+
+/// CLI conformance for macro-generated named scalars (`Alias`):
+/// `extension Journal.Slug: MMCLIAliasArgument {}` lets a generated command
+/// take the alias as a typed argument, parsed as its scalar. Its constraints
+/// are checked where a request's are, not while parsing.
+public protocol MMCLIAliasArgument: ExpressibleByArgument, RawRepresentable
+where RawValue: ExpressibleByArgument {}
+
+extension MMCLIAliasArgument {
+    /// Parses the scalar, then wraps it.
+    public init?(argument: String) {
+        guard let rawValue = RawValue(argument: argument) else { return nil }
+        self.init(rawValue: rawValue)
+    }
+}

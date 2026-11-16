@@ -336,11 +336,13 @@ Codes **1 to 63 are reserved for the protocol**. Applications MUST use codes **>
 |---|---|---|
 | 1 | unknownMethod | The request named a method that the router has no route for. |
 | 2 | permissionDenied | The peer's identity does not grant the access class the method requires on the target entity (or on one of its ancestors, for traversal). |
-| 3 | malformedParams | The params payload failed to decode as the method's request type. |
+| 3 | malformedParams | The params payload failed to decode as the method's request type, or broke a constraint the method's contract declares (section 8.4). |
 | 4 | tooManyInFlight | The connection exceeded its in-flight request cap. |
 | 5 | internalError | The handler failed, and it is not the caller's fault. |
-| 6 | streamViolation | The peer broke the stream contract: an item on an undeclared stream, a seq gap, or a credit overrun. |
+| 6 | streamViolation | The peer broke the stream contract: an item on an undeclared stream, a seq gap, a credit overrun, or a request-stream item that failed to decode or broke a declared constraint. |
 | 7 | cancelled | Terminal response that acknowledges a client CANCEL: the call was aborted. |
+
+**Ingress error messages.** When a server can name what it refused, the message names the path and the problem. A code-3 error reads `malformed params: <path>: <problem>` (`malformed params: limit: is 0, less than the minimum 1`). A code-6 error that refuses request-stream item `seq` reads `stream violation: [<seq>]<path>: <problem>`, the item's own path joined after its index (`stream violation: [3].text: has length 0, less than the minimum length 1`; `[3]` for the item itself). For a payload that breaks a constraint, the path and problem are those of section 8.4. For a payload that does not decode, the server walks its bytes against the declared schema and names the first value whose wire kind does not fit (`malformed params: limit: expected integer, got string`). When it can name nothing, the message is the bare `malformed params` or `stream violation`. Messages are for people: a peer MUST NOT parse them, and the code alone carries the meaning.
 
 **Existence is never leaked (normative).** There is no "entity not found" code. A request for an entity with no ACL record, including an entity that does not exist, is denied with `permissionDenied` (code 2), exactly as if an ACL denied it. A server MUST NOT reveal through its choice of error whether an entity exists. (A failure of the ACL store itself is `internalError`, code 5.)
 
@@ -476,8 +478,9 @@ An unset optional slot is absent (its key is omitted). Readers skip unknown keys
 | Key | Field | Type |
 |---|---|---|
 | 0 | name | string, qualified (`<namespace>.<TypeName>`) |
-| 1 | schema | TypeSchema: a `structure`, `enumeration`, or `union` |
+| 1 | schema | TypeSchema: a `structure`, `enumeration`, or `union`, or a scalar kind for a **named scalar** (section 8.4) |
 | 2 | description | string, **optional**; documentation only |
+| 3 | constraints | Constraints (section 8.4), **optional**: the rules every value of a named scalar keeps. Part of the contract, and hashed (section 9.1) |
 
 ### 8.2 `server.entity`
 
@@ -548,7 +551,7 @@ The VPTS **null** encoding (`0x00`) is never a value. Optionality uses MessagePa
 
 In **JSON projections** of wire values (discovery tooling, the CLI's parameter and output trees), the three kinds map to canonical ISO 8601 / RFC 3339 strings: `2026-07-21`, `2026-07-21T14:30:00.5`, `2026-07-21T14:30:00Z`. The fraction appears only when non-zero (1 to 9 digits, trailing zeros removed). `T` and `Z` are uppercase, and offset zero is `Z`. Parsers of this projection accept only two variations: lowercase `t`/`z`, and `±00:00` as an alias of `Z`. This string form never appears on the wire.
 
-A `structure` lists its fields in **declaration order** (the order in which the type's decoder requests them). `Field` is an int-keyed struct: key 0 = `key` (the field's integer wire key, or nil/absent for string-keyed fields), key 1 = `name` (string), key 2 = `type` (TypeSchema), key 3 = `description` (string, **optional**, documentation only).
+A `structure` lists its fields in **declaration order** (the order in which the type's decoder requests them). `Field` is an int-keyed struct: key 0 = `key` (the field's integer wire key, or nil/absent for string-keyed fields), key 1 = `name` (string), key 2 = `type` (TypeSchema), key 3 = `description` (string, **optional**, documentation only), key 4 = `constraints` (Constraints, section 8.4, **optional**; part of the contract, and hashed).
 
 An `enumeration` is a closed set of **string-valued** cases. The wire value of an enum-typed field is the case name as a MessagePack string (fixed decision). Renaming a case breaks the wire. Reordering does not, but it changes the fingerprint, like field order. Decoders MUST map an unrecognized value to a local fallback case instead of failing (the wire-enum rule of section 6.1). `EnumCase` is an int-keyed struct: key 0 = `name` (string, the wire value), key 1 = `description` (string, **optional**). Cases appear in declaration order.
 
@@ -571,6 +574,46 @@ Worked example: `optional(string)` = `{0: 7, 1: {0: 5}}`:
 
 Hex: `82000701810005`. A bare `string` is `810005`.
 
+### 8.4 Constraints
+
+A field (Field key 4) or a named scalar (TypeDefinition key 3) may declare **constraints**: rules a value keeps beyond its shape. Constraints are part of the contract. Discovery serves them, and the fingerprint hashes them (section 9.1).
+
+`Constraints` is an int-keyed map. Each rule's key is omitted when the rule is absent:
+
+| Key | Rule | Value |
+|---|---|---|
+| 0 | minimum | number: an integer bound for `int` and `uint`, a finite floating bound for `float` and `double` |
+| 1 | maximum | number, as for the minimum |
+| 2 | minimumLength | non-negative integer |
+| 3 | maximumLength | non-negative integer |
+| 4 | pattern | string: a regular expression |
+
+Rules (normative):
+
+- Each rule applies to the value itself, after an `optional` is unwrapped. A nil optional keeps every rule.
+- **Range.** The minimum and the maximum are inclusive, and either may be absent (an open end). A NaN keeps no range: it breaks every range that has a bound.
+- **Length.** Inclusive at both ends. It counts a string's **Unicode scalars** (not its UTF-8 bytes or its grapheme clusters, so `café` is 4 precomposed and 5 decomposed), a bin's bytes, an array's elements, and a map's entries.
+- **Pattern.** The string must match the pattern **whole**, as if it were written `^...$`. Patterns keep to the syntax that ECMAScript and PCRE share, so every implementation reads them alike.
+- **Where rules apply.** A range applies to `int`, `uint`, `float`, and `double`. A length applies to `string`, `bytes`, `array`, and `map`. A pattern applies to `string`. A contract that puts a rule on any other kind, a floating bound on an integer kind, a minimum above its maximum, a negative length, or a pattern that does not compile is refused where it is declared.
+- **Named scalars.** A named scalar is a `TypeDefinition` whose schema is a scalar kind (`bool`, `int`, `uint`, `float`, `double`, `string`, `bytes`, `date`, `datetime`, `timestamp`). It reads on the wire exactly as its kind does, and its constraints bind every value of the type. A field whose type is a named scalar takes its constraints from the type and declares none of its own. A definition whose schema is a `reference` to a named scalar is a named scalar too, and along such a chain each definition's constraints apply.
+- **Decoding constraints never fails**, by the rule of section 8.3. A rule a reader cannot read (a bound that is not a finite number, a length that is negative or not an integer, a pattern that is not a string) decodes as absent, and so does a value that is not a map. An older peer sees a value as less constrained, never as unreadable.
+
+**Enforcement (normative).** A server MUST check the constraints of a request's params and of every request-stream item at ingress, after decoding and before any handler sees the value. Params that break a constraint are answered with `malformedParams` (code 3). A request-stream item that breaks one ends the call with `streamViolation` (code 6). A client MAY check before sending, and the reference client does so in debug builds of the module that declares the call. The server's check never depends on the client's.
+
+**The first violation (normative for the path a server names).** A value is checked depth-first. A structure's fields are checked in declaration order. Inside each value, the values it holds come first (a structure's fields, an array's elements in index order, a map's entries, a union case's fields), then the value's own rules: those of the named scalars its type refers to, outermost first, then the field's own. The first rule broken is the one named. When several entries of a map break a rule, which of them is named is up to the implementation (the reference implementation names the entry whose key sorts first).
+
+A path joins field names and map keys with `.`, writes an array element as `[index]`, puts a union case's fields under `fields`, and is empty for the value itself: `line.tags[2]`, `mark.fields.text`. The reference implementation words the problems as below. The wording is for people (section 6.1):
+
+| Rule broken | Problem |
+|---|---|
+| minimum | `is 0, less than the minimum 1` |
+| maximum | `is 1001, more than the maximum 1000` |
+| either end, by a NaN | `is not a number, outside every range` |
+| minimumLength | `has length 0, less than the minimum length 1` |
+| maximumLength | `has length 9, more than the maximum length 8` |
+| pattern | `does not match the pattern [a-z0-9-]+` |
+
+
 ## 9. Schema fingerprint
 
 The 8-byte fingerprint in the hello is a stable, cross-platform hash of the server's method set **and named-type table**. The set includes the builtins `server.schema` and `server.entity` (section 8), fingerprinted like any application method (canonical signatures in section 9.5). Independent implementations MUST compute identical values for the same set of method signatures and type definitions. The fingerprint is **FNV-1a 64** over a canonical byte encoding of the sorted signatures, followed by the sorted type definitions.
@@ -589,13 +632,15 @@ A simple tagged, length-prefixed byte encoding, intentionally **not** MessagePac
 
 - `optional` (7), `array` (8): the child schema.
 - `map` (9): the key schema, then the value schema.
-- `structure` (10): `u32 LE` field count, then for each field, in declaration order: `u8` key-presence flag (1 if the field has an integer key, else 0), `i64 LE` key when present, the field name (string), the field schema.
+- `structure` (10): `u32 LE` field count, then for each field, in declaration order: `u8` flags (bit 0 set if the field has an integer key, bit 1 set if it declares constraints), `i64 LE` key when present, the field name (string), the field schema, then the field's **constraints** when flagged.
 - `enumeration` (11): `u32 LE` case count, then for each case, in declaration order: the case name (string).
 - `reference` (12): the qualified type name (string).
 - `union` (16): `u32 LE` case count, then for each case, in declaration order: the case name (string), then its fields encoded exactly as a `structure`'s payload (count, then each field).
 - all other tags: no payload.
 
-**type definition** := `u8` tag `3` ‖ the qualified name (string) ‖ the definition's schema. Type-definition entries follow the signature stream (see 9.2). An empty type table emits nothing, so a fingerprint without types keeps its value from before types were added.
+**type definition** := `u8` tag `3` ‖ the qualified name (string) ‖ the definition's schema; or, for a definition that declares constraints, `u8` tag `5` ‖ the qualified name (string) ‖ the definition's schema ‖ its **constraints**. Type-definition entries follow the signature stream (see 9.2). An empty type table emits nothing, so a fingerprint without types keeps its value from before types were added.
+
+**constraints** := `u8` flags for the rules present (bit 0 minimum, bit 1 maximum, bit 2 minimumLength, bit 3 maximumLength, bit 4 pattern), then each present rule in that order: a bound as `u8` `0` then `i64 LE` for an integer, or `u8` `1` then the IEEE 754 `f64` bit pattern `LE` for a floating bound; a length as `i64 LE`; the pattern as a string. Constraints without any rule are no constraints. A field or definition without constraints encodes exactly as it did before constraints were added (flags bit 1 clear, tag 3), so every unconstrained fingerprint keeps its value.
 
 ### 9.2 Sorting and hashing
 
@@ -655,6 +700,11 @@ Pinned fingerprint for a signature with **declared errors**, which tests `union`
 
 - Signature: `shelf.put`, access write (2), request `structure[]`, response `structure[{0, "count", uint}]`, errors `union[{"retired", []}, {"full", [{0, "capacity", int}]}]`.
 
+Pinned fingerprint for a **constrained** set, which tests field constraints (flags bit 1), integer and floating bounds, and the tag-5 definition entry (verified independently against the reference implementation): the set below MUST fingerprint to **`0x5cfed00a36d1f62b`**.
+
+- Signature: `shelf.put`, access write (2), request `structure[{0, "slug", reference("shelf.Slug")}, {1, "limit", optional(int), minimum 1 (integer), maximum 1000 (integer)}, {2, "ratio", double, minimum 0.0 (floating), maximum 1.0 (floating)}]`, response `structure[]`.
+- Type definition: `shelf.Slug` = `string`, minimumLength 1, maximumLength 8, pattern `[a-z0-9-]+`.
+
 ### 9.5 Builtin canonical signatures
 
 The builtins (section 8) are in the fingerprinted set, so a real server's fingerprint can be reproduced only with their exact canonical signatures, given here.
@@ -664,7 +714,8 @@ The builtins (section 8) are in the fingerprinted set, so a real server's finger
 `server.schema`: name `server.schema`, access read (4), request `structure[]` (empty, the same as the `server.entity` request, because targets are in the envelope), response `structure[{0, "fingerprint", uint}, {1, "methods", array(MethodSignature)}, {2, "types", optional(array(TypeDefinition))}, {3, "namespaces", optional(array(NamespaceSignature))}]`.
 
 - `MethodSignature` hashes as `structure[{0, "name", string}, {1, "access", uint}, {2, "description", optional(string)}, {10, "request", TypeSchema}, {11, "requestDescription", optional(string)}, {12, "requestStream", optional(TypeSchema)}, {13, "requestStreamDescription", optional(string)}, {20, "response", TypeSchema}, {21, "responseDescription", optional(string)}, {22, "responseStream", optional(TypeSchema)}, {23, "responseStreamDescription", optional(string)}, {30, "errors", optional(TypeSchema)}]`. In the *type*, the stream, description, and errors slots are always-present optional fields. In the wire encoding of a concrete signature, an absent slot omits its key.
-- `TypeDefinition` hashes as `structure[{0, "name", string}, {1, "schema", TypeSchema}, {2, "description", optional(string)}]`.
+- `TypeDefinition` hashes as `structure[{0, "name", string}, {1, "schema", TypeSchema}, {2, "description", optional(string)}, {3, "constraints", optional(Constraints)}]`.
+- `Constraints` hashes as `structure[{0, "minimum", optional(unknown)}, {1, "maximum", optional(unknown)}, {2, "minimumLength", optional(int)}, {3, "maximumLength", optional(int)}, {4, "pattern", optional(string)}]`. A bound is `unknown` because it is an integer or a floating number, whichever the value is.
 - `NamespaceSignature` hashes as `structure[{0, "name", string}, {1, "description", string}]`.
 - A `TypeSchema`-typed field uses the pinned schema `structure[{0, "tag", uint}, {1, "first", unknown}, {2, "second", unknown}]`. The payload slots are `unknown` (tag 255) because their shape depends on the tag, which a static schema cannot express.
 - The `types` and `namespaces` slots are `optional(array(...))` because the reference decoder reads them with a presence check (the keys are absent on older wires).
@@ -798,3 +849,4 @@ Non-canonical decode-only vectors: `cc05` → 5, `d30000000000000005` → 5, `d9
 | "foobar" | `0x85944171f73967e8` |
 | three-signature set of §9.4 | `0x401118443279fc06` |
 | declared-errors set of §9.4 | `0xafdf97619cbd5f59` |
+| constrained set of §9.4 | `0x5cfed00a36d1f62b` |

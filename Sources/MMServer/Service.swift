@@ -973,6 +973,7 @@ package struct ServerRuntime: Sendable {
             writer: writer,
             metrics: MMStreamMetrics(),
             maxConcurrentStreams: self.configuration.maxConcurrentStreamsPerConnection,
+            typeResolver: self.router.typeResolver,
             logger: logger
         )
         await withDiscardingTaskGroup { handlers in

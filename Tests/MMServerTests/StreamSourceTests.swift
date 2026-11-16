@@ -29,7 +29,7 @@ private func makeSource(
 ) -> (MMRequestStreamSource, MMRequestStream<Int>) {
     MMRequestStream<Int>.make(
         msgid: 1,
-        decoding: MMPackDecoder().decoding(Int.self),
+        decoding: checkedDecoding(MMPackDecoder().decoding(Int.self), nil),
         frameSink: { await recorder.sink($0) },
         metrics: MMStreamMetrics()
     )

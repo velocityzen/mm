@@ -12,11 +12,20 @@ public struct Method<Request: Codable & Sendable, Response: Codable & Sendable>:
     public let access: AccessMode
     /// Documentation overlaid onto ``signature()`` and served by discovery.
     public let documentation: MethodDocumentation
+    /// The constraint check on the request; nil when nothing in it is
+    /// constrained.
+    public let requestCheck: MMConstraintCheck<Request>?
 
-    public init(name: String, access: AccessMode, documentation: MethodDocumentation = .init()) {
+    public init(
+        name: String,
+        access: AccessMode,
+        documentation: MethodDocumentation = .init(),
+        requestCheck: MMConstraintCheck<Request>? = nil
+    ) {
         self.name = name
         self.access = access
         self.documentation = documentation
+        self.requestCheck = requestCheck
     }
 
     /// Probes `Request` and `Response` and assembles the wire-facing signature.

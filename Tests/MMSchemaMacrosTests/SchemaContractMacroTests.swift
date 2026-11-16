@@ -24,7 +24,7 @@ struct SchemaContractMacroTests {
             }
             """,
             expandedSource: """
-                public struct PingRequest: Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable {
+                public struct PingRequest: Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable, MMConstraintValidating {
                     public static var schema: TypeSchema {
                         .structure(fields: [])
                     }
@@ -36,8 +36,11 @@ struct SchemaContractMacroTests {
                     public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {
                         try reader.skipValue(depth: depth)
                     }
+                    public func constraintViolation(at path: String) -> SchemaValueError? {
+                        return nil
+                    }
                 }
-                public struct PingResponse: Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable {
+                public struct PingResponse: Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable, MMConstraintValidating {
                     public static var schema: TypeSchema {
                         .structure(fields: [])
                     }
@@ -49,7 +52,17 @@ struct SchemaContractMacroTests {
                     public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {
                         try reader.skipValue(depth: depth)
                     }
+                    public func constraintViolation(at path: String) -> SchemaValueError? {
+                        return nil
+                    }
                 }
+                /// Whether this namespace's calls check a request's constraints before
+                /// sending it: in debug builds of the module that declares them.
+                #if DEBUG
+                public static let checksConstraintsBeforeSending = true
+                #else
+                public static let checksConstraintsBeforeSending = false
+                #endif
                 public static let `ping` = Method<PingRequest, PingResponse>(
                     name: "box.ping", access: .read)
                 public static var all: [AnyMethod] {
@@ -78,7 +91,7 @@ struct SchemaContractMacroTests {
             }
             """,
             expandedSource: """
-                public struct PingRequest: Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable {
+                public struct PingRequest: Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable, MMConstraintValidating {
                     public static var schema: TypeSchema {
                         .structure(fields: [])
                     }
@@ -90,8 +103,11 @@ struct SchemaContractMacroTests {
                     public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {
                         try reader.skipValue(depth: depth)
                     }
+                    public func constraintViolation(at path: String) -> SchemaValueError? {
+                        return nil
+                    }
                 }
-                public struct PingResponse: Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable {
+                public struct PingResponse: Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable, MMConstraintValidating {
                     public static var schema: TypeSchema {
                         .structure(fields: [])
                     }
@@ -103,7 +119,17 @@ struct SchemaContractMacroTests {
                     public init<Reader: MMPackReader>(mmPack reader: inout Reader, depth: Int) throws {
                         try reader.skipValue(depth: depth)
                     }
+                    public func constraintViolation(at path: String) -> SchemaValueError? {
+                        return nil
+                    }
                 }
+                /// Whether this namespace's calls check a request's constraints before
+                /// sending it: in debug builds of the module that declares them.
+                #if DEBUG
+                public static let checksConstraintsBeforeSending = true
+                #else
+                public static let checksConstraintsBeforeSending = false
+                #endif
                 public static let `ping` = Method<PingRequest, PingResponse>(
                     name: "box.ping", access: .read)
                 public static var all: [AnyMethod] {
@@ -421,6 +447,75 @@ struct SchemaContractMacroTests {
                     Call("ping") {
                         Access(.read)
                         \(own.replacingOccurrences(of: "; ", with: "\n"))
+                    }
+                }
+                """
+            assertMacroExpansion(
+                source,
+                expandedSource: source,
+                diagnostics: [DiagnosticSpec(message: message, line: 1, column: 1)],
+                macros: macros
+            )
+        }
+    }
+
+    @Test("diagnostics: constraints and named scalars are checked at expansion")
+    func constraintDiagnostics() {
+        // Each case: the block's declarations before the call, the put
+        // call's request fields, and the diagnosis.
+        let cases: [(top: String, fields: String, message: String)] = [
+            (
+                "", #"Field("limit", .int, constraints: .range(0.5...2.0))"#,
+                #"put.Request: Field("limit"): a range on int takes integer bounds"#
+            ),
+            (
+                "", #"Field("name", .string, constraints: .range(1...3))"#,
+                #"put.Request: Field("name"): a range applies to int, uint, float or double, not string"#
+            ),
+            (
+                "", #"Field("count", .int, constraints: .length(...3))"#,
+                #"put.Request: Field("count"): a length applies to string, bytes, an array or a map, not int"#
+            ),
+            (
+                "", #"Field("count", .int, constraints: .range(5...1))"#,
+                #"put.Request: Field("count"): a range's minimum 5 is more than its maximum 1"#
+            ),
+            (
+                "", #"Field("slug", .string, constraints: .pattern("[a-"))"#,
+                #"put.Request: Field("slug"): the pattern [a- does not compile"#
+            ),
+            (
+                "", #"Field("tags", .array(.string), constraints: .nonEmpty, .length(...3))"#,
+                #"put.Request: Field("tags") declares a length twice"#
+            ),
+            (
+                #"Alias("Slug", .string, constraints: .nonEmpty)"#,
+                #"Field("slug", .reference("Slug"), constraints: .length(...8))"#,
+                #"put.Request: Field("slug"): a field of the named type Slug takes its constraints from the type"#
+            ),
+            (
+                "", #"Field("owner", constraints: .nonEmpty) { Field("name", .string) }"#,
+                #"put.Request: Field("owner") declares a nested block, which takes no constraints — constrain its fields"#
+            ),
+            (
+                #"Alias("Tags", .array(.string))"#, #"Field("tags", .reference("Tags"))"#,
+                #"Alias("Tags") names an array: an Alias names a scalar kind"#
+            ),
+            (
+                #"Alias("Level", .int, constraints: .range(0.0...1.0))"#,
+                #"Field("level", .reference("Level"))"#,
+                #"Alias("Level"): a range on int takes integer bounds"#
+            ),
+        ]
+        for (top, fields, message) in cases {
+            let source = """
+                #schema("box") {
+                    \(top)
+                    Call("put") {
+                        Access(.write)
+                        Request {
+                            \(fields)
+                        }
                     }
                 }
                 """

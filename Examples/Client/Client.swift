@@ -123,6 +123,8 @@ struct ExampleClient {
                         var line = "  \(type.name)"
                         if case .enumeration(let cases) = type.schema {
                             line += " (enum: \(cases.map(\.name).joined(separator: ", ")))"
+                        } else if type.schema.isScalarKind {
+                            line += " (named scalar)"
                         }
                         if let text = type.description { line += " — \(text)" }
                         print(line)
@@ -155,8 +157,8 @@ struct ExampleClient {
     /// `Result<AppendResponse, MMDeclaredCallError<Journal.AppendError>>`, no
     /// throws on the data path.
     /// The target entity (`on:`) rides the open envelope, never the payload;
-    /// the generated `LineMeta`/`Priority` types come straight from the
-    /// `Type`/`Enum` declarations in the contract.
+    /// the generated `LineMeta`/`Priority`/`Author` types come straight from
+    /// the `Type`/`Enum`/`Alias` declarations in the contract.
     private static func append(_ connection: MMClientConnection, to journal: EntityName) async {
         print("\nappend to \(journal.rawValue) (unary call):")
         switch await connection.call(
@@ -164,7 +166,7 @@ struct ExampleClient {
             on: journal,
             AppendRequest(
                 line: "hello from the example client",
-                meta: LineMeta(author: "example-client", priority: .urgent)
+                meta: LineMeta(author: Author("example-client"), priority: .urgent)
             )
         ) {
             case .success(let response):

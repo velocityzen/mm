@@ -29,11 +29,20 @@ public struct ServerStreamMethod<
     public let access: AccessMode
     /// Documentation overlaid onto ``signature()`` and served by discovery.
     public let documentation: MethodDocumentation
+    /// The constraint check on the request; nil when nothing in it is
+    /// constrained.
+    public let requestCheck: MMConstraintCheck<Request>?
 
-    public init(name: String, access: AccessMode, documentation: MethodDocumentation = .init()) {
+    public init(
+        name: String,
+        access: AccessMode,
+        documentation: MethodDocumentation = .init(),
+        requestCheck: MMConstraintCheck<Request>? = nil
+    ) {
         self.name = name
         self.access = access
         self.documentation = documentation
+        self.requestCheck = requestCheck
     }
 
     /// Probes `Request`, `Element`, and `Response` and assembles the wire-facing
@@ -105,11 +114,25 @@ public struct ClientStreamMethod<
     public let access: AccessMode
     /// Documentation overlaid onto ``signature()`` and served by discovery.
     public let documentation: MethodDocumentation
+    /// The constraint check on the request; nil when nothing in it is
+    /// constrained.
+    public let requestCheck: MMConstraintCheck<Request>?
+    /// The constraint check on each streamed element; nil when nothing in
+    /// it is constrained.
+    public let elementCheck: MMConstraintCheck<Element>?
 
-    public init(name: String, access: AccessMode, documentation: MethodDocumentation = .init()) {
+    public init(
+        name: String,
+        access: AccessMode,
+        documentation: MethodDocumentation = .init(),
+        requestCheck: MMConstraintCheck<Request>? = nil,
+        elementCheck: MMConstraintCheck<Element>? = nil
+    ) {
         self.name = name
         self.access = access
         self.documentation = documentation
+        self.requestCheck = requestCheck
+        self.elementCheck = elementCheck
     }
 
     /// Probes `Request`, `Element`, and `Response` and assembles the wire-facing
@@ -151,11 +174,25 @@ public struct BidirectionalStreamMethod<
     public let access: AccessMode
     /// Documentation overlaid onto ``signature()`` and served by discovery.
     public let documentation: MethodDocumentation
+    /// The constraint check on the request; nil when nothing in it is
+    /// constrained.
+    public let requestCheck: MMConstraintCheck<Request>?
+    /// The constraint check on each element the client streams; nil when nothing in
+    /// it is constrained.
+    public let requestElementCheck: MMConstraintCheck<RequestElement>?
 
-    public init(name: String, access: AccessMode, documentation: MethodDocumentation = .init()) {
+    public init(
+        name: String,
+        access: AccessMode,
+        documentation: MethodDocumentation = .init(),
+        requestCheck: MMConstraintCheck<Request>? = nil,
+        requestElementCheck: MMConstraintCheck<RequestElement>? = nil
+    ) {
         self.name = name
         self.access = access
         self.documentation = documentation
+        self.requestCheck = requestCheck
+        self.requestElementCheck = requestElementCheck
     }
 
     /// Probes all four types and assembles the wire-facing signature with both

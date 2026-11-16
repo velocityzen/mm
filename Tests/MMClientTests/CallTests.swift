@@ -88,7 +88,7 @@ struct CallTests {
         let cases: [(MMError, MMCallError)] = [
             (MMError(code: 1, message: "nope"), .unknownMethod),
             (MMError(code: 2, message: "denied"), .denied),
-            (MMError(code: 3, message: "bad"), .malformedParams),
+            (MMError(code: 3, message: "bad"), .malformedParams(MMError(code: 3, message: "bad"))),
             (MMError(code: 4, message: "busy"), .tooManyInFlight),
             (MMError(code: 5, message: "oops"), .remoteInternal),
             // Application code with payload: preserved verbatim.

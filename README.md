@@ -387,6 +387,32 @@ The errors a call can fail with are part of its contract. A top-level `Errors` b
 
 A namespace with errors has a type named `Error`, which shadows `Swift.Error` inside it: write `Swift.Error` there. Importing MMSchema also makes a bare `Error.self` ambiguous with the `Error(...)` DSL function; write `(any Error).self`.
 
+## Constraints
+
+A contract can say more about a value than its shape. A field takes a `constraints:` list, and `Alias` names a scalar kind with rules every value of it keeps:
+
+```swift
+#schema("shelf") {
+    Alias("Slug", .string, constraints: .length(1...64), .pattern("[a-z0-9-]+"))
+    Call("put") {
+        Access { .write }
+        Request {
+            Field("slug", "Slug")
+            Field("limit", .optional(.int), constraints: .range(1...1000))
+            Field("ratio", .double, constraints: .range(0.0...1.0))
+            Field("tags", .array(.string), constraints: .nonEmpty)
+        }
+        Response { Field("ok", .bool) }
+    }
+}
+```
+
+- **Rules.** A range is inclusive, either end may be open (`.range(1...)`), and takes integer bounds on `int`/`uint` and floating ones on `float`/`double`. A length is inclusive and counts a string's Unicode scalars, a byte string's bytes, an array's elements, or a map's entries; `.nonEmpty` is `.length(1...)`. A pattern is a regular expression the whole string matches, kept to the syntax ECMAScript and PCRE share. `#schema` refuses, at compile time, a rule on a kind that does not take it, bounds that cross, and a pattern that does not compile.
+- **Named scalars.** `Alias` generates a wrapper struct (`Shelf.Slug("books")`, `.rawValue`) that travels as the bare scalar. A field of the type takes its rules from the type.
+- **The server checks at ingress**, in every build, after decoding and before the handler. A violating request gets `malformedParams` (code 3) naming the failing field: `malformed params: limit: is 0, less than the minimum 1`. A violating request-stream item ends the call with code 6: `stream violation: [3].slug: does not match the pattern [a-z0-9-]+`. A request that does not decode gets the same treatment: `malformed params: limit: expected integer, got string`.
+- **A debug client checks before sending.** In debug builds of the module that declares the contract, the generated descriptors refuse a violating request with `MMCallError.invalidRequest(path:problem:)` and send nothing; the generated CLI exits 65. Release clients send what they are given and let the server answer.
+- **On the wire** constraints are Field key 4 and TypeDefinition key 3. Discovery serves them and the fingerprint covers them. See WireProtocol.md, section 8.4.
+
 ## Authorization model
 
 Entities are dotted paths (`box.item`) in a tree. Each has an `EntityACL`, like a file: owner uid, group gid, and a 9-bit rwx/ugo mode.

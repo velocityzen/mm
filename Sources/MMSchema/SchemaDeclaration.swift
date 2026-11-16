@@ -263,6 +263,8 @@ public struct SchemaDeclaration: Sendable, Hashable {
         behavior: TypeSchema,
         definitions: [String: TypeSchema]
     ) -> Bool {
+        // Constraints are checked after decoding, so no probe sees them.
+        let declared = declared.strippingConstraints
         if behavior == declared { return true }
         guard case .reference(let name) = declared else { return false }
         guard let definition = definitions[name] else { return true }
@@ -272,7 +274,7 @@ public struct SchemaDeclaration: Sendable, Hashable {
             // finds, so its behavior is unknowable; the described check
             // carries it.
             case .union: return true
-            default: return behavior == definition
+            default: return behavior == definition.strippingConstraints
         }
     }
 
@@ -381,6 +383,7 @@ private func typeMismatches(
     }
     let definition: [String] =
         actual.strippingDescriptions.schema == declared.schema
+            && actual.constraints == declared.constraints
         ? []
         : ["\(declared.name): type definition diverges from the contract"]
     return definition + probeMismatch(for: declared, probe: probes[declared.name])
@@ -402,7 +405,11 @@ private func probeMismatch(
             // tag, never a case's fields.
             if case .union = declared.schema { return [] }
             let expected: TypeSchema =
-                if case .enumeration = declared.schema { .string } else { declared.schema }
+                if case .enumeration = declared.schema {
+                    .string
+                } else {
+                    declared.schema.strippingConstraints
+                }
             // .unknown = unknowable behavior (empty structs); the
             // definition-vs-contract check still holds.
             return probed != .unknown && probed.strippingDescriptions != expected
@@ -441,7 +448,8 @@ public struct MethodDeclaration: Sendable, Hashable {
 }
 
 /// One declared named type, produced by ``Enum(_:description:_:)``,
-/// ``Union(_:description:_:)`` or ``Type(_:description:_:)`` inside a
+/// ``Union(_:description:_:)``, ``Type(_:description:_:)`` or
+/// ``Alias(_:_:constraints:description:)`` inside a
 /// ``Schema(_:_:)`` or ``Types(_:_:)`` block. The enclosing block qualifies
 /// the name with its namespace.
 public struct TypeDeclaration: Sendable, Hashable {
@@ -449,6 +457,7 @@ public struct TypeDeclaration: Sendable, Hashable {
         case structure([Field])
         case enumeration([EnumCaseDeclaration])
         case union([UnionCaseDeclaration])
+        case alias(TypeSchema, TypeSchema.Constraints?)
     }
 
     let name: String
@@ -614,6 +623,37 @@ public func Type(
     )
 }
 
+/// Declares a named scalar: a scalar kind under its own name, with the
+/// constraints every value of it keeps:
+///
+/// ```swift
+/// Alias("Slug", .string, constraints: .length(1...64), .pattern("[a-z0-9-]+"))
+/// Alias("Percent", .double, constraints: .range(0...100))
+/// ```
+///
+/// Fields refer to it by name (`Field("slug", "Slug")`), and it travels as a
+/// ``TypeSchema/reference(_:)`` whose ``TypeDefinition`` holds the scalar
+/// kind and the constraints. `#schema` generates a wrapper struct for it
+/// that encodes as the bare scalar. The kind is `bool`, `int`, `uint`,
+/// `float`, `double`, `string`, `bytes`, `date`, `datetime` or
+/// `timestamp`.
+public func Alias(
+    _ name: String,
+    _ type: TypeSchema,
+    constraints rules: Constraint...,
+    description: String? = nil
+) -> TypeDeclaration {
+    precondition(
+        type.isScalarKind,
+        "Alias(\"\(name)\") names \(type.kindName): an Alias names a scalar kind"
+    )
+    return TypeDeclaration(
+        name: validTypeName(name),
+        description: description,
+        payload: .alias(type, combinedConstraints(rules, for: type, context: "Alias(\"\(name)\")"))
+    )
+}
+
 func validTypeName(_ name: String) -> String {
     precondition(
         !name.isEmpty && !name.contains("."),
@@ -678,22 +718,31 @@ public struct Field: Sendable, Hashable {
     /// part of the wire contract (dropped when the declaration's shapes are
     /// assembled).
     let cli: CLIArgument?
+    /// The rules the value keeps beyond its shape; see
+    /// ``TypeSchema/Constraints``.
+    let constraints: TypeSchema.Constraints?
 
     /// An auto-keyed field of any wire shape: `Field("line", .string)`,
     /// `Field("note", .optional(.string))`, `Field("tags", .array(.string))`.
+    /// `constraints:` lists the rules its value keeps:
+    /// `Field("limit", .int, constraints: .range(1...1000))`.
     public init(
         _ name: String,
         _ type: TypeSchema,
+        constraints rules: Constraint...,
         description: String? = nil,
         default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
-        self.pinnedKey = nil
-        self.name = name
-        self.type = type
-        self.description = description
-        self.defaultValue = defaultValue
-        self.cli = cli
+        self.init(
+            pinnedKey: nil,
+            name: name,
+            type: type,
+            constraints: combinedConstraints(rules, for: type, context: "Field(\"\(name)\")"),
+            description: description,
+            default: defaultValue,
+            cli: cli
+        )
     }
 
     /// A key-pinned field — the evolution-safe form.
@@ -701,17 +750,39 @@ public struct Field: Sendable, Hashable {
         _ key: Int,
         _ name: String,
         _ type: TypeSchema,
+        constraints rules: Constraint...,
         description: String? = nil,
         default defaultValue: FieldDefault? = nil,
         cli: CLIArgument? = nil
     ) {
         precondition(key >= 0, "field keys are non-negative integers (\(name) pinned \(key))")
-        self.pinnedKey = key
+        self.init(
+            pinnedKey: key,
+            name: name,
+            type: type,
+            constraints: combinedConstraints(rules, for: type, context: "Field(\"\(name)\")"),
+            description: description,
+            default: defaultValue,
+            cli: cli
+        )
+    }
+
+    private init(
+        pinnedKey: Int?,
+        name: String,
+        type: TypeSchema,
+        constraints: TypeSchema.Constraints?,
+        description: String?,
+        default defaultValue: FieldDefault?,
+        cli: CLIArgument?
+    ) {
+        self.pinnedKey = pinnedKey
         self.name = name
         self.type = type
         self.description = description
         self.defaultValue = defaultValue
         self.cli = cli
+        self.constraints = constraints
     }
 
     /// An auto-keyed field referencing a named type by name:
@@ -1391,6 +1462,13 @@ private func assembleTypes(
                     namespace: namespace,
                     localTypes: localNames
                 )
+            case .alias(let scalar, let constraints):
+                return TypeDefinition(
+                    name: "\(namespace).\(declaration.name)",
+                    schema: scalar,
+                    description: declaration.description,
+                    constraints: constraints
+                )
         }
         return TypeDefinition(
             name: "\(namespace).\(declaration.name)",
@@ -1459,7 +1537,8 @@ func assignKeys(
             key: key,
             name: field.name,
             type: field.type,
-            description: field.description
+            description: field.description,
+            constraints: field.constraints
         )
     }
 }

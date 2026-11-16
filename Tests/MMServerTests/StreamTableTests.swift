@@ -1,3 +1,4 @@
+import MMSchema
 import MMTestSupport
 import MMWire
 import NIOConcurrencyHelpers
@@ -53,14 +54,15 @@ final class RecordingStreamControl: StreamControl {
         return self.terminated.withLockedValue { $0 }
     }
 
-    func deliver(_ item: ByteBuffer) -> Result<Void, MMWireError> {
+    func deliver(_ item: ByteBuffer) -> Result<Void, IngressRejection> {
         if self.failDeliver {
-            return .failure(.unknownEnvelope)
+            return .failure(.undecodable(.unknownEnvelope))
         }
         self.log.withLockedValue { $0.delivered += 1 }
         return .success(())
     }
 
+    func requestItemSchema() -> TypeSchema? { nil }
     func clientEndRequest() { self.log.withLockedValue { $0.endedRequest = true } }
     func grantResponse(_ credits: UInt32) { self.log.withLockedValue { $0.grants.append(credits) } }
     func clientStopResponse() { self.log.withLockedValue { $0.stopped = true } }

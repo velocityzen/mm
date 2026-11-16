@@ -56,6 +56,7 @@ discovered 7 reachable methods:
   server.entity  (needs r-- on its target)
   server.schema  (needs r-- on its target)
 named types reachable through those methods:
+  journal.Author (named scalar) — Who wrote a line
   journal.ChangeEvent — One appended line, as delivered to followers
   journal.LineMeta — Attribution carried with a line
   journal.Priority (enum: normal, urgent) — How urgent a line is

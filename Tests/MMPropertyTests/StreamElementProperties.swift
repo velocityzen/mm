@@ -76,7 +76,7 @@
         // then the client's END finishes it.
         let (source, stream) = MMRequestStream<Element>.make(
             msgid: 1,
-            decoding: MMPackDecoder().decoding(Element.self),
+            decoding: checkedDecoding(MMPackDecoder().decoding(Element.self), nil),
             frameSink: { _ in true },
             metrics: MMStreamMetrics()
         )

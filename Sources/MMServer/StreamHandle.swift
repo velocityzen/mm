@@ -45,8 +45,8 @@ enum StreamTerminal: Sendable {
 
 /// The erased stream handler stored on a ``Route``: given the raw params slice,
 /// the connection context, the wire seams, and the metrics, it builds the typed
-/// source/sink, and returns a ``StreamStartup``. Returning `nil` means the
-/// params failed to decode as `Request` — the connection answers with a
+/// source/sink, and returns a ``StreamStartup``. A failure means ingress
+/// refused the params as `Request` — the connection answers with a
 /// malformed-params terminal (no stream is registered).
 typealias ErasedStreamHandler =
     @Sendable (
@@ -55,7 +55,7 @@ typealias ErasedStreamHandler =
         _ msgid: UInt32,
         _ seams: StreamWireSeams,
         _ metrics: MMStreamMetrics
-    ) -> StreamStartup?
+    ) -> Result<StreamStartup, IngressRejection>
 
 /// One concrete stream's control surface: wraps the optional request-stream
 /// source and optional response sink and the handler task's cancellation.
@@ -71,6 +71,7 @@ final class ConcreteStreamControl: StreamControl {
     let hasResponseStream: Bool
     private let requestSource: MMRequestStreamSource?
     private let responseSink: MMResponseSinkState?
+    private let requestItemSchemaThunk: @Sendable () -> TypeSchema?
     /// The handler-task cancel state. The connection registers the entry in the
     /// ``StreamTable`` *before* the child task installs the hook (via
     /// ``attachCancel(_:)``), so a CANCEL / violation / drain can route to this
@@ -83,14 +84,18 @@ final class ConcreteStreamControl: StreamControl {
     }
     private let cancelBox = NIOLockedValueBox(CancelState())
 
+    /// `requestItemSchema` gives the declared request-stream element's
+    /// schema, which names the failing field of an item ingress refuses.
     init(
         requestSource: MMRequestStreamSource?,
-        responseSink: MMResponseSinkState?
+        responseSink: MMResponseSinkState?,
+        requestItemSchema: @escaping @Sendable () -> TypeSchema? = { nil }
     ) {
         self.hasRequestStream = requestSource != nil
         self.hasResponseStream = responseSink != nil
         self.requestSource = requestSource
         self.responseSink = responseSink
+        self.requestItemSchemaThunk = requestItemSchema
     }
 
     /// Installs the handler-task cancel hook. Called once by the child task
@@ -116,9 +121,13 @@ final class ConcreteStreamControl: StreamControl {
         self.requestSource?.isTerminated() ?? true
     }
 
-    func deliver(_ item: ByteBuffer) -> Result<Void, MMWireError> {
+    func deliver(_ item: ByteBuffer) -> Result<Void, IngressRejection> {
         guard let requestSource else { return .success(()) }
         return requestSource.deliver(item)
+    }
+
+    func requestItemSchema() -> TypeSchema? {
+        self.requestItemSchemaThunk()
     }
 
     func clientEndRequest() {

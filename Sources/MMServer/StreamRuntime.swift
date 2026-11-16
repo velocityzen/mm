@@ -1,4 +1,5 @@
 import Logging
+import MMSchema
 import MMWire
 import Metrics
 import NIOConcurrencyHelpers
@@ -19,17 +20,22 @@ final class StreamRuntime: Sendable {
     private let writer: any WriterFunnel
     private let metrics: MMStreamMetrics
     private let maxConcurrentStreams: Int
+    /// Resolves the references of a refused payload's schema, so its error
+    /// can name the failing field.
+    private let typeResolver: TypeResolver
     private let logger: Logger
 
     init(
         writer: any WriterFunnel,
         metrics: MMStreamMetrics,
         maxConcurrentStreams: Int,
+        typeResolver: TypeResolver = TypeResolver([]),
         logger: Logger
     ) {
         self.writer = writer
         self.metrics = metrics
         self.maxConcurrentStreams = maxConcurrentStreams
+        self.typeResolver = typeResolver
         self.logger = logger
     }
 
@@ -112,12 +118,21 @@ final class StreamRuntime: Sendable {
             }
         )
 
-        guard let startup = streamHandler(params, context, msgid, seams, self.metrics) else {
-            // Params failed to decode as the method's request type.
-            _ = await self.writer.send(
-                .response(msgid: msgid, error: Router.error(.malformedParams), result: nil)
-            )
-            return nil
+        let startup: StreamStartup
+        switch streamHandler(params, context, msgid, seams, self.metrics) {
+            case .success(let started):
+                startup = started
+            case .failure(let rejection):
+                // Ingress refused the params as the method's request type.
+                let failure = rejection.failure(
+                    of: params,
+                    against: (try? route.signatureThunk().get())?.request,
+                    resolver: self.typeResolver
+                )
+                _ = await self.writer.send(
+                    .response(msgid: msgid, error: Router.malformedParams(failure), result: nil)
+                )
+                return nil
         }
 
         let call = self.table.withLockedValue { table in
@@ -221,8 +236,8 @@ final class StreamRuntime: Sendable {
         let decision = self.table.withLockedValue { $0.routeItem(msgid: msgid, seq: seq) }
         switch decision {
             case .deliver(let control, let call):
-                if case .failure = control.deliver(item) {
-                    // Element decode failure: a stream violation. Unlike the
+                if case .failure(let rejection) = control.deliver(item) {
+                    // Ingress refused the element: a stream violation. Unlike the
                     // `.violation` decisions (which nil the entry under the table
                     // lock), a `.deliver` decision deliberately keeps the entry live
                     // to advance seq/credit — so retire it here before the code-6
@@ -232,7 +247,16 @@ final class StreamRuntime: Sendable {
                         $0.retireStream(msgid: msgid, call: call)
                     }
                     if stillLive {
-                        await self.violation(msgid: msgid, control: control)
+                        let failure = rejection.failure(
+                            of: item,
+                            against: control.requestItemSchema(),
+                            resolver: self.typeResolver
+                        )
+                        await self.violation(
+                            msgid: msgid,
+                            control: control,
+                            error: Router.refusedItem(seq: seq, failure)
+                        )
                     } else {
                         // A CANCEL / drain retired it between deliver and here; the
                         // terminal was already sent. Just drop.
@@ -281,13 +305,15 @@ final class StreamRuntime: Sendable {
 
     /// A stream-contract violation on a live stream: tear the handler down and
     /// send the code-6 terminal. The entry was already removed by the table.
-    private func violation(msgid: UInt32, control: any StreamControl) async {
+    private func violation(
+        msgid: UInt32,
+        control: any StreamControl,
+        error: MMError = Router.error(.streamViolation)
+    ) async {
         self.metrics.violations.increment()
         control.cancelHandler()
         control.endStreams()
-        _ = await self.writer.send(
-            .response(msgid: msgid, error: Router.error(.streamViolation), result: nil)
-        )
+        _ = await self.writer.send(.response(msgid: msgid, error: error, result: nil))
     }
 
     /// A stream frame misaddressed to a live unary msgid: the caller broke the

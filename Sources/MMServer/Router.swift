@@ -57,6 +57,9 @@ public struct Router: Sendable {
     /// `server.schema` serves the subset transitively reachable from a peer's
     /// visible methods.
     public let types: [TypeDefinition]
+    /// Resolves ``types``' references, so an error for params refused at
+    /// ingress can name the failing field.
+    let typeResolver: TypeResolver
 
     private let routesByName: [String: Route]
     private let aclProvider: any EntityACLProvider
@@ -149,6 +152,7 @@ public struct Router: Sendable {
         self.fingerprint = fingerprint
         self.signatures = signatures
         self.types = types
+        self.typeResolver = TypeResolver(types)
         self.routesByName = routesByName
         self.aclProvider = aclProvider
         self.logger = logger
@@ -600,16 +604,21 @@ public struct Router: Sendable {
                 return .success(buffer)
             case .handlerError(let error):
                 return .failure(error)
-            case .malformedParams(let error):
+            case .malformedParams(let rejection):
                 self.logger.debug(
-                    "params decode failed",
+                    "params refused at ingress",
                     metadata: [
                         "connection": "\(context.connectionID)",
                         "method": "\(method)",
-                        "error": "\(error)",
+                        "error": "\(rejection)",
                     ]
                 )
-                return .failure(Self.error(.malformedParams))
+                let failure = rejection.failure(
+                    of: params,
+                    against: (try? route.signatureThunk().get())?.request,
+                    resolver: self.typeResolver
+                )
+                return .failure(Self.malformedParams(failure))
             case .responseEncodingFailed(let error):
                 self.logger.error(
                     "response encoding failed",

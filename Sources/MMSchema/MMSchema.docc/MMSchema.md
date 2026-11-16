@@ -27,6 +27,10 @@ The `#schema` macro (see ``schema(_:description:_:)``) takes the same declaratio
 
 A contract also declares the errors its calls fail with. A top-level `Errors` block holds the namespace's, an `Errors` part in a `Call` adds the call's own, and `Error("Full", exitCode:)` declares a named error that `Case(.reference("Full"))` lists. `#schema` generates one flat ``MMDeclaredError`` enum per call (`Journal.AppendError`) and wraps the call's descriptor in ``MethodWithErrors``. Each ``MethodSignature`` serves the call's errors as a union (``MethodSignature/errors``), and the fingerprint covers them. Exit codes are presentation for the generated CLI, in ``declaredErrorExitCodes``.
 
+A contract also declares the rules values keep beyond their shape. A field takes a `constraints:` list (`Field("limit", .int, constraints: .range(1...1000))`), and `Alias("Slug", .string, constraints: .length(1...64), .pattern("[a-z0-9-]+"))` declares a **named scalar** that fields refer to by name. Each ``Constraint`` is a range (inclusive, on `int`, `uint`, `float`, `double`), a length (inclusive, counting a string's Unicode scalars, a byte string's bytes, an array's elements, a map's entries), or a pattern (a regular expression a string matches whole). A declaration that puts a rule on a kind that does not take it, or whose bounds cross, is refused where it is written. Constraints are part of the contract: discovery serves them as ``TypeSchema/Constraints``, and the fingerprint covers them.
+
+A server checks them at ingress in every build, after decoding and before the handler, and its error names the failing field's path (`malformed params: limit: is 0, less than the minimum 1`). `#schema` generates the check for every type that holds a constrained value (``MMConstraintValidating``) and hands it to the call's descriptor (``MMConstraintCheck``). In debug builds of the declaring module, a client runs the same check before sending. ``SchemaValue/validated(against:resolver:path:checkingConstraints:)`` checks constraints on loose input, as the CLI does.
+
 Shared named types live in `#schemaTypes` containers (``schemaTypes(_:_:)``) or in hand-written ``SchemaDescribable`` types.
 
 ``TypeSchema`` models wire shapes: structures with integer-keyed fields, string-valued enumerations, tagged unions, raw bytes (``MMBytes``), and nominal ``TypeDefinition`` references. `TypeSchema.of(_:)` reads the schema of a Swift type with a memoized decoder probe. If the probe cannot handle a type, conform it to ``SchemaDescribable`` instead.
@@ -37,7 +41,7 @@ Schema *walking* code is shared by all consumers:
 
 - ``TypeResolver`` resolves `.reference` through a definitions table. It follows chains and reports cycles.
 - ``TypeSchema/fold(resolver:_:)`` is the one recursion for schema analyses.
-- ``SchemaValue`` is a schema-shaped value as plain data. ``SchemaValue/validated(against:resolver:path:)`` canonicalizes loose input, typically parsed JSON. The schema decides every scalar kind, and each failure includes its dotted path.
+- ``SchemaValue`` is a schema-shaped value as plain data. ``SchemaValue/validated(against:resolver:path:checkingConstraints:)`` canonicalizes loose input, typically parsed JSON. The schema decides every scalar kind, and each failure includes its dotted path.
 
 The schema-driven wire coders in MMCLI use all three.
 
@@ -95,11 +99,22 @@ Every server also serves the ``Builtins``:
 - ``Enum(_:description:_:)``
 - ``Union(_:description:_:)``
 - ``Type(_:description:_:)``
+- ``Alias(_:_:constraints:description:)``
 - ``Case(_:description:)``
 - ``Case(_:description:_:)``
 - ``Field``
 - ``Fields(_:)``
 - ``StreamOptions``
+
+### Constraints
+
+- ``Constraint``
+- ``TypeSchema/Constraints``
+- ``TypeSchema/Bound``
+- ``TypeSchema/ConstraintChecker``
+- ``MMConstraintValidating``
+- ``MMConstraintCheck``
+- ``MMConstraintPath``
 
 ### Declared errors
 

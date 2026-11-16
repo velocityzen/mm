@@ -26,8 +26,8 @@ extension TypeSchema {
     /// recurses into itself surfaces as
     /// ``FoldStep/unresolvedReference(_:)`` with `.cycle` — a *schema* fold
     /// has no value to bound that recursion, unlike the value-directed
-    /// walkers (``SchemaValue/validated(against:resolver:path:)``, the wire
-    /// coders), which handle recursive shapes naturally.
+    /// walkers (``SchemaValue/validated(against:resolver:path:checkingConstraints:)``,
+    /// the wire coders), which handle recursive shapes naturally.
     public func fold<Result>(
         resolver: TypeResolver,
         _ transform: (FoldStep<Result>) throws -> Result

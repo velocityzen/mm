@@ -28,6 +28,12 @@ import MMSchema
 /// Named types (`Enum`/`Type`) are part of the contract too: `Priority` is a
 /// string-valued wire enum (the generated Swift enum gains an `unknown` case
 /// for unrecognized values), `LineMeta` a named struct other fields reference.
+/// `Alias("Author")` names a scalar: a string on the wire, with rules every
+/// value keeps. Those rules, and a field's own `constraints:` (`line` holds
+/// at most 4096 Unicode scalars), are part of the contract: the daemon refuses
+/// a request that breaks one before its handler runs, naming the field
+/// (`malformed params: line: has length 5000, more than the maximum length
+/// 4096`), and a debug build of a client refuses it before sending.
 /// So are the errors a call can fail with: `Errors` at the top level declares
 /// the namespace's (every call can fail with them), an `Errors` part in a
 /// call adds its own, and `Error("Full")` declares a named error the way
@@ -47,8 +53,9 @@ public enum Journal: MethodNamespace {
             Case("normal")
             Case("urgent", description: "Surfaces immediately to followers")
         }
+        Alias("Author", .string, constraints: .length(1...64), description: "Who wrote a line")
         Type("LineMeta", description: "Attribution carried with a line") {
-            Field("author", .string, description: "Who wrote the line")
+            Field("author", "Author", description: "Who wrote the line")
             Field("priority", "Priority")
         }
         Type("ChangeEvent", description: "One appended line, as delivered to followers") {
@@ -83,7 +90,13 @@ public enum Journal: MethodNamespace {
             Request {
                 // `journal add "text"`, or `journal add --input notes.txt`
                 // for a file's lines (`--input -` reads stdin).
-                Field("line", .string, description: "The line text", cli: .input)
+                Field(
+                    "line",
+                    .string,
+                    constraints: .length(...4096),
+                    description: "The line text",
+                    cli: .input
+                )
                 Field(
                     "meta",
                     .optional(.reference("LineMeta")),
@@ -149,6 +162,7 @@ public enum Journal: MethodNamespace {
 // The generated types live inside `Journal`; re-export them so handler and
 // client code reads naturally.
 public typealias Priority = Journal.Priority
+public typealias Author = Journal.Author
 public typealias LineMeta = Journal.LineMeta
 public typealias AppendRequest = Journal.AppendRequest
 public typealias AppendResponse = Journal.AppendResponse

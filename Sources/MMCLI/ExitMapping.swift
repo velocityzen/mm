@@ -11,7 +11,7 @@ public enum MMCLIFailure {
     ///
     /// - `denied` → 77 (EX_NOPERM)
     /// - `unknownMethod` → 64 (EX_USAGE)
-    /// - `malformedParams` → 65 (EX_DATAERR)
+    /// - `malformedParams`, `invalidRequest` → 65 (EX_DATAERR)
     /// - `remote` (application `MMError`) → 1
     /// - `remoteInternal`, `encode`, `decode`, `streamViolation`,
     ///   `tooManyInFlight` → 70 (EX_SOFTWARE)
@@ -23,7 +23,7 @@ public enum MMCLIFailure {
                 return ExitCode(77)
             case .unknownMethod:
                 return ExitCode(64)
-            case .malformedParams:
+            case .malformedParams, .invalidRequest:
                 return ExitCode(65)
             case .remote:
                 return ExitCode(1)
@@ -47,8 +47,13 @@ public enum MMCLIFailure {
                 return "denied: \(method) on \(entity)"
             case .unknownMethod:
                 return "unknown method \(method) — try `discover`"
-            case .malformedParams:
-                return "malformed params for \(method)"
+            case .malformedParams(let object):
+                // The server's message names the failing field when it can:
+                // `malformed params: limit: is 0, less than the minimum 1`.
+                return "\(method): \(object.message)"
+            case .invalidRequest(let path, let problem):
+                return
+                    "\(method): invalid request: \(SchemaValueError(path: path, problem: problem))"
             case .remote(let object):
                 return "error \(object.code): \(object.message)"
             case .remoteInternal:

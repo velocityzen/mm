@@ -519,7 +519,10 @@ private func checkReferences(
 
 /// The named error structs, the namespace's `Error` enum, and each call's
 /// `<Call>Error` enum.
-func generateErrorTypes(for contract: ParsedContract) throws -> [String] {
+func generateErrorTypes(
+    for contract: ParsedContract,
+    constrained: Set<String>
+) throws -> [String] {
     var declarations: [String] = []
     for error in contract.namedErrors {
         var declaration = try generateStruct(
@@ -527,6 +530,7 @@ func generateErrorTypes(for contract: ParsedContract) throws -> [String] {
             fields: error.fields,
             namespace: contract.namespace,
             describedAs: .structure,
+            constrained: constrained,
             conformingTo: ["Swift.Error"]
         )
         if let description = error.description {
@@ -748,10 +752,20 @@ private func codingKeysName(_ errorCase: ResolvedErrorCase) -> String {
 /// A generated command's descriptor, rebuilt inline: wrapped in
 /// `MethodWithErrors` when the call declares errors, so the command's
 /// failures carry them.
-func commandDescriptor(for call: ParsedCall, wireName: String) -> String {
+func commandDescriptor(
+    for call: ParsedCall,
+    wireName: String,
+    constrained: Set<String>,
+    beforeSending: String
+) -> String {
     let shape = descriptorShape(for: call)
+    let checks = descriptorCheckArguments(
+        for: call,
+        constrained: constrained,
+        beforeSending: beforeSending
+    )
     let base =
-        "\(shape.type)<\(shape.generics)>(name: \"\(wireName)\", access: \(call.accessSource))"
+        "\(shape.type)<\(shape.generics)>(name: \"\(wireName)\", access: \(call.accessSource)\(checks))"
     guard !call.errors.isEmpty else { return base }
     return "MethodWithErrors(\(base), errors: \(call.errorTypeName).self)"
 }
@@ -780,7 +794,7 @@ func exitCodeConformances(for contract: ParsedContract, enclosingType: String) -
 /// The DSL functions a contract calls. Re-emitted module-qualified, so a
 /// generated type of the same name in the namespace cannot shadow them.
 private let dslCallees: Set<String> = [
-    "Access", "CLI", "Call", "Case", "Enum", "Error", "Errors", "Field", "Fields",
+    "Access", "Alias", "CLI", "Call", "Case", "Enum", "Error", "Errors", "Field", "Fields",
     "Request", "RequestStream", "Response", "ResponseStream", "Type", "Union",
 ]
 

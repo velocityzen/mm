@@ -80,12 +80,23 @@ public indirect enum TypeSchema: Sendable, Hashable {
         /// Human-readable documentation, served by discovery. Never part of
         /// the fingerprint or of compatibility comparisons.
         public var description: String?
+        /// The rules the field's value keeps beyond its shape, applied after
+        /// an optional is unwrapped; nil when it declares none. Part of the
+        /// contract: served by discovery and hashed into the fingerprint.
+        public var constraints: Constraints?
 
-        public init(key: Int?, name: String, type: TypeSchema, description: String? = nil) {
+        public init(
+            key: Int?,
+            name: String,
+            type: TypeSchema,
+            description: String? = nil,
+            constraints: Constraints? = nil
+        ) {
             self.key = key
             self.name = name
             self.type = type
             self.description = description
+            self.constraints = constraints
         }
 
         enum CodingKeys: Int, CodingKey {
@@ -93,6 +104,7 @@ public indirect enum TypeSchema: Sendable, Hashable {
             case name = 1
             case type = 2
             case description = 3
+            case constraints = 4
         }
     }
 
@@ -144,10 +156,20 @@ extension TypeSchema {
     /// edits never register as schema drift.
     public var strippingDescriptions: TypeSchema {
         self.rewritten(
-            field: { Field(key: $0.key, name: $0.name, type: $0.type) },
+            field: {
+                Field(key: $0.key, name: $0.name, type: $0.type, constraints: $0.constraints)
+            },
             enumCase: { EnumCase(name: $0.name) },
             unionCase: { UnionCase(name: $0.name, fields: $0.fields) }
         )
+    }
+
+    /// The same shape with every field constraint removed: what a decoder
+    /// probe can see, since constraints are checked after decoding.
+    public var strippingConstraints: TypeSchema {
+        self.rewritten(field: {
+            Field(key: $0.key, name: $0.name, type: $0.type, description: $0.description)
+        })
     }
 
     /// The one structure-preserving rebuild behind every rewriting walker
@@ -169,7 +191,8 @@ extension TypeSchema {
                     key: original.key,
                     name: original.name,
                     type: child(original.type),
-                    description: original.description
+                    description: original.description,
+                    constraints: original.constraints
                 )
             )
         }

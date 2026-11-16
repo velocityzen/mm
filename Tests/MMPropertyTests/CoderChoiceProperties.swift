@@ -538,8 +538,24 @@
             case .failure(let error):
                 return .encode(error)
             case .success(let bytes):
-                if case .failure = coders.decode(bytes) { return .malformedParams }
+                if case .failure = coders.decode(bytes) {
+                    return .malformedParams(
+                        MMError(code: MMErrorCode.malformedParams.code, message: "")
+                    )
+                }
                 return nil
+        }
+    }
+
+    /// `result` with the server's message on a refused read left out: what
+    /// it names depends on the bytes, and these properties check only which
+    /// side refused.
+    func ignoringRefusalMessage<Reply>(
+        _ result: Result<Reply, MMCallError>
+    ) -> Result<Reply, MMCallError> {
+        result.mapError { error in
+            guard case .malformedParams(let object) = error else { return error }
+            return .malformedParams(MMError(code: object.code, message: ""))
         }
     }
 
@@ -588,7 +604,7 @@
         let result = try await tc.withStallDetection(after: hangLimit) { _ in
             await connection.call(method, on: coderEntity, request)
         }
-        #expect(result == expected)
+        #expect(ignoringRefusalMessage(result) == expected)
     }
 
     /// The stream call shapes.
@@ -656,7 +672,7 @@
                     return (elements, await handle.result())
                 }
                 #expect(elements == expectedElements)
-                #expect(result == expected)
+                #expect(ignoringRefusalMessage(result) == expected)
 
             case .clientStream, .bidirectional:
                 // The client sends each element it can write; the server
@@ -689,7 +705,7 @@
                         return (outcomes, await handle.result())
                     }
                     #expect(outcomes == expectedOutcomes)
-                    #expect(result == expected)
+                    #expect(ignoringRefusalMessage(result) == expected)
                     #expect(exchange.received == (failure == nil ? sent : nil))
                 } else {
                     let (outcomes, elements, result) = try await tc.withStallDetection(
@@ -716,7 +732,7 @@
                     }
                     #expect(outcomes == expectedOutcomes)
                     #expect(elements == sent.map(Element.init(number:)))
-                    #expect(result == expected)
+                    #expect(ignoringRefusalMessage(result) == expected)
                 }
         }
     }

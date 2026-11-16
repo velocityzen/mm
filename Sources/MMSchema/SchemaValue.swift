@@ -5,10 +5,11 @@
 /// A `SchemaValue` starts life *loose* — typically converted from parsed JSON,
 /// where number kinds are approximate and object members arrive in whatever
 /// order — and becomes *canonical* through
-/// ``validated(against:resolver:path:)``: scalar kinds coerced exactly as the
-/// schema demands, enum cases checked, references resolved, unknown members
-/// rejected, members reordered to schema field order. Canonical values are
-/// what the schema-driven wire coders (in MMCLI) encode.
+/// ``validated(against:resolver:path:checkingConstraints:)``: scalar kinds
+/// coerced exactly as the schema demands, enum cases checked, references
+/// resolved, unknown members rejected, members reordered to schema field
+/// order. Canonical values are what the schema-driven wire coders (in MMCLI)
+/// encode.
 public indirect enum SchemaValue: Sendable, Hashable {
     /// One member of an ``object(_:)`` — ordered, unlike a dictionary, so
     /// canonical values render deterministically.
@@ -39,6 +40,11 @@ public struct SchemaValueError: Error, Sendable, Hashable, CustomStringConvertib
     public let path: String
     public let problem: String
 
+    public init(path: String, problem: String) {
+        self.path = path
+        self.problem = problem
+    }
+
     public var description: String {
         self.path.isEmpty ? self.problem : "\(self.path): \(self.problem)"
     }
@@ -53,10 +59,59 @@ extension SchemaValue {
     /// through untouched. Missing non-optional
     /// structure fields, unknown member names, duplicate members, and
     /// out-of-range values all fail with the offending path.
+    ///
+    /// With `checkingConstraints`, every field's and named scalar's
+    /// ``TypeSchema/Constraints`` are checked too, and the first value that
+    /// breaks one fails with its path and the rule it broke.
     public func validated(
         against schema: TypeSchema,
         resolver: TypeResolver,
-        path: String = ""
+        path: String = "",
+        checkingConstraints: Bool = false
+    ) -> Result<SchemaValue, SchemaValueError> {
+        let shaped = self.validatedShape(
+            against: schema,
+            resolver: resolver,
+            path: path,
+            checkingConstraints: checkingConstraints
+        )
+        guard checkingConstraints, case .success(let canonical) = shaped else { return shaped }
+        // A reference chain's named scalars each add their constraints.
+        var current = schema
+        var visited: Set<String> = []
+        while case .reference(let name) = current, visited.insert(name).inserted,
+            let definition = resolver.definition(named: name)
+        {
+            if let constraints = definition.constraints,
+                let problem = canonical.constraintProblem(constraints)
+            {
+                return .failure(SchemaValueError(path: path, problem: problem))
+            }
+            current = definition.schema
+        }
+        return shaped
+    }
+
+    /// Why this canonical value breaks `constraints`, or nil when it keeps
+    /// them or is null.
+    func constraintProblem(_ constraints: TypeSchema.Constraints) -> String? {
+        switch self {
+            case .null, .bool: nil
+            case .int(let value): constraints.violation(of: value)
+            case .uint(let value): constraints.violation(of: value)
+            case .double(let value): constraints.violation(of: value)
+            case .string(let value): constraints.violation(of: value)
+            case .bytes(let value): constraints.violation(ofLength: value.count)
+            case .array(let items): constraints.violation(ofLength: items.count)
+            case .object(let members): constraints.violation(ofLength: members.count)
+        }
+    }
+
+    private func validatedShape(
+        against schema: TypeSchema,
+        resolver: TypeResolver,
+        path: String,
+        checkingConstraints: Bool
     ) -> Result<SchemaValue, SchemaValueError> {
         let resolved: TypeSchema
         switch Self.resolved(schema, resolver: resolver, path: path) {
@@ -68,7 +123,12 @@ extension SchemaValue {
         switch resolved {
             case .optional(let wrapped):
                 if case .null = self { return .success(.null) }
-                return self.validated(against: wrapped, resolver: resolver, path: path)
+                return self.validated(
+                    against: wrapped,
+                    resolver: resolver,
+                    path: path,
+                    checkingConstraints: checkingConstraints
+                )
             case .bool:
                 guard case .bool = self else { return self.mismatch(path, expected: "bool") }
                 return .success(self)
@@ -128,7 +188,11 @@ extension SchemaValue {
                 return items.enumerated()
                     .traverse { index, item in
                         item.validated(
-                            against: element, resolver: resolver, path: "\(path)[\(index)]")
+                            against: element,
+                            resolver: resolver,
+                            path: "\(path)[\(index)]",
+                            checkingConstraints: checkingConstraints
+                        )
                     }
                     .map { .array($0) }
             case .map(let declaredKeySchema, let valueSchema):
@@ -163,13 +227,22 @@ extension SchemaValue {
                         return Self.validateMapKey(member.name, against: keySchema, path: memberPath)
                             .flatMap {
                                 member.value.validated(
-                                    against: valueSchema, resolver: resolver, path: memberPath)
+                                    against: valueSchema,
+                                    resolver: resolver,
+                                    path: memberPath,
+                                    checkingConstraints: checkingConstraints
+                                )
                             }
                             .map { canonical in Member(member.name, canonical) }
                     }
                     .map { .object($0) }
             case .structure(let fields):
-                return self.validatedStructure(fields, resolver: resolver, path: path)
+                return self.validatedStructure(
+                    fields,
+                    resolver: resolver,
+                    path: path,
+                    checkingConstraints: checkingConstraints
+                )
             case .enumeration(let cases):
                 guard case .string(let raw) = self else {
                     return self.mismatch(path, expected: "enum case (string)")
@@ -185,7 +258,12 @@ extension SchemaValue {
                 }
                 return .success(self)
             case .union(let cases):
-                return self.validatedUnion(cases, resolver: resolver, path: path)
+                return self.validatedUnion(
+                    cases,
+                    resolver: resolver,
+                    path: path,
+                    checkingConstraints: checkingConstraints
+                )
             case .reference:
                 // Unreachable: resolve(_:) above never returns a reference.
                 return .failure(
@@ -201,7 +279,8 @@ extension SchemaValue {
     private func validatedStructure(
         _ fields: [TypeSchema.Field],
         resolver: TypeResolver,
-        path: String
+        path: String,
+        checkingConstraints: Bool
     ) -> Result<SchemaValue, SchemaValueError> {
         guard case .object(let members) = self else {
             return self.mismatch(path, expected: "object")
@@ -238,8 +317,20 @@ extension SchemaValue {
                     )
                 }
                 return provided
-                    .validated(against: field.type, resolver: resolver, path: fieldPath)
-                    .map { canonical in Member(field.name, canonical) }
+                    .validated(
+                        against: field.type,
+                        resolver: resolver,
+                        path: fieldPath,
+                        checkingConstraints: checkingConstraints
+                    )
+                    .flatMap { canonical in
+                        guard checkingConstraints, let constraints = field.constraints,
+                            let problem = canonical.constraintProblem(constraints)
+                        else {
+                            return .success(Member(field.name, canonical))
+                        }
+                        return .failure(SchemaValueError(path: fieldPath, problem: problem))
+                    }
             }
             .map { .object($0.compactMap { $0 }) }
     }
@@ -252,7 +343,8 @@ extension SchemaValue {
     private func validatedUnion(
         _ cases: [TypeSchema.UnionCase],
         resolver: TypeResolver,
-        path: String
+        path: String,
+        checkingConstraints: Bool
     ) -> Result<SchemaValue, SchemaValueError> {
         guard case .object(let members) = self else {
             return self.mismatch(path, expected: "object with a 'case' member")
@@ -295,7 +387,8 @@ extension SchemaValue {
             .validatedStructure(
                 unionCase.fields,
                 resolver: resolver,
-                path: Self.appending("fields", to: path)
+                path: Self.appending("fields", to: path),
+                checkingConstraints: checkingConstraints
             )
             .map { canonical in
                 unionCase.fields.isEmpty
@@ -311,8 +404,10 @@ extension SchemaValue {
         .failure(SchemaValueError(path: path, problem: "expected \(expected), got \(self.kind)"))
     }
 
-    /// One member/field path segment appended to a (possibly empty) parent path.
-    private static func appending(_ name: String, to path: String) -> String {
+    /// One member/field path segment appended to a (possibly empty) parent
+    /// path — the path form every constraint failure names, generated code
+    /// included.
+    static func appending(_ name: String, to path: String) -> String {
         path.isEmpty ? name : "\(path).\(name)"
     }
 
@@ -509,8 +604,9 @@ extension SchemaValue {
 
 extension SchemaValue {
     /// Base64 without Foundation — MMSchema stays dependency-free. Public
-    /// because it is part of the `.bytes` contract: ``validated(against:resolver:path:)``
-    /// accepts base64 text for byte slots, and renderers emit it back.
+    /// because it is part of the `.bytes` contract:
+    /// ``validated(against:resolver:path:checkingConstraints:)`` accepts
+    /// base64 text for byte slots, and renderers emit it back.
     public static func decodeBase64(_ text: String) -> [UInt8]? {
         var values: [UInt8] = []
         values.reserveCapacity(text.utf8.count * 3 / 4)

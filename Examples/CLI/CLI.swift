@@ -99,7 +99,7 @@ private func appendRequest(
     guard !urgentPrefix.isEmpty, line.hasPrefix(urgentPrefix) else {
         return AppendRequest(line: line, meta: arguments.meta)
     }
-    let author = arguments.meta?.author ?? "cli"
+    let author = arguments.meta?.author ?? Author("cli")
     let text = String(line.dropFirst(urgentPrefix.count))
     return AppendRequest(line: text, meta: LineMeta(author: author, priority: .urgent))
 }

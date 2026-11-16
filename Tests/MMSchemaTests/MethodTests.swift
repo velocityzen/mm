@@ -33,6 +33,20 @@ struct MethodTests {
         .init(key: 0, name: "name", type: .string),
         .init(key: 1, name: "schema", type: TypeSchema.schema),
         .init(key: 2, name: "description", type: .optional(.string)),
+        .init(
+            key: 3,
+            name: "constraints",
+            type: .optional(
+                .structure(fields: [
+                    // A bound is an integer or a float: `unknown`.
+                    .init(key: 0, name: "minimum", type: .optional(.unknown)),
+                    .init(key: 1, name: "maximum", type: .optional(.unknown)),
+                    .init(key: 2, name: "minimumLength", type: .optional(.int)),
+                    .init(key: 3, name: "maximumLength", type: .optional(.int)),
+                    .init(key: 4, name: "pattern", type: .optional(.string)),
+                ])
+            )
+        ),
     ])
 
     @Test("server.schema signature")

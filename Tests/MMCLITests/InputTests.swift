@@ -166,7 +166,8 @@ struct InputTests {
         let call = seen.call { value in
             switch value {
                 case "bad": return .remote(MMError(code: 1000, message: "nope"))
-                case "malformed": return .malformedParams
+                case "malformed":
+                    return .malformedParams(MMError(code: 3, message: "malformed params"))
                 default: return nil
             }
         }

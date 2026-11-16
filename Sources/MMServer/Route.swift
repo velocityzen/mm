@@ -16,9 +16,10 @@ enum RouteOutcome: Sendable {
     case reply(ByteBuffer)
     /// The handler returned its typed failure; sent to the peer verbatim.
     case handlerError(MMError)
-    /// The params slice failed to decode as the method's request type.
-    /// Maps to `MMErrorCode.malformedParams`.
-    case malformedParams(MMWireError)
+    /// The params slice failed to decode as the method's request type, or
+    /// decoded and broke a constraint the request declares. Maps to
+    /// `MMErrorCode.malformedParams`, naming the failing path when it can.
+    case malformedParams(IngressRejection)
     /// The handler's response value failed to encode. Programmer error on the
     /// server side; maps to `MMErrorCode.internalError` and is logged.
     case responseEncodingFailed(MMWireError)
@@ -41,8 +42,8 @@ public struct Route: Sendable {
         /// A unary handler: decode `Request`, run the body, encode `Response`.
         case unary(@Sendable (ByteBuffer, MMContext) async -> RouteOutcome)
         /// A streaming handler: builds the typed source/sink and returns a
-        /// ``StreamStartup`` the connection registers and runs. `nil` means the
-        /// params failed to decode as `Request`.
+        /// ``StreamStartup`` the connection registers and runs, or the
+        /// rejection of params that ingress refused.
         case stream(ErasedStreamHandler)
     }
 
@@ -286,8 +287,10 @@ public struct Accepts: Sendable {
 ///
 /// The erased handler (a) decodes `Request` from the raw params slice via
 /// `MMPackDecoder`, (b) runs the typed body, (c) encodes `Response` via
-/// `MMPackEncoder`. Decode failure maps to `malformedParams`; encode failure
-/// of the response maps to `internalError` (and is logged by the router).
+/// `MMPackEncoder`. Decode failure maps to `malformedParams`, as does a
+/// request that decodes and breaks a constraint the descriptor's
+/// `requestCheck` declares; encode failure of the response maps to
+/// `internalError` (and is logged by the router).
 /// Types the schema macros generated MessagePack code for go through that
 /// code, chosen once here rather than on every call.
 ///
@@ -332,7 +335,8 @@ func unaryRoute<Request: Codable & Sendable, Response: Codable & Sendable>(
     encodeResponse: @escaping @Sendable (Response) -> Result<ByteBuffer, MMWireError>,
     _ body: @escaping @Sendable @concurrent (Request, MMContext) async -> Result<Response, MMError>
 ) -> Route {
-    Route(
+    let decodeRequest = checkedDecoding(decodeRequest, method.requestCheck)
+    return Route(
         name: method.name,
         access: method.access,
         accepts: accepts,
@@ -380,8 +384,8 @@ private func streamTerminal<Response: Codable & Sendable>(
 }
 
 /// The construction every stream `Handle` shares: open-request decode (a
-/// malformed request abandons startup with `nil`; the router replies
-/// `malformedParams` itself) and the `Route` assembly. Each shape supplies
+/// request that ingress refuses abandons startup with its rejection; the
+/// connection replies `malformedParams` itself) and the `Route` assembly. Each shape supplies
 /// only its startup — control wiring and run choreography. Like the unary
 /// `Handle`, every coder is picked once per route, in each shape's inlinable
 /// `Handle`, so a stream's items reach the generated code without a check
@@ -391,7 +395,7 @@ private func streamRoute<Request: Codable & Sendable>(
     access: AccessMode,
     accepts: Accepts,
     signatureThunk: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
-    decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
+    decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, IngressRejection>,
     startup:
         @escaping @Sendable (
             Request, MMContext, UInt32, StreamWireSeams, MMStreamMetrics
@@ -403,11 +407,8 @@ private func streamRoute<Request: Codable & Sendable>(
         accepts: accepts,
         signatureThunk: signatureThunk,
         kind: .stream { params, context, msgid, seams, metrics in
-            switch decodeRequest(params) {
-                case .failure:
-                    return nil
-                case .success(let request):
-                    return startup(request, context, msgid, seams, metrics)
+            decodeRequest(params).map { request in
+                startup(request, context, msgid, seams, metrics)
             }
         }
     )
@@ -435,7 +436,7 @@ private func runWithGrantPump(
 /// through `seams`. Shared by the client- and bidirectional-streaming
 /// `Handle`s, which pass the element decode they picked for the route.
 private func makeRequestStream<Element: Codable & Sendable>(
-    decoding decode: @escaping @Sendable (ByteBuffer) -> Result<Element, MMWireError>,
+    decoding decode: @escaping @Sendable (ByteBuffer) -> Result<Element, IngressRejection>,
     msgid: UInt32,
     seams: StreamWireSeams,
     metrics: MMStreamMetrics
@@ -496,7 +497,7 @@ func serverStreamRoute<
         access: method.access,
         accepts: accepts,
         signatureThunk: signature,
-        decodeRequest: decodeRequest
+        decodeRequest: checkedDecoding(decodeRequest, method.requestCheck)
     ) { (request: Request, context, msgid, seams, metrics) in
         let sinkState = MMResponseSinkState(
             msgid: msgid,
@@ -559,12 +560,13 @@ func clientStreamRoute<
         @escaping @Sendable @concurrent (Request, MMRequestStream<Element>, MMContext) async ->
         Result<Response, MMError>
 ) -> Route {
-    streamRoute(
+    let decodeElement = checkedDecoding(decodeElement, method.elementCheck)
+    return streamRoute(
         name: method.name,
         access: method.access,
         accepts: accepts,
         signatureThunk: signature,
-        decodeRequest: decodeRequest
+        decodeRequest: checkedDecoding(decodeRequest, method.requestCheck)
     ) { (request: Request, context, msgid, seams, metrics) in
         let (source, stream) = makeRequestStream(
             decoding: decodeElement,
@@ -575,7 +577,8 @@ func clientStreamRoute<
 
         let control = ConcreteStreamControl(
             requestSource: source,
-            responseSink: nil
+            responseSink: nil,
+            requestItemSchema: { (try? signature().get())?.requestStream }
         )
         return StreamStartup(control: control) {
             await runWithGrantPump(source) {
@@ -635,12 +638,13 @@ func bidirectionalStreamRoute<
             Request, MMRequestStream<RequestElement>, MMResponseSink<ResponseElement>, MMContext
         ) async -> Result<Response, MMError>
 ) -> Route {
-    streamRoute(
+    let decodeRequestElement = checkedDecoding(decodeRequestElement, method.requestElementCheck)
+    return streamRoute(
         name: method.name,
         access: method.access,
         accepts: accepts,
         signatureThunk: signature,
-        decodeRequest: decodeRequest
+        decodeRequest: checkedDecoding(decodeRequest, method.requestCheck)
     ) { (request: Request, context, msgid, seams, metrics) in
         let (source, stream) = makeRequestStream(
             decoding: decodeRequestElement,
@@ -657,7 +661,8 @@ func bidirectionalStreamRoute<
 
         let control = ConcreteStreamControl(
             requestSource: source,
-            responseSink: sinkState
+            responseSink: sinkState,
+            requestItemSchema: { (try? signature().get())?.requestStream }
         )
         let sink = MMResponseSink<ResponseElement>(state: sinkState, encode: encodeResponseElement)
         return StreamStartup(control: control) {

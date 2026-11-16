@@ -90,7 +90,7 @@ public struct MMRequestStream<Element: Codable & Sendable>: AsyncSequence, Senda
     /// `frameSink`.
     static func make(
         msgid: UInt32,
-        decoding decode: @escaping @Sendable (ByteBuffer) -> Result<Element, MMWireError>,
+        decoding decode: @escaping @Sendable (ByteBuffer) -> Result<Element, IngressRejection>,
         frameSink: @escaping MMRequestStreamSource.FrameSink,
         metrics: MMStreamMetrics
     ) -> (source: MMRequestStreamSource, stream: MMRequestStream<Element>) {
@@ -201,7 +201,7 @@ final class MMRequestStreamSource: Sendable {
     /// generated code when the element type has some, through `Decodable`
     /// otherwise. It returns the element as `any Sendable`, so this class and
     /// its producer stay free of the element type.
-    private let decode: @Sendable (ByteBuffer) -> Result<any Sendable, MMWireError>
+    private let decode: @Sendable (ByteBuffer) -> Result<any Sendable, IngressRejection>
     private let frameSink: FrameSink
     /// Coalesced "grant may be due" nudges to the pump loop. Dropping duplicate
     /// nudges is correct: the pump reads the exact `pendingGrant` amount, so one
@@ -213,7 +213,7 @@ final class MMRequestStreamSource: Sendable {
 
     init(
         msgid: UInt32,
-        decode: @escaping @Sendable (ByteBuffer) -> Result<any Sendable, MMWireError>,
+        decode: @escaping @Sendable (ByteBuffer) -> Result<any Sendable, IngressRejection>,
         frameSink: @escaping FrameSink,
         metrics: MMStreamMetrics
     ) {
@@ -255,10 +255,11 @@ final class MMRequestStreamSource: Sendable {
     }
 
     /// Decodes and yields one request item, spending one client credit (the
-    /// caller has already confirmed `hasCreditForItem`). A decode failure is a
+    /// caller has already confirmed `hasCreditForItem`). An item ingress
+    /// refuses — it fails to decode, or breaks a declared constraint — is a
     /// stream violation surfaced to the caller (which sends the code-6
     /// terminal); the element is dropped.
-    func deliver(_ item: ByteBuffer) -> Result<Void, MMWireError> {
+    func deliver(_ item: ByteBuffer) -> Result<Void, IngressRejection> {
         self.decode(item).map { decoded in
             let source = self.state.withLockedValue { state -> Source? in
                 guard !state.terminated, let source = state.source else { return nil }

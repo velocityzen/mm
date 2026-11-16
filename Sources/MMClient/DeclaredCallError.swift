@@ -105,7 +105,8 @@ extension MMClientConnection {
     ) async -> OutboundStreamHandle<Element, Never, Response, MMDeclaredCallError<Failure>> {
         OutboundStreamHandle(
             state: await self.openStream(method.base, on: entity, request),
-            encode: MMPackEncoder().encoding(Element.self)
+            encode: MMPackEncoder().encoding(Element.self),
+            check: method.base.elementCheck
         )
     }
 
@@ -130,7 +131,8 @@ extension MMClientConnection {
     > {
         BidirectionalStreamHandle(
             state: await self.openStream(method.base, on: entity, request),
-            encode: MMPackEncoder().encoding(RequestElement.self)
+            encode: MMPackEncoder().encoding(RequestElement.self),
+            check: method.base.requestElementCheck
         )
     }
 }

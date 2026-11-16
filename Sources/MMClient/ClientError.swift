@@ -1,3 +1,4 @@
+import MMSchema
 import MMWire
 
 /// Connect- and lifecycle-level failures of ``MMClientConnection``.
@@ -26,8 +27,9 @@ public enum MMClientError: Error, Equatable, Sendable {
 /// overloads.
 ///
 /// Protocol error codes 1...5 (`MMErrorCode`) map to the dedicated cases
-/// below; code 6 (streamViolation) maps to ``streamViolation(_:)`` preserving
-/// the object, code 7 (cancelled) maps to ``cancelled``; any other code — the
+/// below, code 3 (malformedParams) preserving the object; code 6
+/// (streamViolation) maps to ``streamViolation(_:)`` preserving the object,
+/// code 7 (cancelled) maps to ``cancelled``; any other code — the
 /// application range >= 64 or a future protocol code this client predates —
 /// arrives as ``remote(_:)`` with the full `MMError` preserved. Never
 /// switch exhaustively on wire codes: the mapping goes through `MMErrorCode`,
@@ -37,9 +39,22 @@ public enum MMCallError: Error, Equatable, Sendable {
     case denied
     /// The server has no route for the method (`MMErrorCode.unknownMethod`).
     case unknownMethod
-    /// The server could not decode the params as the method's request type
-    /// (`MMErrorCode.malformedParams`).
-    case malformedParams
+    /// The server refused the params at ingress (`MMErrorCode.malformedParams`):
+    /// they did not decode as the method's request type, or broke a
+    /// constraint it declares. The object is preserved verbatim; its message
+    /// names the failing field when the server could
+    /// (`malformed params: limit: is 0, less than the minimum 1`).
+    case malformedParams(MMError)
+    /// The request, or one request-stream element, broke a constraint its
+    /// contract declares, and this client refused it before sending: `path`
+    /// names the failing field as the server's ingress would (`"line.text"`,
+    /// empty for the value itself; `"[3].text"` in the element that would
+    /// have been item 3) and `problem` the rule it broke. Nothing of the
+    /// refused value was sent; a stream call it ends is cancelled. Only
+    /// clients built in debug check before sending (see `MMConstraintCheck`);
+    /// in release the server's ingress answers instead, with
+    /// ``malformedParams(_:)`` or ``streamViolation(_:)``.
+    case invalidRequest(path: String, problem: String)
     /// Either this client's ``MMClientConfiguration/maxInFlightCalls`` cap was
     /// hit (the request was never sent) or the server rejected the request
     /// over its own per-connection cap (`MMErrorCode.tooManyInFlight`).
@@ -102,8 +117,10 @@ extension MMCallError: CustomStringConvertible {
                 return "permission denied"
             case .unknownMethod:
                 return "unknown method"
-            case .malformedParams:
-                return "malformed params"
+            case .malformedParams(let error):
+                return "malformed params (\(error))"
+            case .invalidRequest(let path, let problem):
+                return "invalid request: \(SchemaValueError(path: path, problem: problem))"
             case .tooManyInFlight:
                 return "too many calls in flight"
             case .remoteInternal:
@@ -136,7 +153,7 @@ extension MMCallError {
         switch MMErrorCode(code: error.code) {
             case .unknownMethod: return .unknownMethod
             case .permissionDenied: return .denied
-            case .malformedParams: return .malformedParams
+            case .malformedParams: return .malformedParams(error)
             case .tooManyInFlight: return .tooManyInFlight
             case .internalError: return .remoteInternal
             case .streamViolation:

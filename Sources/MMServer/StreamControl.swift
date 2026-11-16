@@ -1,3 +1,4 @@
+import MMSchema
 import MMWire
 import NIOCore
 
@@ -38,10 +39,16 @@ protocol StreamControl: Sendable {
     func requestSourceTerminated() -> Bool
 
     /// Deliver one already-credit-checked request item. Returns `.failure` when
-    /// the element fails to decode (a stream violation the table turns into a
-    /// code-6 terminal). Never called for streams with no request direction
-    /// (the table rejects those items as violations first).
-    func deliver(_ item: ByteBuffer) -> Result<Void, MMWireError>
+    /// ingress refuses the element: it fails to decode, or breaks a declared
+    /// constraint (a stream violation the table turns into a code-6
+    /// terminal). Never called for streams with no request direction (the
+    /// table rejects those items as violations first).
+    func deliver(_ item: ByteBuffer) -> Result<Void, IngressRejection>
+
+    /// The declared request-stream element's schema, which names the failing
+    /// field of an item ``deliver(_:)`` refuses. Nil when there is none to
+    /// name it by.
+    func requestItemSchema() -> TypeSchema?
 
     /// Client END on the request direction: finish the handler's element
     /// sequence gracefully.

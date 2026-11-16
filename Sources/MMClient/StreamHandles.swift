@@ -1,3 +1,4 @@
+import MMSchema
 import MMWire
 import NIOCore
 
@@ -214,22 +215,36 @@ public struct OutboundStreamHandle<
     /// The element coder, picked once when the handle is made: through the
     /// generated code when the type has some, through `Codable` otherwise.
     let encode: @Sendable (Element) -> Result<ByteBuffer, MMWireError>
+    /// The element's constraint check, from the call's descriptor.
+    let check: MMConstraintCheck<Element>?
 
     /// Takes the element coder the typed call picked with
     /// ``MMPackEncoder/encoding(_:)`` in the caller's module, where `Element`
-    /// is concrete.
+    /// is concrete, and the element's constraint check from the descriptor.
     @usableFromInline
     init(
         state: ClientStreamState,
-        encode: @escaping @Sendable (Element) -> Result<ByteBuffer, MMWireError>
+        encode: @escaping @Sendable (Element) -> Result<ByteBuffer, MMWireError>,
+        check: MMConstraintCheck<Element>? = nil
     ) {
         self.state = state
         self.encode = encode
+        self.check = check
     }
 
     /// Sends one request element, credit-gated (suspends at zero credit until a
     /// grant). See ``StreamSendOutcome`` for the four graceful outcomes.
+    ///
+    /// In a debug build of the module that declares the call, an element
+    /// that breaks a constraint its contract declares is not sent: the call
+    /// ends here, cancelled on the server, and ``result()`` fails with
+    /// ``MMCallError/invalidRequest(path:problem:)``.
     public func send(_ element: Element) async -> StreamSendOutcome {
+        if let check = self.check, check.beforeSending, let violation = check.violation(of: element)
+        {
+            await self.state.refuse(violation)
+            return .callEnded
+        }
         // Encode before the credit gate.
         switch self.encode(element) {
             case .failure:
@@ -296,9 +311,10 @@ public struct BidirectionalStreamHandle<
     @usableFromInline
     init(
         state: ClientStreamState,
-        encode: @escaping @Sendable (RequestElement) -> Result<ByteBuffer, MMWireError>
+        encode: @escaping @Sendable (RequestElement) -> Result<ByteBuffer, MMWireError>,
+        check: MMConstraintCheck<RequestElement>? = nil
     ) {
         self.inbound = InboundStreamHandle(state: state)
-        self.outbound = OutboundStreamHandle(state: state, encode: encode)
+        self.outbound = OutboundStreamHandle(state: state, encode: encode, check: check)
     }
 }

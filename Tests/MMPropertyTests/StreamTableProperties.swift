@@ -2,6 +2,7 @@
 #if os(macOS) || os(Linux)
 
     import HegelTesting
+    import MMSchema
     import MMWire
     import NIOConcurrencyHelpers
     import NIOCore
@@ -48,11 +49,12 @@
         }
 
         /// The source spends a credit on every item it takes.
-        func deliver(_ item: ByteBuffer) -> Result<Void, MMWireError> {
+        func deliver(_ item: ByteBuffer) -> Result<Void, IngressRejection> {
             self.source.withLockedValue { $0.credit -= 1 }
             return .success(())
         }
 
+        func requestItemSchema() -> TypeSchema? { nil }
         func clientEndRequest() {}
         func grantResponse(_ credits: UInt32) {}
         func clientStopResponse() {}

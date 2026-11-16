@@ -54,7 +54,8 @@ extension MMClientConnection {
     ) async -> OutboundStreamHandle<Element, Never, Response, MMCallError> {
         OutboundStreamHandle(
             state: await self.openStream(method, on: entity, request),
-            encode: MMPackEncoder().encoding(Element.self)
+            encode: MMPackEncoder().encoding(Element.self),
+            check: method.elementCheck
         )
     }
 
@@ -76,7 +77,8 @@ extension MMClientConnection {
     ) async -> BidirectionalStreamHandle<RequestElement, ResponseElement, Response, MMCallError> {
         BidirectionalStreamHandle(
             state: await self.openStream(method, on: entity, request),
-            encode: MMPackEncoder().encoding(RequestElement.self)
+            encode: MMPackEncoder().encoding(RequestElement.self),
+            check: method.requestElementCheck
         )
     }
 
@@ -95,7 +97,7 @@ extension MMClientConnection {
         await self.openStream(
             methodName: method.name,
             entity: entity,
-            encodeRequest: { MMPackEncoder().encodeCheckingForGeneratedCode(request) },
+            encodeRequest: { encodedRequest(request, checking: method.requestCheck) },
             hasResponseStream: true,
             hasRequestStream: false,
             decoders: ClientStreamDecoders(inbound: Element.self, response: Response.self)
@@ -117,7 +119,7 @@ extension MMClientConnection {
         await self.openStream(
             methodName: method.name,
             entity: entity,
-            encodeRequest: { MMPackEncoder().encodeCheckingForGeneratedCode(request) },
+            encodeRequest: { encodedRequest(request, checking: method.requestCheck) },
             hasResponseStream: false,
             hasRequestStream: true,
             decoders: ClientStreamDecoders(inbound: Never.self, response: Response.self)
@@ -140,7 +142,7 @@ extension MMClientConnection {
         await self.openStream(
             methodName: method.name,
             entity: entity,
-            encodeRequest: { MMPackEncoder().encodeCheckingForGeneratedCode(request) },
+            encodeRequest: { encodedRequest(request, checking: method.requestCheck) },
             hasResponseStream: true,
             hasRequestStream: true,
             decoders: ClientStreamDecoders(inbound: ResponseElement.self, response: Response.self)

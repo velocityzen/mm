@@ -53,16 +53,28 @@ package enum SchemaCodeGenerator {
         let (namespace, closure) = try macroArguments(node, name: "#schema")
         var contract = try parseContract(namespace: namespace, closure: closure)
         contract.descriptionLiteral = try parsedDescriptionLiteral(node)
-        try validateCLI(calls: contract.calls, enumNames: enumNames(in: contract))
+        try validateCLI(calls: contract.calls, argumentTypeNames: argumentTypeNames(in: contract))
+        let constrained = constrainedTypeNames(contract.types)
         var declarations: [String] = []
         for type in contract.types {
-            declarations.append(try generateNamedType(type, namespace: namespace))
+            declarations.append(
+                try generateNamedType(type, namespace: namespace, constrained: constrained)
+            )
         }
         for call in contract.calls {
-            declarations.append(contentsOf: try generateStructs(for: call, namespace: namespace))
+            declarations.append(
+                contentsOf: try generateStructs(
+                    for: call,
+                    namespace: namespace,
+                    constrained: constrained
+                )
+            )
         }
-        declarations.append(contentsOf: try generateErrorTypes(for: contract))
-        declarations.append(generateDescriptors(for: contract))
+        declarations.append(
+            contentsOf: try generateErrorTypes(for: contract, constrained: constrained)
+        )
+        declarations.append(constraintChecksBeforeSendingDeclaration)
+        declarations.append(generateDescriptors(for: contract, constrained: constrained))
         declarations.append(generateAll(for: contract))
         if !contract.types.isEmpty {
             declarations.append(try generateTypesTable(contract.types, namespace: namespace))
@@ -99,22 +111,27 @@ package enum SchemaCodeGenerator {
         for item in closure.statements {
             guard let call = item.item.as(FunctionCallExprSyntax.self),
                 let callee = calleeName(call),
-                ["Enum", "Union", "Type"].contains(callee)
+                ["Enum", "Union", "Type", "Alias"].contains(callee)
             else {
                 throw SchemaMacroError(
                     description:
-                        "#schemaTypes supports only Enum(...), Union(...) and Type(...) declarations (static subset)"
+                        "#schemaTypes supports only Enum(...), Union(...), Type(...) and Alias(...) declarations (static subset)"
                 )
             }
-            types.append(try parseTypeDecl(call, kind: callee))
+            types.append(
+                callee == "Alias" ? try parseAliasDecl(call) : try parseTypeDecl(call, kind: callee)
+            )
         }
         guard !types.isEmpty else {
             throw SchemaMacroError(description: "#schemaTypes declares no types")
         }
         try validate(types: types, calls: [])
+        let constrained = constrainedTypeNames(types)
         var declarations: [String] = []
         for type in types {
-            declarations.append(try generateNamedType(type, namespace: namespace))
+            declarations.append(
+                try generateNamedType(type, namespace: namespace, constrained: constrained)
+            )
         }
         declarations.append(try generateTypesTable(types, namespace: namespace))
         declarations.append(generateProbedTypes(types, namespace: namespace))
@@ -141,13 +158,19 @@ package enum SchemaCodeGenerator {
         var contract = try parseContract(namespace: namespace, closure: closure)
         contract.descriptionLiteral = try parsedDescriptionLiteral(node)
         guard contract.cliMode.enabled else { return nil }
-        try validateCLI(calls: contract.calls, enumNames: enumNames(in: contract))
+        try validateCLI(calls: contract.calls, argumentTypeNames: argumentTypeNames(in: contract))
         let members = generateCommands(for: contract, enclosingType: enclosingType)
         // MMCLIEnumArgument hides the `unknown` fallback from help and
         // refuses it as input.
         let topLevel = contract.types.compactMap { type -> String? in
-            guard case .enumeration = type.payload else { return nil }
-            return "extension \(enclosingType).\(type.name): MMCLIEnumArgument {}"
+            switch type.payload {
+                case .enumeration:
+                    "extension \(enclosingType).\(type.name): MMCLIEnumArgument {}"
+                case .alias:
+                    "extension \(enclosingType).\(type.name): MMCLIAliasArgument {}"
+                case .structure, .union:
+                    nil
+            }
         }
         return (
             members, topLevel + exitCodeConformances(for: contract, enclosingType: enclosingType)
@@ -166,11 +189,15 @@ package struct SchemaMacroError: Error, CustomStringConvertible {
     }
 }
 
-private func enumNames(in contract: ParsedContract) -> Set<String> {
+/// The declared types a command takes as a typed argument: the wire enums
+/// and the named scalars.
+private func argumentTypeNames(in contract: ParsedContract) -> Set<String> {
     Set(
         contract.types.compactMap { type -> String? in
-            if case .enumeration = type.payload { return type.name }
-            return nil
+            switch type.payload {
+                case .enumeration, .alias: type.name
+                case .structure, .union: nil
+            }
         })
 }
 
@@ -342,6 +369,8 @@ struct ParsedTypeDecl {
         case structure([ParsedField])
         case enumeration([ParsedCase])
         case union([ParsedUnionCase])
+        /// A named scalar: its kind and the constraints its values keep.
+        case alias(ParsedType, ParsedConstraints?)
     }
 
     var name: String
@@ -454,6 +483,8 @@ struct ParsedField {
     var description: String?
     var defaultValue: ParsedFieldDefault?
     var cliHint: ParsedCLIArgument?
+    /// The rules the field's value keeps beyond its shape.
+    var constraints: ParsedConstraints? = nil
 }
 
 /// `append` → `Append` — one spelling for generated-type name derivation.
@@ -538,6 +569,8 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
                 calls.append(parsed)
             case "Enum", "Type", "Union":
                 types.append(try parseTypeDecl(call, kind: callee))
+            case "Alias":
+                types.append(try parseAliasDecl(call))
             case "CLI":
                 guard cliMode == nil else {
                     throw SchemaMacroError(description: "#schema declares CLI(...) twice")
@@ -579,7 +612,7 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
 /// hint is an authoring mistake either way. Checks command-name uniqueness
 /// (including aliases), reserved names, option/short collisions per command,
 /// `.flag` on non-bool fields, and `.omitted` on required fields.
-private func validateCLI(calls: [ParsedCall], enumNames: Set<String>) throws {
+private func validateCLI(calls: [ParsedCall], argumentTypeNames: Set<String>) throws {
     // Option names claimed by every generated command: the shared connection
     // OptionGroup plus swift-argument-parser's own flags.
     let reservedOptions = SchemaCodeGenerator.reservedLongOptionNames
@@ -613,7 +646,7 @@ private func validateCLI(calls: [ParsedCall], enumNames: Set<String>) throws {
         // The CLI options share the command line with the request's fields.
         let cliOptions = call.cliOptions ?? []
         if call.cliOptions != nil {
-            try validateCLIOptions(cliOptions, call: call, enumNames: enumNames)
+            try validateCLIOptions(cliOptions, call: call, argumentTypeNames: argumentTypeNames)
         }
         var shortNames: Set<String> = []
         let fields = call.request.map { (field: $0, isCLIOption: false) }
@@ -623,7 +656,7 @@ private func validateCLI(calls: [ParsedCall], enumNames: Set<String>) throws {
                 switch field.cliHint {
                     case nil, .option:
                         try validateFieldDefault(
-                            fieldDefault, field: field, call: call, enumNames: enumNames,
+                            fieldDefault, field: field, call: call, argumentTypeNames: argumentTypeNames,
                             requiresOptional: !isCLIOption)
                     default:
                         throw SchemaMacroError(
@@ -725,7 +758,7 @@ private func validateInputFields(_ fields: [ParsedField], call: ParsedCall) thro
 /// flat shape; no name shared with a request field. Defaults, flags, option
 /// names and shorts are checked with the request's fields.
 private func validateCLIOptions(
-    _ options: [ParsedField], call: ParsedCall, enumNames: Set<String>
+    _ options: [ParsedField], call: ParsedCall, argumentTypeNames: Set<String>
 ) throws {
     guard call.request.contains(where: isInputField) else {
         throw SchemaMacroError(
@@ -751,7 +784,7 @@ private func validateCLIOptions(
                         "Call(\"\(call.name)\"): CLI option \"\(field.name)\" must be an option or a flag"
                 )
         }
-        guard case .direct = commandFieldForm(field, enumNames: enumNames) else {
+        guard case .direct = commandFieldForm(field, argumentTypeNames: argumentTypeNames) else {
             throw SchemaMacroError(
                 description:
                     "Call(\"\(call.name)\"): CLI option \"\(field.name)\" needs a flat shape: a scalar, a wire enum, a calendar/clock kind, or an array of those"
@@ -770,7 +803,7 @@ private func validateFieldDefault(
     _ flagDefault: ParsedFieldDefault,
     field: ParsedField,
     call: ParsedCall,
-    enumNames: Set<String>,
+    argumentTypeNames: Set<String>,
     requiresOptional: Bool = true
 ) throws {
     func mismatch(_ expected: String) -> SchemaMacroError {
@@ -815,10 +848,10 @@ private func validateFieldDefault(
                 throw mismatch("a string literal (the option takes JSON text)")
             }
         case .reference(let name):
-            guard !enumNames.contains(name) else {
+            guard !argumentTypeNames.contains(name) else {
                 throw SchemaMacroError(
                     description:
-                        "Call(\"\(call.name)\"): field \"\(field.name)\" default: is not supported on enum fields"
+                        "Call(\"\(call.name)\"): field \"\(field.name)\" default: is not supported on enum or alias fields"
                 )
             }
             guard case .string = flagDefault else {
@@ -923,7 +956,7 @@ private func validate(types: [ParsedTypeDecl], calls: [ParsedCall]) throws -> Se
                         }
                     }
                 }
-            case .enumeration:
+            case .enumeration, .alias:
                 break
         }
     }
@@ -1552,7 +1585,14 @@ private func parseField(_ call: FunctionCallExprSyntax, context: String) throws 
         )
     }
     arguments.removeFirst()
+    let (typeArguments, constraintExpressions) = splitConstraintArguments(arguments)
     if let nested = call.trailingClosure {
+        guard constraintExpressions.isEmpty else {
+            throw SchemaMacroError(
+                description:
+                    "\(context): Field(\"\(name)\") declares a nested block, which takes no constraints — constrain its fields"
+            )
+        }
         guard arguments.isEmpty else {
             throw SchemaMacroError(
                 description:
@@ -1566,14 +1606,16 @@ private func parseField(_ call: FunctionCallExprSyntax, context: String) throws 
             type: .structure(name: nestedName, fields: nestedFields),
             description: description, defaultValue: defaultValue, cliHint: cliHint)
     }
-    guard let typeArgument = arguments.first, arguments.count == 1 else {
+    guard let typeArgument = typeArguments.first, typeArguments.count == 1 else {
         throw SchemaMacroError(
             description: "\(context): Field(\"\(name)\") requires exactly one type expression")
     }
+    let type = try parseType(typeArgument.expression, context: "\(context).\(name)")
     return ParsedField(
-        pinnedKey: pinnedKey, name: name,
-        type: try parseType(typeArgument.expression, context: "\(context).\(name)"),
-        description: description, defaultValue: defaultValue, cliHint: cliHint)
+        pinnedKey: pinnedKey, name: name, type: type,
+        description: description, defaultValue: defaultValue, cliHint: cliHint,
+        constraints: try parseConstraints(
+            constraintExpressions, for: type, context: "\(context): Field(\"\(name)\")"))
 }
 
 func parseType(_ expr: ExprSyntax, context: String) throws -> ParsedType {
@@ -1751,6 +1793,9 @@ func fieldLiterals(
         if let description = field.description {
             literal += ", description: \(quoted(description))"
         }
+        if let constraints = field.constraints {
+            literal += ", constraints: \(constraints.literal)"
+        }
         return literal + ")"
     }.joined(separator: ", ")
 }
@@ -1769,6 +1814,7 @@ func generateStruct(
     fields: [ParsedField],
     namespace: String,
     describedAs: DescribedAs?,
+    constrained: Set<String>,
     conformingTo leadingConformances: [String] = []
 ) throws -> String {
     let keyed = try assignKeys(fields, startingAt: 0, reserving: [])
@@ -1780,7 +1826,7 @@ func generateStruct(
     let describable = describedAs != nil || keyed.isEmpty
     var conformances = leadingConformances + ["Codable", "Hashable", "Sendable"]
     if describable { conformances.append("SchemaDescribable") }
-    conformances.append("MMPackCodable")
+    conformances.append(contentsOf: ["MMPackCodable", "MMConstraintValidating"])
     lines.append("public struct \(name): \(conformances.joined(separator: ", ")) {")
     switch describedAs {
         case .reference(let qualified):
@@ -1802,7 +1848,7 @@ func generateStruct(
     for (nestedName, nestedFields) in nestedStructures(in: fields) {
         let nested = try generateStruct(
             name: nestedName, fields: nestedFields,
-            namespace: namespace, describedAs: nil)
+            namespace: namespace, describedAs: nil, constrained: constrained)
         lines.append(
             nested.split(separator: "\n").map { "    \($0)" }.joined(separator: "\n"))
     }
@@ -1822,6 +1868,9 @@ func generateStruct(
     lines.append(contentsOf: assignments)
     lines.append("    }")
     lines.append(contentsOf: mmPackStructMembers(keyed).map { "    \($0)" })
+    lines.append(
+        contentsOf: structConstraintMembers(keyed, constrained: constrained).map { "    \($0)" }
+    )
     if !keyed.isEmpty {
         lines.append("    enum CodingKeys: Int, CodingKey {")
         for (field, key) in keyed {
@@ -2081,7 +2130,7 @@ private func mmPackWriteThrows(_ type: ParsedType) -> Bool {
 /// One statement writing `value`, a Swift expression of `type`. Maps write
 /// through `Encodable`; external types through their generated code when
 /// they have some, which the `write` overloads pick at compile time.
-private func mmPackWrite(_ type: ParsedType, value: String) -> String {
+func mmPackWrite(_ type: ParsedType, value: String) -> String {
     let marker = mmPackWriteThrows(type) ? "try " : ""
     switch type {
         case .bool: return "writer.writeBool(\(value))"
@@ -2110,7 +2159,7 @@ private func mmPackWrite(_ type: ParsedType, value: String) -> String {
 /// below the struct's own map: its fields sit at 1, and each array's
 /// elements one deeper than the array. An optional's value sits at the
 /// optional's own level, as with `Decodable`.
-private func mmPackRead(_ type: ParsedType, level: Int) -> String {
+func mmPackRead(_ type: ParsedType, level: Int) -> String {
     let depth = "depth + \(level)"
     switch type {
         case .bool: return "try reader.readBool()"
@@ -2136,18 +2185,23 @@ private func mmPackRead(_ type: ParsedType, level: Int) -> String {
 }
 
 private func generateNamedType(
-    _ type: ParsedTypeDecl, namespace: String
+    _ type: ParsedTypeDecl, namespace: String, constrained: Set<String>
 ) throws -> String {
     let qualified = "\(namespace).\(type.name)"
     switch type.payload {
         case .structure(let fields):
             return try generateStruct(
                 name: type.name, fields: fields,
-                namespace: namespace, describedAs: .reference(qualified: qualified))
+                namespace: namespace, describedAs: .reference(qualified: qualified),
+                constrained: constrained)
+        case .alias(let scalar, let constraints):
+            return generateAlias(
+                type.name, scalar: scalar, constraints: constraints, qualified: qualified,
+                description: type.description)
         case .enumeration(let cases):
             var lines: [String] = []
             lines.append(
-                "public enum \(type.name): String, Codable, Sendable, CaseIterable, SchemaDescribable, MMPackCodable {"
+                "public enum \(type.name): String, Codable, Sendable, CaseIterable, SchemaDescribable, MMPackCodable, MMConstraintValidating {"
             )
             for enumCase in cases {
                 if let description = enumCase.description {
@@ -2162,6 +2216,7 @@ private func generateNamedType(
             lines.append("        self = \(type.name)(rawValue: raw) ?? .unknown")
             lines.append("    }")
             lines.append(contentsOf: mmPackEnumMembers(type.name).map { "    \($0)" })
+            lines.append(contentsOf: constraintViolationFunction([]).map { "    \($0)" })
             lines.append("    public static var schema: TypeSchema {")
             lines.append("        .reference(\(quoted(qualified)))")
             lines.append("    }")
@@ -2169,7 +2224,8 @@ private func generateNamedType(
             return lines.joined(separator: "\n")
         case .union(let cases):
             return try generateUnion(
-                type.name, cases: cases, qualified: qualified, namespace: namespace)
+                type.name, cases: cases, qualified: qualified, namespace: namespace,
+                constrained: constrained)
     }
 }
 
@@ -2181,14 +2237,16 @@ private func generateUnion(
     _ name: String,
     cases: [ParsedUnionCase],
     qualified: String,
-    namespace: String
+    namespace: String,
+    constrained: Set<String>
 ) throws -> String {
     let keyedCases = try cases.map { unionCase in
         (unionCase, try assignKeys(unionCase.fields, startingAt: 0, reserving: []))
     }
     var lines: [String] = []
     lines.append(
-        "public enum \(name): Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable {")
+        "public enum \(name): Codable, Hashable, Sendable, SchemaDescribable, MMPackCodable, MMConstraintValidating {"
+    )
     for (unionCase, keyed) in keyedCases {
         if let description = unionCase.description {
             lines.append("    /// \(docCommentText(description))")
@@ -2205,7 +2263,8 @@ private func generateUnion(
     for (unionCase, _) in keyedCases {
         for (nestedName, nestedFields) in nestedStructures(in: unionCase.fields) {
             let nested = try generateStruct(
-                name: nestedName, fields: nestedFields, namespace: namespace, describedAs: nil)
+                name: nestedName, fields: nestedFields, namespace: namespace, describedAs: nil,
+                constrained: constrained)
             lines.append(nested.split(separator: "\n").map { "    \($0)" }.joined(separator: "\n"))
         }
     }
@@ -2268,6 +2327,9 @@ private func generateUnion(
     lines.append("        }")
     lines.append("    }")
     lines.append(contentsOf: mmPackUnionMembers(keyedCases).map { "    \($0)" })
+    lines.append(
+        contentsOf: unionConstraintMembers(keyedCases, constrained: constrained).map { "    \($0)" }
+    )
     lines.append("}")
     return lines.joined(separator: "\n")
 }
@@ -2399,10 +2461,15 @@ private func definitionLiteral(_ type: ParsedTypeDecl, namespace: String) throws
                 return literal + ")"
             }.joined(separator: ", ")
             schema = ".union(cases: [\(caseLiterals)])"
+        case .alias(let scalar, _):
+            schema = try schemaLiteral(scalar, namespace: namespace)
     }
     var literal = "TypeDefinition(name: \(quoted("\(namespace).\(type.name)")), schema: \(schema)"
     if let description = type.description {
         literal += ", description: \(quoted(description))"
+    }
+    if case .alias(_, let constraints?) = type.payload {
+        literal += ", constraints: \(constraints.literal)"
     }
     return literal + ")"
 }
@@ -2435,7 +2502,11 @@ private func generateProbedTypes(_ types: [ParsedTypeDecl], namespace: String) -
         """
 }
 
-private func generateStructs(for call: ParsedCall, namespace: String) throws -> [String] {
+private func generateStructs(
+    for call: ParsedCall,
+    namespace: String,
+    constrained: Set<String>
+) throws -> [String] {
     // A part with a payload reference IS a named type — no struct to
     // generate; stream parts generate only when declared inline.
     let parts: [(fields: [ParsedField]?, name: String)] = [
@@ -2447,7 +2518,8 @@ private func generateStructs(for call: ParsedCall, namespace: String) throws -> 
     return try parts.compactMap { part in
         guard let fields = part.fields else { return nil }
         return try generateStruct(
-            name: part.name, fields: fields, namespace: namespace, describedAs: .structure)
+            name: part.name, fields: fields, namespace: namespace, describedAs: .structure,
+            constrained: constrained)
     }
 }
 
@@ -2499,9 +2571,19 @@ private func wireName(namespace: String, call: ParsedCall) -> String {
     call.isRoot ? namespace : "\(namespace).\(call.name)"
 }
 
-private func descriptor(for call: ParsedCall, namespace: String) -> String {
+private func descriptor(
+    for call: ParsedCall,
+    namespace: String,
+    constrained: Set<String>
+) -> String {
     let name = wireName(namespace: namespace, call: call)
-    let documentation = documentationArgument(for: call).map { ",\n    documentation: \($0)" } ?? ""
+    let documentation =
+        (documentationArgument(for: call).map { ",\n    documentation: \($0)" } ?? "")
+        + descriptorCheckArguments(
+            for: call,
+            constrained: constrained,
+            beforeSending: "checksConstraintsBeforeSending"
+        )
     let shape = descriptorShape(for: call)
     guard !call.errors.isEmpty else {
         return """
@@ -2519,9 +2601,14 @@ private func descriptor(for call: ParsedCall, namespace: String) -> String {
         """
 }
 
-private func generateDescriptors(for contract: ParsedContract) -> String {
-    contract.calls.map { descriptor(for: $0, namespace: contract.namespace) }
-        .joined(separator: "\n")
+private func generateDescriptors(
+    for contract: ParsedContract,
+    constrained: Set<String>
+) -> String {
+    contract.calls.map {
+        descriptor(for: $0, namespace: contract.namespace, constrained: constrained)
+    }
+    .joined(separator: "\n")
 }
 
 private func generateAll(for contract: ParsedContract) -> String {
@@ -2546,19 +2633,21 @@ private func generateAll(for contract: ParsedContract) -> String {
 /// (`Method<Req, Res>(name:access:)`) rather than referencing the namespace's
 /// static. Both spellings share the one DSL source, so they cannot drift.
 private func generateCommands(for contract: ParsedContract, enclosingType: String) -> [String] {
-    let enumNames = enumNames(in: contract)
+    let argumentTypeNames = argumentTypeNames(in: contract)
     let structsByName = Dictionary(
         uniqueKeysWithValues: contract.types.compactMap { type -> (String, [ParsedField])? in
             if case .structure(let fields) = type.payload { return (type.name, fields) }
             return nil
         })
+    let constrained = constrainedTypeNames(contract.types)
     var declarations: [String] = []
     var subcommands: [String] = []
     for call in contract.calls where !call.cliOmitted {
         declarations.append(
             commandDeclaration(
                 for: call, namespace: contract.namespace, enclosingType: enclosingType,
-                enumNames: enumNames, structsByName: structsByName))
+                argumentTypeNames: argumentTypeNames, structsByName: structsByName,
+                constrained: constrained))
         subcommands.append("\(call.commandTypeName).self")
     }
     // Every group also gets `verify`: the namespace-scoped drift check
@@ -2618,7 +2707,7 @@ private enum CommandFieldForm {
 /// as typed options; structures, maps, non-enum references, and externals
 /// take a JSON literal.
 private func commandFieldForm(
-    _ field: ParsedField, enumNames: Set<String>
+    _ field: ParsedField, argumentTypeNames: Set<String>
 ) -> CommandFieldForm {
     if case .omitted = field.cliHint { return .omitted }
     func isDirect(_ type: ParsedType) -> Bool {
@@ -2627,7 +2716,7 @@ private func commandFieldForm(
                 .date, .datetime, .timestamp:
                 return true
             case .reference(let name):
-                return enumNames.contains(name)
+                return argumentTypeNames.contains(name)
             case .optional(let wrapped), .array(let wrapped):
                 return isDirect(wrapped)
             case .map, .structure, .external:
@@ -2658,10 +2747,19 @@ private func commandDeclaration(
     for call: ParsedCall,
     namespace: String,
     enclosingType: String,
-    enumNames: Set<String>,
-    structsByName: [String: [ParsedField]]
+    argumentTypeNames: Set<String>,
+    structsByName: [String: [ParsedField]],
+    constrained: Set<String>
 ) -> String {
     let wireName = wireName(namespace: namespace, call: call)
+    // The CLI checks a request's constraints before sending it as the
+    // client does: in debug builds of the module declaring the contract.
+    let descriptor = commandDescriptor(
+        for: call,
+        wireName: wireName,
+        constrained: constrained,
+        beforeSending: "\(enclosingType).checksConstraintsBeforeSending"
+    )
     // Request fields: a generated struct's declared fields, a local
     // named-type reference's fields (the type is a sibling with a memberwise
     // init), or — for external and optional references — a single JSON
@@ -2748,13 +2846,13 @@ private func commandDeclaration(
         let optionFields = fields.filter { !isPositional($0) }
         for field in requiredPositionals + optionalPositionals {
             emitField(
-                field, call: call, enumNames: enumNames,
+                field, call: call, argumentTypeNames: argumentTypeNames,
                 lines: &lines, preludes: &preludes)
         }
         lines.append(variadicPositionals.isEmpty ? entityProperty : entityOption)
         for field in variadicPositionals + optionFields {
             emitField(
-                field, call: call, enumNames: enumNames,
+                field, call: call, argumentTypeNames: argumentTypeNames,
                 lines: &lines, preludes: &preludes)
         }
         if let inputField {
@@ -2774,7 +2872,12 @@ private func commandDeclaration(
                 "        _ = try MMCLIInputSource.from(value: \(inputField.name), path: input, name: \(quoted(valueName))).get()"
             )
             lines.append("    }")
-            emitCLIOptions(call.cliOptions ?? [], call: call, enumNames: enumNames, lines: &lines)
+            emitCLIOptions(
+                call.cliOptions ?? [],
+                call: call,
+                argumentTypeNames: argumentTypeNames,
+                lines: &lines
+            )
         }
         // Request construction uses declaration order, not emission order.
         for field in fields {
@@ -2783,7 +2886,7 @@ private func commandDeclaration(
                 requestArguments.append("\(field.name): \"\"")
                 continue
             }
-            switch commandFieldForm(field, enumNames: enumNames) {
+            switch commandFieldForm(field, argumentTypeNames: argumentTypeNames) {
                 case .omitted:
                     requestArguments.append("\(field.name): nil")
                 case .direct:
@@ -2823,7 +2926,6 @@ private func commandDeclaration(
         // parsed arguments, the input field empty; the closure makes one
         // call with a request. The runner owns the input, output, failures
         // and Ctrl-C, and hands both to the tool's `Input(...)` body.
-        let descriptor = commandDescriptor(for: call, wireName: wireName)
         let valueName = kebabCased(inputField.name)
         lines.append(
             "        let source = try MMCLIInputSource.from(value: \(inputField.name), path: input, name: \(quoted(valueName))).get()"
@@ -2868,12 +2970,12 @@ private func commandDeclaration(
         case (false, false):
             lines.append("            try MMCLIFailure.unwrap(")
             lines.append("                await client.call(")
-            lines.append("                    \(commandDescriptor(for: call, wireName: wireName)),")
+            lines.append("                    \(descriptor),")
             lines.append("                    on: target, request),")
             lines.append("                method: \"\(wireName)\", entity: entityArgument)")
         case (false, true):
             lines.append("            let handle = await client.call(")
-            lines.append("                \(commandDescriptor(for: call, wireName: wireName)),")
+            lines.append("                \(descriptor),")
             lines.append("                on: target, request)")
             lines.append(
                 "            return try await MMCLIStreamDriver.inbound(handle, format: format, method: \"\(wireName)\", entity: entityArgument)"
@@ -2881,7 +2983,7 @@ private func commandDeclaration(
         case (true, false):
             let mapper = requestElementMapper
             lines.append("            let handle = await client.call(")
-            lines.append("                \(commandDescriptor(for: call, wireName: wireName)),")
+            lines.append("                \(descriptor),")
             lines.append("                on: target, request)")
             lines.append(
                 "            return try await MMCLIStreamDriver.outbound(handle, makeElement: \(mapper), method: \"\(wireName)\", entity: entityArgument)"
@@ -2889,7 +2991,7 @@ private func commandDeclaration(
         case (true, true):
             let mapper = requestElementMapper
             lines.append("            let handle = await client.call(")
-            lines.append("                \(commandDescriptor(for: call, wireName: wireName)),")
+            lines.append("                \(descriptor),")
             lines.append("                on: target, request)")
             lines.append(
                 "            return try await MMCLIStreamDriver.bidirectional(handle, makeElement: \(mapper), format: format, method: \"\(wireName)\", entity: entityArgument)"
@@ -2952,13 +3054,19 @@ private func positionalIsVariadic(_ field: ParsedField) -> Bool {
 private func emitCLIOptions(
     _ options: [ParsedField],
     call: ParsedCall,
-    enumNames: Set<String>,
+    argumentTypeNames: Set<String>,
     lines: inout [String]
 ) {
     var properties: [String] = []
     var preludes: [String] = []
     for field in options {
-        emitField(field, call: call, enumNames: enumNames, lines: &properties, preludes: &preludes)
+        emitField(
+            field,
+            call: call,
+            argumentTypeNames: argumentTypeNames,
+            lines: &properties,
+            preludes: &preludes
+        )
     }
     let title = options.isEmpty ? "" : "(title: \"Input Options\")"
     lines.append("    @OptionGroup\(title) public var options: Options")
@@ -2972,11 +3080,11 @@ private func emitCLIOptions(
 private func emitField(
     _ field: ParsedField,
     call: ParsedCall,
-    enumNames: Set<String>,
+    argumentTypeNames: Set<String>,
     lines: inout [String],
     preludes: inout [String]
 ) {
-    let form = commandFieldForm(field, enumNames: enumNames)
+    let form = commandFieldForm(field, argumentTypeNames: argumentTypeNames)
     if case .omitted = form { return }
 
     let optionName = cliOptionName(field)

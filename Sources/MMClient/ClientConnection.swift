@@ -719,7 +719,7 @@ public actor MMClientConnection {
         return await self.prepareRequestSend(
             methodName: methodName,
             entity: entity,
-            encodeRequest: encodeRequest
+            encodeRequest: { encodeRequest().mapError(MMCallError.encode) }
         )
         .flatMapAsync { msgid, frame, writer in
             await self.sendAndAwaitResponse(msgid: msgid, frame: frame, writer: writer)
@@ -843,7 +843,7 @@ public actor MMClientConnection {
     nonisolated func openStream(
         methodName: String,
         entity: EntityName,
-        encodeRequest: () -> Result<ByteBuffer, MMWireError>,
+        encodeRequest: () -> Result<ByteBuffer, MMCallError>,
         hasResponseStream: Bool,
         hasRequestStream: Bool,
         decoders: ClientStreamDecoders
@@ -949,10 +949,9 @@ public actor MMClientConnection {
     private nonisolated func prepareRequestSend(
         methodName: String,
         entity: EntityName,
-        encodeRequest: () -> Result<ByteBuffer, MMWireError>
+        encodeRequest: () -> Result<ByteBuffer, MMCallError>
     ) async -> Result<(msgid: UInt32, frame: ByteBuffer, writer: Writer), MMCallError> {
         await encodeRequest()
-            .mapError { MMCallError.encode($0) }
             .flatMap { params in
                 self.calls.withLockedValue {
                     $0.reserve(cap: self.configuration.maxInFlightCalls)
@@ -1246,6 +1245,10 @@ extension MMClientConnection {
         on entity: EntityName = .root,
         _ request: Request
     ) async -> Result<Response, MMCallError> {
+        if let refusal = refusalBeforeSending(method.requestCheck, request) {
+            self.recordCallFailure(method: method.name, error: refusal)
+            return .failure(refusal)
+        }
         let response = await self.call(
             methodName: method.name,
             entity: entity,
