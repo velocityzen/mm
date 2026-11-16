@@ -55,9 +55,9 @@ struct SchemaContractMacroTests {
                 public static var all: [AnyMethod] {
                     [AnyMethod(Self.`ping`)]
                 }
-                public static let contract: SchemaDeclaration = Schema("box") {
-                    Call("ping") {
-                            Access {
+                public static let contract: SchemaDeclaration = MMSchema.Schema("box") {
+                    MMSchema.Call("ping") {
+                            MMSchema.Access {
                                 .read
                             }
                         }
@@ -109,9 +109,9 @@ struct SchemaContractMacroTests {
                 public static var all: [AnyMethod] {
                     [AnyMethod(Self.`ping`)]
                 }
-                public static let contract: SchemaDeclaration = Schema("box", description: "A box of pings.") {
-                    Call("ping") {
-                            Access {
+                public static let contract: SchemaDeclaration = MMSchema.Schema("box", description: "A box of pings.") {
+                    MMSchema.Call("ping") {
+                            MMSchema.Access {
                                 .read
                             }
                         }
@@ -181,7 +181,7 @@ struct SchemaContractMacroTests {
             diagnostics: [
                 DiagnosticSpec(
                     message:
-                        "#schema supports only Call, Enum, Union, Type, and CLI declarations at the top level (the macro form is the DSL's static subset — no conditionals)",
+                        "#schema supports only Call, Enum, Union, Type, Error, Errors, and CLI declarations at the top level (the macro form is the DSL's static subset — no conditionals)",
                     line: 1, column: 1)
             ],
             macros: macros
@@ -305,6 +305,122 @@ struct SchemaContractMacroTests {
                     Call("find") {
                         Access(.read)
                         \(parts.replacingOccurrences(of: "; ", with: "\n"))
+                    }
+                }
+                """
+            assertMacroExpansion(
+                source,
+                expandedSource: source,
+                diagnostics: [DiagnosticSpec(message: message, line: 1, column: 1)],
+                macros: macros
+            )
+        }
+    }
+
+    @Test("diagnostics: declared errors are checked at expansion")
+    func errorDiagnostics() {
+        // Each case: the block's top-level entries, the ping call's errors,
+        // and the diagnosis.
+        let cases: [(top: String, own: String, message: String)] = [
+            (
+                #"Errors { Case("late", exitCode: 64) }"#, "",
+                #"#schema Errors.Case("late"): exitCode must be an integer literal in 2...63 — 0 and 1 mean success and an undeclared failure, 64 and up are sysexits and the shell's"#
+            ),
+            (
+                "", #"Errors { Case("late", exitCode: code) }"#,
+                #"Call("ping") Errors.Case("late"): exitCode must be an integer literal in 2...63 — 0 and 1 mean success and an undeclared failure, 64 and up are sysexits and the shell's"#
+            ),
+            (
+                "", #"Errors { Case("late") }"#,
+                #"Call("ping") Errors.Case("late") requires exitCode: — the generated CLI exits with it"#
+            ),
+            (
+                #"Errors { Case("unknown", exitCode: 10) }"#, "",
+                #"#schema Errors.Case("unknown"): "unknown" is reserved — generated error enums decode unrecognized cases to it"#
+            ),
+            (
+                #"Error("Unknown", exitCode: 10)"#, #"Errors { Case(.reference("Unknown")) }"#,
+                #"Call("ping") Errors: Error("Unknown") becomes the case "unknown", which is reserved"#
+            ),
+            (
+                "", #"Errors { Case("a", exitCode: 10); Case("a", exitCode: 11) }"#,
+                #"Call("ping") Errors declares error "a" twice"#
+            ),
+            (
+                #"Errors { Case("busy", exitCode: 10) }"#,
+                #"Errors { Case("busy", exitCode: 11) }"#,
+                #"Call("ping"): error "busy" is also a namespace error — a call's errors add to the namespace's"#
+            ),
+            (
+                #"Errors { Case("busy", exitCode: 10) }"#,
+                #"Errors { Case("late", exitCode: 10) }"#,
+                #"Call("ping"): errors "busy" and "late" share exit code 10"#
+            ),
+            (
+                #"Enum("Kind") { Case("a") }"#,
+                #"Errors { Case("odd", .reference("Kind"), exitCode: 10) }"#,
+                #"Call("ping") Errors.Case("odd"): carries "Kind", an Enum or Union of this block — an error case carries a Type or Error"#
+            ),
+            (
+                "", #"Errors { Case("odd", .reference("Missing"), exitCode: 10) }"#,
+                #"Call("ping") Errors.Case("odd"): carries "Missing", no declaration of this block — an error case carries a Type or Error"#
+            ),
+            (
+                "", #"Errors { Case(.reference("Missing")) }"#,
+                #"Call("ping") Errors: Case(.reference("Missing")) names no Error declared in this block"#
+            ),
+            (
+                #"Type("Conflict") { Field("x", .int) }"#,
+                #"Errors { Case("odd", .reference("Conflict"), exitCode: 10) { Field("y", .int) } }"#,
+                #"Call("ping") Errors.Case("odd"): a case carries either a .reference(...) or fields, not both"#
+            ),
+            (
+                "",
+                #"Errors { Case("odd", exitCode: 10) { Field("inner") { Field("x", .int) } } }"#,
+                #"Call("ping") Errors.Case("odd"): field "inner" declares a nested struct — declare a Type and carry it with Case("name", .reference("Type"), exitCode:)"#
+            ),
+            (
+                #"Error("Full", exitCode: 12)"#,
+                #"Errors { Case("odd", exitCode: 10) { Field("x", "Full") } }"#,
+                #"Call("ping") Errors.Case("odd").x: reference "Full" does not resolve to an Enum/Type/Union declared in this block"#
+            ),
+            (
+                #"Error("Error", exitCode: 12)"#, "",
+                #"Error("Error"): "Error" is the namespace's generated error enum — name the error after what failed"#
+            ),
+            (
+                #"Error("Full", exitCode: 12); Type("Full") { Field("x", .int) }"#, "",
+                #"Error("Full") collides with another declaration — rename the Error or the Type/Enum"#
+            ),
+            (
+                #"Error("Full", exitCode: 12); Error("Full", exitCode: 13)"#, "",
+                #"Error("Full") is declared twice"#
+            ),
+            (
+                #"Type("Error") { Field("x", .int) }; Errors { Case("busy", exitCode: 10) }"#, "",
+                #"the namespace's generated error enum "Error" collides with another declaration — rename it"#
+            ),
+            (
+                #"Type("PingError") { Field("x", .int) }"#,
+                #"Errors { Case("busy", exitCode: 10) }"#,
+                #"Call("ping"): generated error enum "PingError" collides with another declaration — rename the Type/Enum/Error"#
+            ),
+            (
+                #"Errors { Case("a", exitCode: 10) }; Errors { Case("b", exitCode: 11) }"#, "",
+                "#schema declares Errors twice — the namespace's errors go in one block"
+            ),
+            (
+                "", #"Errors { Case("a", exitCode: 10) }; Errors { Case("b", exitCode: 11) }"#,
+                #"Call("ping"): Errors declared twice"#
+            ),
+        ]
+        for (top, own, message) in cases {
+            let source = """
+                #schema("box") {
+                    \(top.replacingOccurrences(of: "; ", with: "\n"))
+                    Call("ping") {
+                        Access(.read)
+                        \(own.replacingOccurrences(of: "; ", with: "\n"))
                     }
                 }
                 """

@@ -302,6 +302,78 @@ struct FingerprintTests {
         #expect(fingerprint == 0x9666_7b70_65cb_b8e4)
     }
 
+    // MARK: Declared errors
+
+    static let putSignature = MethodSignature(
+        name: "shelf.put",
+        access: .write,
+        request: .structure(fields: []),
+        response: .structure(fields: [.init(key: 0, name: "count", type: .uint)]),
+        errors: .union(cases: [
+            .init(name: "retired", fields: []),
+            .init(name: "full", fields: [.init(key: 0, name: "capacity", type: .int)]),
+        ])
+    )
+
+    @Test("golden pinned value for a signature with declared errors")
+    func goldenErrorsValue() {
+        // Independently computed (Python reference implementation of the
+        // canonical encoding + FNV-1a, cross-validated against the three
+        // goldens above). Exercises the tag-4 errors entry and tag 16
+        // (union). A change here is a wire-protocol break.
+        #expect(SchemaFingerprint.compute([Self.putSignature]) == 0xafdf_9761_9cbd_5f59)
+    }
+
+    @Test("declared errors are hashed: adding, renaming or reordering cases changes the value")
+    func errorsHash() {
+        var bare = Self.putSignature
+        bare.errors = nil
+        var renamed = Self.putSignature
+        renamed.errors = .union(cases: [
+            .init(name: "retired", fields: []),
+            .init(name: "overfull", fields: [.init(key: 0, name: "capacity", type: .int)]),
+        ])
+        var reordered = Self.putSignature
+        reordered.errors = .union(cases: [
+            .init(name: "full", fields: [.init(key: 0, name: "capacity", type: .int)]),
+            .init(name: "retired", fields: []),
+        ])
+        let values = [Self.putSignature, bare, renamed, reordered].map {
+            SchemaFingerprint.compute([$0])
+        }
+        #expect(Set(values).count == values.count)
+    }
+
+    @Test("an errors slot is distinct from a stream slot of the same schema")
+    func errorsSlotDistinct() {
+        let union: TypeSchema = .union(cases: [.init(name: "retired", fields: [])])
+        var withErrors = Self.putSignature
+        withErrors.errors = union
+        var withStream = Self.putSignature
+        withStream.errors = nil
+        withStream.responseStream = union
+        #expect(SchemaFingerprint.compute([withErrors]) != SchemaFingerprint.compute([withStream]))
+    }
+
+    @Test("error descriptions never affect the fingerprint")
+    func errorDescriptionsNeverHash() {
+        var documented = Self.putSignature
+        documented.errors = .union(cases: [
+            .init(name: "retired", fields: [], description: "no longer served"),
+            .init(
+                name: "full",
+                fields: [
+                    .init(key: 0, name: "capacity", type: .int, description: "how many fit")
+                ],
+                description: "no room left"
+            ),
+        ])
+        #expect(
+            SchemaFingerprint.compute([documented])
+                == SchemaFingerprint.compute([Self.putSignature])
+        )
+    }
+
     @Test("FNV-1a reference vectors")
     func fnvReference() {
         // Published FNV-1a 64 test vectors.

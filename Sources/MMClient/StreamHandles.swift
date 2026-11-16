@@ -40,7 +40,8 @@ import NIOCore
 public struct InboundStreamHandle<
     Element: Codable & Sendable,
     OutboundElement: Codable & Sendable,
-    Response: Codable & Sendable
+    Response: Codable & Sendable,
+    Failure: MMCallFailure
 >: AsyncSequence, Sendable {
     let state: ClientStreamState
 
@@ -98,11 +99,13 @@ public struct InboundStreamHandle<
         AsyncIterator(state: self.state, base: self.state.makeInboundIterator())
     }
 
-    /// The call's terminal `Result<Response, MMCallError>`. Awaitable after the
-    /// sequence ends or concurrently with iteration; resolves exactly once
-    /// (shared with the outbound half, when the call has one).
-    public func result() async -> Result<Response, MMCallError> {
-        await self.state.result(as: Response.self)
+    /// The call's terminal `Result<Response, Failure>`: `Failure` is
+    /// ``MMCallError``, or ``MMDeclaredCallError`` for a call whose contract
+    /// declares errors. Awaitable after the sequence ends or concurrently
+    /// with iteration; resolves exactly once (shared with the outbound half,
+    /// when the call has one).
+    public func result() async -> Result<Response, Failure> {
+        await self.state.result(as: Response.self).mapError(Failure.init)
     }
 
     /// Sends STOP (kind 5, graceful): asks the server to finish its response
@@ -165,9 +168,10 @@ public func withStream<
     Element: Codable & Sendable,
     OutboundElement: Codable & Sendable,
     Response: Codable & Sendable,
+    Failure: MMCallFailure,
     Value
 >(
-    _ handle: InboundStreamHandle<Element, OutboundElement, Response>,
+    _ handle: InboundStreamHandle<Element, OutboundElement, Response, Failure>,
     each: @escaping @Sendable @concurrent (Element) async -> Void,
     _ body: () async -> Value
 ) async -> Value {
@@ -203,7 +207,8 @@ public func withStream<
 public struct OutboundStreamHandle<
     Element: Codable & Sendable,
     InboundElement: Codable & Sendable,
-    Response: Codable & Sendable
+    Response: Codable & Sendable,
+    Failure: MMCallFailure
 >: Sendable {
     let state: ClientStreamState
     /// The element coder, picked once when the handle is made: through the
@@ -245,10 +250,12 @@ public struct OutboundStreamHandle<
         await self.state.finish()
     }
 
-    /// The call's terminal `Result<Response, MMCallError>`. Resolves exactly
-    /// once (shared with the inbound half, when the call has one).
-    public func result() async -> Result<Response, MMCallError> {
-        await self.state.result(as: Response.self)
+    /// The call's terminal `Result<Response, Failure>`: `Failure` is
+    /// ``MMCallError``, or ``MMDeclaredCallError`` for a call whose contract
+    /// declares errors. Resolves exactly once (shared with the inbound half,
+    /// when the call has one).
+    public func result() async -> Result<Response, Failure> {
+        await self.state.result(as: Response.self).mapError(Failure.init)
     }
 
     /// Sends CANCEL (kind 6): abandons the whole call. Idempotent.
@@ -276,14 +283,15 @@ public struct OutboundStreamHandle<
 public struct BidirectionalStreamHandle<
     RequestElement: Codable & Sendable,
     ResponseElement: Codable & Sendable,
-    Response: Codable & Sendable
+    Response: Codable & Sendable,
+    Failure: MMCallFailure
 >: Sendable {
     /// The inbound (server → client) response-element sequence plus stop/cancel
     /// and the shared terminal.
-    public let inbound: InboundStreamHandle<ResponseElement, RequestElement, Response>
+    public let inbound: InboundStreamHandle<ResponseElement, RequestElement, Response, Failure>
     /// The outbound (client → server) request-element writer plus finish/cancel
     /// and the shared terminal.
-    public let outbound: OutboundStreamHandle<RequestElement, ResponseElement, Response>
+    public let outbound: OutboundStreamHandle<RequestElement, ResponseElement, Response, Failure>
 
     @usableFromInline
     init(

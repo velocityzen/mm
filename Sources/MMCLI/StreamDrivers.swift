@@ -23,8 +23,12 @@ public enum MMCLIStreamDriver {
     /// ``MMCLIOutput/emit(_:format:)``, then returns the unwrapped terminal.
     /// First SIGINT: graceful `handle.stop()`, keep draining (items in flight
     /// still arrive); second SIGINT: `handle.cancel()`.
-    public static func inbound<Element: Codable & Sendable, Response: Codable & Sendable>(
-        _ handle: InboundStreamHandle<Element, Never, Response>,
+    public static func inbound<
+        Element: Codable & Sendable,
+        Response: Codable & Sendable,
+        Failure: MMCLIReportableFailure
+    >(
+        _ handle: InboundStreamHandle<Element, Never, Response, Failure>,
         format: OutputFormat, method: String, entity: String
     ) async throws -> Response {
         try await MMCLISignals.withGracefulSigint(
@@ -43,10 +47,14 @@ public enum MMCLIStreamDriver {
     /// ``inbound(_:format:method:entity:)`` with the terminal as a `Result`
     /// rather than a thrown exit, for an input command's call: one failed
     /// call need not end the run (see ``MMCLIInputRunner``).
-    public static func inboundResult<Element: Codable & Sendable, Response: Codable & Sendable>(
-        _ handle: InboundStreamHandle<Element, Never, Response>,
+    public static func inboundResult<
+        Element: Codable & Sendable,
+        Response: Codable & Sendable,
+        Failure: MMCLIReportableFailure
+    >(
+        _ handle: InboundStreamHandle<Element, Never, Response, Failure>,
         format: OutputFormat
-    ) async -> Result<Response, MMCallError> {
+    ) async -> Result<Response, Failure> {
         await Result.fromAsync {
             try await MMCLISignals.withGracefulSigint(
                 onFirst: { await handle.stop() },
@@ -56,24 +64,32 @@ public enum MMCLIStreamDriver {
             }
         }
         // The signal watcher fails only when its group is cancelled.
-        .mapError { _ in MMCallError.cancelled }
+        .mapError { _ in Failure(.cancelled) }
         .flatMap { $0 }
     }
 
     /// The signal-free body of ``inbound(_:format:method:entity:)``: drain the
     /// element sequence to stdout, then unwrap the terminal.
-    static func inboundStdio<Element: Codable & Sendable, Response: Codable & Sendable>(
-        _ handle: InboundStreamHandle<Element, Never, Response>,
+    static func inboundStdio<
+        Element: Codable & Sendable,
+        Response: Codable & Sendable,
+        Failure: MMCLIReportableFailure
+    >(
+        _ handle: InboundStreamHandle<Element, Never, Response, Failure>,
         format: OutputFormat, method: String, entity: String
     ) async throws -> Response {
         try MMCLIFailure.unwrap(await Self.drainInbound(handle, format: format), method: method, entity: entity)
     }
 
     /// Drains the element sequence to stdout, then returns the terminal.
-    private static func drainInbound<Element: Codable & Sendable, Response: Codable & Sendable>(
-        _ handle: InboundStreamHandle<Element, Never, Response>,
+    private static func drainInbound<
+        Element: Codable & Sendable,
+        Response: Codable & Sendable,
+        Failure: MMCLIReportableFailure
+    >(
+        _ handle: InboundStreamHandle<Element, Never, Response, Failure>,
         format: OutputFormat
-    ) async -> Result<Response, MMCallError> {
+    ) async -> Result<Response, Failure> {
         var first = true
         for await element in handle {
             MMCLIOutput.emitStreamElement(element, format: format, first: first)
@@ -95,8 +111,12 @@ public enum MMCLIStreamDriver {
     /// SIGINT: `finish()` (graceful END — the terminal still arrives; the
     /// pipe's next send sees `.callEnded` and stops reading); second:
     /// `cancel()`.
-    public static func outbound<Element: Codable & Sendable, Response: Codable & Sendable>(
-        _ handle: OutboundStreamHandle<Element, Never, Response>,
+    public static func outbound<
+        Element: Codable & Sendable,
+        Response: Codable & Sendable,
+        Failure: MMCLIReportableFailure
+    >(
+        _ handle: OutboundStreamHandle<Element, Never, Response, Failure>,
         makeElement: @Sendable @escaping (String) throws -> Element,
         method: String, entity: String
     ) async throws -> Response {
@@ -125,9 +145,10 @@ public enum MMCLIStreamDriver {
     static func outboundStdio<
         Element: Codable & Sendable,
         Response: Codable & Sendable,
+        Failure: MMCLIReportableFailure,
         Lines: AsyncSequence & Sendable
     >(
-        _ handle: OutboundStreamHandle<Element, Never, Response>,
+        _ handle: OutboundStreamHandle<Element, Never, Response, Failure>,
         lines: Lines,
         makeElement: @Sendable @escaping (String) throws -> Element,
         method: String,
@@ -162,9 +183,10 @@ public enum MMCLIStreamDriver {
     public static func bidirectional<
         RequestElement: Codable & Sendable,
         ResponseElement: Codable & Sendable,
-        Response: Codable & Sendable
+        Response: Codable & Sendable,
+        Failure: MMCLIReportableFailure
     >(
-        _ handle: BidirectionalStreamHandle<RequestElement, ResponseElement, Response>,
+        _ handle: BidirectionalStreamHandle<RequestElement, ResponseElement, Response, Failure>,
         makeElement: @Sendable @escaping (String) throws -> RequestElement,
         format: OutputFormat,
         method: String,
@@ -199,9 +221,10 @@ public enum MMCLIStreamDriver {
         RequestElement: Codable & Sendable,
         ResponseElement: Codable & Sendable,
         Response: Codable & Sendable,
+        Failure: MMCLIReportableFailure,
         Lines: AsyncSequence & Sendable
     >(
-        _ handle: BidirectionalStreamHandle<RequestElement, ResponseElement, Response>,
+        _ handle: BidirectionalStreamHandle<RequestElement, ResponseElement, Response, Failure>,
         lines: Lines,
         makeElement: @Sendable @escaping (String) throws -> RequestElement,
         format: OutputFormat,
@@ -245,11 +268,12 @@ public enum MMCLIStreamDriver {
         Element: Codable & Sendable,
         InboundElement: Codable & Sendable,
         Response: Codable & Sendable,
+        Failure: MMCallFailure,
         Lines: AsyncSequence & Sendable
     >(
         input: Lines,
         map: (String) throws -> Element,
-        output: OutboundStreamHandle<Element, InboundElement, Response>
+        output: OutboundStreamHandle<Element, InboundElement, Response, Failure>
     ) async throws where Lines.Element == Result<String, MMCLIError>, Lines.Failure == Never {
         do {
             for await line in input {

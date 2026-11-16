@@ -89,6 +89,9 @@ struct ExampleDaemon {
                 Entity("journal", owner: uid, group: gid, mode: 0o750) {
                     Entity("notes")
                     Entity("system", owner: 0, group: 0, mode: 0o700)
+                    // Reachable, but retired: every journal call on it
+                    // fails with the declared error `retired`.
+                    Entity("old")
                 }
                 // The builtins' method-name prefixes: granting r-x here makes
                 // server.schema and server.entity visible in filtered discovery

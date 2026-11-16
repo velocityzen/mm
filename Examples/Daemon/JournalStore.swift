@@ -21,20 +21,38 @@ import MMSchema
 /// thread-safe, which is why ``follow(_:)`` and ``unfollow(_:from:)`` are
 /// `nonisolated` — only the journal data itself needs the actor.
 actor JournalStore {
+    /// The most lines one journal holds: past it, the calls that add lines
+    /// fail with `Journal.Full`.
+    static let capacity = 10_000
+    /// The retired journals: every call on one fails with
+    /// `Journal.Error.retired`.
+    static let retiredJournals: Set<String> = ["journal.old"]
+
     private var journals: [EntityName: [String]] = [:]
 
     /// The `journal.follow` fan-out registry; see ``FollowerHub`` for the
     /// lifecycle and locking story.
     private nonisolated let followers = FollowerHub()
 
-    func append(_ line: String, to entity: EntityName) -> Int {
+    /// Why `entity` cannot be a journal, or nil when it can: the namespace
+    /// error every journal call checks first.
+    static func refusal(for entity: EntityName) -> Journal.Error? {
+        Self.retiredJournals.contains(entity.rawValue) ? .retired : nil
+    }
+
+    /// Appends `line` and returns the journal's new line count, or
+    /// `Journal.Full` when it already holds ``capacity`` lines.
+    func append(_ line: String, to entity: EntityName) -> Result<Int, Journal.Full> {
+        guard self.count(of: entity) < Self.capacity else {
+            return .failure(Journal.Full(capacity: Self.capacity))
+        }
         journals[entity, default: []].append(line)
         let count = journals[entity, default: []].count
         followers.broadcast(
             ChangeEvent(entity: entity.rawValue, line: line, count: count),
             to: entity
         )
-        return count
+        return .success(count)
     }
 
     func read(_ entity: EntityName) -> [String] {

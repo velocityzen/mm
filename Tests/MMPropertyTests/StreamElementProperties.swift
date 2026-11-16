@@ -123,7 +123,7 @@
         inbound.resolveTerminal(
             ResponseSlots(error: nil, result: try MMPackEncoder().encode(response).get())
         )
-        let handle = InboundStreamHandle<Element, Never, Element>(state: inbound)
+        let handle = InboundStreamHandle<Element, Never, Element, MMCallError>(state: inbound)
         let read = try await tc.withStallDetection(after: hangLimit) { _ in
             var read: [Same] = []
             for await element in handle {
@@ -139,7 +139,7 @@
         // The client's request stream: the typed half encodes each element
         // before the credit gate, inside the initial window.
         let record = StreamFrameRecord()
-        let outbound = OutboundStreamHandle<Element, Never, Element>(
+        let outbound = OutboundStreamHandle<Element, Never, Element, MMCallError>(
             state: ClientStreamState.make(
                 msgid: 1,
                 hasResponseStream: false,

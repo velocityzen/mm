@@ -383,7 +383,7 @@
         let record = PipeRecord()
         let client: PipeClient
         /// The client's typed sending half, which encodes each value.
-        let outbound: OutboundStreamHandle<Int, Never, Int>
+        let outbound: OutboundStreamHandle<Int, Never, Int, MMCallError>
         let server: MMRequestStreamSource
         let stream: MMRequestStream<Int>
         /// The pipe as its own closures see it, cleared by `detach()` so the
@@ -839,7 +839,7 @@
 
         /// The client's reader.
         func read() async {
-            var iterator = InboundStreamHandle<Int, Int, Int>(state: self.client)
+            var iterator = InboundStreamHandle<Int, Int, Int, MMCallError>(state: self.client)
                 .makeAsyncIterator()
             var read = 0
             var cancelled = false

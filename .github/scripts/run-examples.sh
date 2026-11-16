@@ -4,8 +4,9 @@
 # Runs the examples built in `bin directory` against each other: the daemon
 # on a socket of its own; the client, which goes through every call pattern;
 # and the CLI, which appends a line from its arguments and lines from stdin,
-# and reads them back. Then ends the daemon with SIGTERM, which drains it
-# gracefully, and checks that it removed its socket file.
+# reads them back, and exits with a declared error's own code. Then ends the
+# daemon with SIGTERM, which drains it gracefully, and checks that it removed
+# its socket file.
 set -euo pipefail
 bin=$1
 
@@ -47,6 +48,15 @@ for line in "from the arguments" "from stdin" "urgent from stdin"; do
         exit 1
     fi
 done
+
+# A declared error exits with the code its contract pins: journal.old is
+# retired, and the namespace error `retired` declares exit code 10.
+status=0
+cli journal read journal.old || status=$?
+if [ "$status" -ne 10 ]; then
+    echo "::error::Reading a retired journal exited $status, not its declared 10."
+    exit 1
+fi
 
 echo "== SIGTERM"
 kill -TERM "$daemon"

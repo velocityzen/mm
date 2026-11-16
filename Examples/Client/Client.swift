@@ -9,6 +9,7 @@ import MMSchema
 /// - ``verify(_:)`` — automatic schema verification (resolved by the connection)
 /// - ``discover(_:)`` — discovery, the contract check, and the schema diff
 /// - ``append(_:to:)`` / ``read(_:from:)`` — unary calls
+/// - ``appendEmpty(_:to:)`` — a declared error, typed
 /// - ``follow(_:journal:)`` — a server → client stream (drain, STOP, terminal)
 /// - ``importLines(_:into:)`` — a client → server stream (send, END, terminal)
 /// - ``sync(_:into:)`` — duplex: both directions streaming on one call
@@ -55,6 +56,7 @@ struct ExampleClient {
             await verify(connection)
             await discover(connection)
             await append(connection, to: notes)
+            await appendEmpty(connection, to: notes)
             await follow(connection, journal: notes)
             await importLines(connection, into: notes)
             await sync(connection, into: notes)
@@ -150,7 +152,8 @@ struct ExampleClient {
     // MARK: - Unary calls
 
     /// **Pattern: a unary call.** One request, one typed response —
-    /// `Result<AppendResponse, MMCallError>`, no throws on the data path.
+    /// `Result<AppendResponse, MMDeclaredCallError<Journal.AppendError>>`, no
+    /// throws on the data path.
     /// The target entity (`on:`) rides the open envelope, never the payload;
     /// the generated `LineMeta`/`Priority` types come straight from the
     /// `Type`/`Enum` declarations in the contract.
@@ -168,6 +171,29 @@ struct ExampleClient {
                 print("  ok — journal now has \(response.count) line(s)")
             case .failure(let error):
                 print("  failed: \(error)")
+        }
+    }
+
+    /// **Pattern: a declared error.** The contract says `journal.append` can
+    /// fail with `emptyLine`, so the failure arrives typed:
+    /// `.declared(.emptyLine)`. Everything the contract does not declare —
+    /// a denial, a dropped connection — is `.undeclared(MMCallError)`.
+    private static func appendEmpty(_ connection: MMClientConnection, to journal: EntityName) async
+    {
+        print("\nappend an empty line to \(journal.rawValue) (a declared error):")
+        switch await connection.call(
+            Journal.append,
+            on: journal,
+            AppendRequest(line: "", meta: nil)
+        ) {
+            case .failure(.declared(.emptyLine)):
+                print("  refused: emptyLine — exactly as the contract declares")
+            case .failure(.declared(let error)):
+                print("  refused with another declared error: \(error.caseName)")
+            case .failure(.undeclared(let error)):
+                print("  failed: \(error)")
+            case .success:
+                print("  UNEXPECTED success (the daemon should refuse an empty line)")
         }
     }
 
@@ -331,7 +357,7 @@ struct ExampleClient {
             on: journal,
             AppendRequest(line: "should never land", meta: nil)
         ) {
-            case .failure(.denied):
+            case .failure(.undeclared(.denied)):
                 print("  denied — exactly as the ACL intends")
             case .success:
                 print(

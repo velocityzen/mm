@@ -28,6 +28,12 @@ import MMSchema
 /// Named types (`Enum`/`Type`) are part of the contract too: `Priority` is a
 /// string-valued wire enum (the generated Swift enum gains an `unknown` case
 /// for unrecognized values), `LineMeta` a named struct other fields reference.
+/// So are the errors a call can fail with: `Errors` at the top level declares
+/// the namespace's (every call can fail with them), an `Errors` part in a
+/// call adds its own, and `Error("Full")` declares a named error the way
+/// `Type` declares a named type. Each call gets one flat enum
+/// (`Journal.AppendError`): handlers return its cases, clients switch on
+/// them, and the generated CLI exits with each case's `exitCode`.
 /// Every `description:` below is served by `server.schema` — discovery is
 /// self-documenting — while staying out of the fingerprint and all
 /// compatibility checks: doc edits are never schema drift.
@@ -50,6 +56,15 @@ public enum Journal: MethodNamespace {
             Field("line", .string)
             Field("count", .int)
         }
+        // Every journal call can find its journal retired.
+        Errors {
+            Case("retired", exitCode: 10, description: "The journal is retired: it serves no calls")
+        }
+        // The calls that add lines list it: `Case(.reference("Full"))` is the
+        // case `full`, carrying a `Journal.Full`.
+        Error("Full", exitCode: 12, description: "The journal holds as many lines as it can") {
+            Field("capacity", .int)
+        }
         Call("append", description: "Appends one line to a journal") {
             // The wire method stays journal.append; the CLI says `journal add`.
             // Its block holds options for reading `--input` that never reach
@@ -61,6 +76,10 @@ public enum Journal: MethodNamespace {
                     default: "!")
             }
             Access { .write }
+            Errors {
+                Case("emptyLine", exitCode: 11, description: "A line needs some text")
+                Case(.reference("Full"))
+            }
             Request {
                 // `journal add "text"`, or `journal add --input notes.txt`
                 // for a file's lines (`--input -` reads stdin).
@@ -99,6 +118,7 @@ public enum Journal: MethodNamespace {
         // terminal reports how many landed and the journal's new total.
         Call("import", description: "Bulk-appends a stream of lines") {
             Access { .write }
+            Errors { Case(.reference("Full")) }
             RequestStream("ImportLine", description: "One line to append") {
                 Field("line", .string)
             }
@@ -113,6 +133,7 @@ public enum Journal: MethodNamespace {
         // terminal once the request direction ENDs.
         Call("sync", description: "Appends a stream of lines, echoing each change back") {
             Access { .write }
+            Errors { Case(.reference("Full")) }
             RequestStream("SyncLine", description: "One line to append") {
                 Field("line", .string)
             }

@@ -31,7 +31,9 @@
 ///   for a response stream. An absent stream emits nothing, so any unary-only
 ///   signature set hashes to exactly its pre-streaming value (a determinism
 ///   property, pinned by the golden test); the distinct tags keep the two
-///   slots asymmetric.
+///   slots asymmetric. Declared errors follow the same rule: `u8` tag 4 +
+///   the errors' union schema, emitted only when the call declares any, so
+///   every signature without errors keeps its earlier value.
 /// - schema: `u8` case tag (the same tag values as the Codable wire encoding:
 ///   0 bool … 16 union, 255 unknown), then payload —
 ///   `optional`/`array`: child schema; `map`: key then value schema;
@@ -114,6 +116,10 @@ public enum SchemaFingerprint {
         if let responseStream = signature.responseStream {
             bytes.append(2)
             append(responseStream, into: &bytes)
+        }
+        if let errors = signature.errors {
+            bytes.append(4)
+            append(errors, into: &bytes)
         }
     }
 

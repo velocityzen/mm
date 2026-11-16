@@ -5,17 +5,28 @@ import MMServer
 /// handler analogue of a custom SwiftUI view. It carries its own dependency
 /// (the store) and drops into the daemon's `For(Journal.self)` block; the
 /// daemon file stays pure wiring.
+///
+/// Every journal call can fail with its declared errors: a handler returns
+/// its call's enum (`Journal.AppendError`), lifting a namespace error into it
+/// with `.init(_:)`.
 struct JournalHandlers: RouteGroup {
     let store: JournalStore
 
     @RouterBuilder var routes: [Route] {
         On(Journal.append, Accepts("journal.*")) { auth, request in
+            if let refusal = JournalStore.refusal(for: auth.entity) {
+                return .failure(.init(refusal))
+            }
+            guard !request.line.isEmpty else {
+                return .failure(.emptyLine)
+            }
             // The store broadcasts the change to every follower of this
             // journal (any connection) as part of the append. Cross-connection
             // fan-out is application infrastructure — the library gives each
             // follow call a correlated stream; the store wires appends to it.
-            let count = await store.append(request.line, to: auth.entity)
-            return .success(AppendResponse(count: count))
+            return await store.append(request.line, to: auth.entity)
+                .map { AppendResponse(count: $0) }
+                .mapError(Journal.AppendError.full)
         }
         // `Accepts("journal.*")` (on every route in this group): grants are
         // per-entity-per-mode, never per-method, so without it any entity
@@ -23,7 +34,10 @@ struct JournalHandlers: RouteGroup {
         // keeps journal verbs on journal nouns — an out-of-scope target is
         // denied before the ACL is even consulted.
         On(Journal.read, Accepts("journal.*")) { auth, request in
-            .success(ReadResponse(lines: await store.read(auth.entity)))
+            if let refusal = JournalStore.refusal(for: auth.entity) {
+                return .failure(.init(refusal))
+            }
+            return .success(ReadResponse(lines: await store.read(auth.entity)))
         }
         // Server → client stream: register a follower, relay its change
         // events through the credit-gated response sink, return the count as
@@ -36,6 +50,9 @@ struct JournalHandlers: RouteGroup {
         // the stream's termination handler unregisters instead (see
         // FollowerHub).
         On(Journal.follow, Accepts("journal.*")) { auth, request, sink in
+            if let refusal = JournalStore.refusal(for: auth.entity) {
+                return .failure(.init(refusal))
+            }
             let (token, changes) = store.follow(auth.entity)
             var delivered = 0
             await withTaskGroup(of: Void.self) { watcher in
@@ -63,9 +80,14 @@ struct JournalHandlers: RouteGroup {
         // imported plus the journal's total. The `elements` sequence ending
         // is the client's graceful END.
         On(Journal.import, Accepts("journal.*")) { auth, request, elements in
+            if let refusal = JournalStore.refusal(for: auth.entity) {
+                return .failure(.init(refusal))
+            }
             var imported = 0
             for await element in elements {
-                _ = await store.append(element.line, to: auth.entity)
+                if case .failure(let full) = await store.append(element.line, to: auth.entity) {
+                    return .failure(.full(full))
+                }
                 imported += 1
             }
             let total = await store.count(of: auth.entity)
@@ -76,9 +98,18 @@ struct JournalHandlers: RouteGroup {
         // this call's own credit-gated response sink. The request stream
         // ending is the client's END; the shared terminal totals what landed.
         On(Journal.sync, Accepts("journal.*")) { auth, request, elements, sink in
+            if let refusal = JournalStore.refusal(for: auth.entity) {
+                return .failure(.init(refusal))
+            }
             var synced = 0
             loop: for await element in elements {
-                let count = await store.append(element.line, to: auth.entity)
+                let count: Int
+                switch await store.append(element.line, to: auth.entity) {
+                    case .success(let total):
+                        count = total
+                    case .failure(let full):
+                        return .failure(.full(full))
+                }
                 let event = ChangeEvent(
                     entity: auth.entity.rawValue,
                     line: element.line,

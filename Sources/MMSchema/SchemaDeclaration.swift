@@ -172,7 +172,7 @@ public struct SchemaDeclaration: Sendable, Hashable {
     }
 
     /// Every mismatch between one declared method and its implementation:
-    /// presence, then access, then the four payload slots.
+    /// presence, then access, then the four payload slots, then the errors.
     private func mismatches(
         for declaredSignature: MethodSignature,
         implemented: [String: Implementation],
@@ -221,6 +221,32 @@ public struct SchemaDeclaration: Sendable, Hashable {
                 described: actual.described.responseStream,
                 definitions: definitions
             )
+            + errorMismatches(
+                name: declared.name,
+                declared: declared.errors,
+                described: actual.described.errors
+            )
+    }
+
+    /// Compares the declared errors with the ones the implementation's error
+    /// type describes. A union's decoder is data-dependent, so there is no
+    /// behavior to probe: the described set carries the check.
+    private func errorMismatches(
+        name: String,
+        declared: TypeSchema?,
+        described: TypeSchema?
+    ) -> [String] {
+        switch (declared, described) {
+            case (nil, nil):
+                return []
+            case (.some, nil):
+                return ["\(name): errors declared but not implemented"]
+            case (nil, .some):
+                return ["\(name): errors implemented but not in the contract"]
+            case (.some(let declaredErrors), .some(let describedErrors)):
+                return declaredErrors == describedErrors
+                    ? [] : ["\(name): errors diverge from the contract"]
+        }
     }
 
     /// Whether decoder behavior honors a declared slot. Equality is the
@@ -409,6 +435,9 @@ public struct MethodDeclaration: Sendable, Hashable {
     /// declaration: never forwarded into ``MethodSignature``, never on the
     /// wire — consumed by `#schema`'s CLI generation.
     public let cli: CLIOverlay?
+    /// The call's own `Errors { ... }` cases, before the enclosing schema
+    /// resolves them and adds the namespace's.
+    public let errors: [ErrorCaseDeclaration]
 }
 
 /// One declared named type, produced by ``Enum(_:description:_:)``,
@@ -585,7 +614,7 @@ public func Type(
     )
 }
 
-private func validTypeName(_ name: String) -> String {
+func validTypeName(_ name: String) -> String {
     precondition(
         !name.isEmpty && !name.contains("."),
         "type names are unqualified within their block (\"\(name)\") — the namespace qualifies them"
@@ -782,7 +811,7 @@ public enum SchemaFieldsBuilder: MMListBuilding {
 }
 
 /// One element inside a ``Call(_:description:_:)`` block: `Access`,
-/// `Request`, `RequestStream`, `Response`, `ResponseStream` or the
+/// `Request`, `RequestStream`, `Response`, `ResponseStream`, `Errors` or the
 /// presentation-only `CLI`.
 public struct MethodPart: Sendable {
     enum Kind {
@@ -791,6 +820,7 @@ public struct MethodPart: Sendable {
         case requestStream(TypeSchema, description: String?)
         case response(TypeSchema, description: String?)
         case responseStream(TypeSchema, description: String?)
+        case errors([ErrorCaseDeclaration])
         case cli(CLIOverlay)
     }
 
@@ -981,6 +1011,11 @@ public enum MethodDeclarationBuilder: MMListBuilding {
     public typealias Element = MethodPart
 
     public static func buildExpression(_ part: MethodPart) -> [MethodPart] { [part] }
+
+    /// The call's own `Errors { ... }`.
+    public static func buildExpression(_ errors: ErrorsDeclaration) -> [MethodPart] {
+        [MethodPart(kind: .errors(errors.cases))]
+    }
 }
 
 /// Declares one method of a ``Schema(_:_:)`` contract by its local name; the
@@ -1002,6 +1037,7 @@ public func Call(
     var requestStream: (element: TypeSchema, description: String?)?
     var response: (payload: TypeSchema, description: String?)?
     var responseStream: (element: TypeSchema, description: String?)?
+    var errors: [ErrorCaseDeclaration]?
     var cli: CLIOverlay?
     // The one duplicate-part rule, stated once: each part kind may appear at
     // most once per Call.
@@ -1021,6 +1057,8 @@ public func Call(
                 setOnce(&response, (payload, partDescription), "Response")
             case .responseStream(let element, let partDescription):
                 setOnce(&responseStream, (element, partDescription), "ResponseStream")
+            case .errors(let cases):
+                setOnce(&errors, cases, "Errors")
             case .cli(let overlay):
                 setOnce(&cli, overlay, "CLI")
         }
@@ -1042,17 +1080,22 @@ public func Call(
         responseDescription: response?.description,
         requestStreamDescription: requestStream?.description,
         responseStreamDescription: responseStream?.description,
-        cli: cli
+        cli: cli,
+        errors: errors ?? []
     )
 }
 
-/// One entry of a ``Schema(_:_:)`` block: a ``Call(_:description:_:)`` method
-/// or an ``Enum(_:description:_:)`` / ``Union(_:description:_:)`` /
-/// ``Type(_:description:_:)`` named type.
+/// One entry of a ``Schema(_:_:)`` block: a ``Call(_:description:_:)`` method,
+/// an ``Enum(_:description:_:)`` / ``Union(_:description:_:)`` /
+/// ``Type(_:description:_:)`` named type, a named
+/// ``Error(_:exitCode:description:_:)``, or the namespace's ``Errors(_:)``.
 public struct SchemaEntry: Sendable {
     enum Kind {
         case method(MethodDeclaration)
         case type(TypeDeclaration)
+        case namedError(NamedErrorDeclaration)
+        /// The namespace's errors: every call in the block can return them.
+        case errors([ErrorCaseDeclaration])
         /// The schema-level CLI mode — presentation-only; the runtime
         /// declaration ignores it (the `#schema` macro is its one consumer).
         case cli(SchemaCLIMode)
@@ -1070,6 +1113,12 @@ public enum SchemaDeclarationBuilder: MMListBuilding {
     }
     public static func buildExpression(_ type: TypeDeclaration) -> [SchemaEntry] {
         [SchemaEntry(kind: .type(type))]
+    }
+    public static func buildExpression(_ error: NamedErrorDeclaration) -> [SchemaEntry] {
+        [SchemaEntry(kind: .namedError(error))]
+    }
+    public static func buildExpression(_ errors: ErrorsDeclaration) -> [SchemaEntry] {
+        [SchemaEntry(kind: .errors(errors.cases))]
     }
     public static func buildExpression(_ entry: SchemaEntry) -> [SchemaEntry] {
         [entry]
@@ -1107,6 +1156,22 @@ public func Schema(
     }
     let types = assembleTypes(typeDeclarations, namespace: prefix.rawValue)
     let localNames = Set(typeDeclarations.map(\.name))
+    let errorScope = errorResolutionScope(
+        entries: entries,
+        typeDeclarations: typeDeclarations,
+        namespace: prefix.rawValue
+    )
+    let namespaceErrorBlocks = entries.compactMap { entry -> [ErrorCaseDeclaration]? in
+        if case .errors(let cases) = entry.kind { cases } else { nil }
+    }
+    precondition(
+        namespaceErrorBlocks.count <= 1,
+        "Schema \"\(prefix.rawValue)\" declares Errors twice — one block lists the namespace's errors"
+    )
+    let namespaceErrors = errorScope.resolve(
+        namespaceErrorBlocks.first ?? [],
+        context: "Schema \"\(prefix.rawValue)\" Errors"
+    )
     // `Call("@")` is the namespace root call: the method IS the namespace
     // (`search`, not `search.@`). At most one per schema — a second folds to
     // the same wire name and trips the duplicate check below.
@@ -1136,6 +1201,11 @@ public func Schema(
             responseStream: method.responseStream.map {
                 qualifyReferences(in: $0, namespace: prefix.rawValue, localTypes: localNames)
             },
+            errors: flattenedErrors(
+                namespace: namespaceErrors,
+                own: errorScope.resolve(method.errors, context: "Call(\"\(method.name)\") Errors"),
+                call: method.name
+            ),
             description: method.description,
             requestDescription: method.requestDescription,
             responseDescription: method.responseDescription,
@@ -1148,6 +1218,39 @@ public func Schema(
         description: description,
         signatures: signatures,
         types: types
+    )
+}
+
+/// The block's named errors and structure types, which its `Errors` cases
+/// resolve against. A named error may not share a name with a type.
+private func errorResolutionScope(
+    entries: [SchemaEntry],
+    typeDeclarations: [TypeDeclaration],
+    namespace: String
+) -> ErrorResolutionScope {
+    let namedErrors = entries.compactMap { entry -> NamedErrorDeclaration? in
+        if case .namedError(let error) = entry.kind { error } else { nil }
+    }
+    let typeNames = typeDeclarations.map(\.name)
+    if let duplicate = firstDuplicate(namedErrors.map(\.name) + typeNames) {
+        preconditionFailure(
+            "\"\(namespace)\" declares \"\(duplicate)\" twice (as an Error or a type)"
+        )
+    }
+    let structures = Dictionary(
+        uniqueKeysWithValues: typeDeclarations.compactMap { declaration -> (String, [Field])? in
+            if case .structure(let fields) = declaration.payload {
+                (declaration.name, fields)
+            } else {
+                nil
+            }
+        }
+    )
+    return ErrorResolutionScope(
+        namespace: namespace,
+        namedErrors: Dictionary(uniqueKeysWithValues: namedErrors.map { ($0.name, $0) }),
+        structures: structures,
+        localTypes: Set(typeNames)
     )
 }
 
@@ -1310,7 +1413,7 @@ package func firstDuplicate(_ names: some Sequence<String>) -> String? {
 
 /// Rewrites undotted references to their block-qualified form, validating
 /// they resolve locally; dotted (cross-schema) references pass through.
-private func qualifyReferences(
+func qualifyReferences(
     in schema: TypeSchema,
     namespace: String,
     localTypes: Set<String>
@@ -1331,7 +1434,7 @@ private func qualifyReferences(
 
 /// Assigns declaration-order keys to unpinned fields, skipping pinned and
 /// reserved values; duplicate pins are programmer error.
-private func assignKeys(
+func assignKeys(
     _ fields: [Field],
     startingAt first: Int = 0,
     reserving reserved: Set<Int> = []

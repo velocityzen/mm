@@ -255,11 +255,14 @@ let package = Package(
                 "MMCLI",
                 "MMWire",
                 "MMSchema",
-                // `isValidLowerIdentifierPath`, the macros' namespace check.
+                // `isValidLowerIdentifierPath`, the macros' namespace check,
+                // and `#schema` expansions of drawn contracts.
                 "MMSchemaCodeGenerator",
                 "MMServer",
                 "MMClient",
                 "MMTestSupport",
+                .product(name: "SwiftParser", package: "swift-syntax"),
+                .product(name: "SwiftSyntax", package: "swift-syntax"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),

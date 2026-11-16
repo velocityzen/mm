@@ -72,15 +72,20 @@ public enum MMCLIFailure {
 
     /// Writes the one-line diagnosis to stderr and returns the exit code for
     /// the command to throw.
-    public static func exit(for error: MMCallError, method: String, entity: String) -> ExitCode {
-        MMCLIOutput.note(Self.message(for: error, method: method, entity: entity))
-        return Self.code(for: error)
+    public static func exit(
+        for error: some MMCLIReportableFailure,
+        method: String,
+        entity: String
+    ) -> ExitCode {
+        MMCLIOutput.note(error.message(method: method, entity: entity))
+        return error.exitCode
     }
 
     /// The funnel generated commands call: a success passes through, a
-    /// failure is rendered to stderr and thrown as its `ExitCode`.
-    public static func unwrap<T>(
-        _ result: Result<T, MMCallError>,
+    /// failure is rendered to stderr and thrown as its `ExitCode` — a
+    /// declared error's the one its contract pins.
+    public static func unwrap<T, Failure: MMCLIReportableFailure>(
+        _ result: Result<T, Failure>,
         method: String,
         entity: String
     ) throws -> T {

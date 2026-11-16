@@ -80,12 +80,14 @@ extension TypeSchema {
 }
 
 extension MethodSignature {
-    /// Every ``TypeSchema/reference(_:)`` name across the four payload slots.
+    /// Every ``TypeSchema/reference(_:)`` name across the four payload slots
+    /// and the declared errors.
     public func collectReferencedTypeNames(into names: inout Set<String>) {
         self.request.collectReferencedTypeNames(into: &names)
         self.response.collectReferencedTypeNames(into: &names)
         self.requestStream?.collectReferencedTypeNames(into: &names)
         self.responseStream?.collectReferencedTypeNames(into: &names)
+        self.errors?.collectReferencedTypeNames(into: &names)
     }
 }
 

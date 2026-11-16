@@ -9,8 +9,8 @@ import Testing
 /// 12 requestStream, 13 requestStreamDescription), the response direction in
 /// the 20s (20 response, 21 responseDescription, 22 responseStream,
 /// 23 responseStreamDescription) — every slot immediately followed by its doc
-/// slot. Optional slots omit their key entirely; unknown keys are skipped —
-/// the standard wire-evolution contract.
+/// slot — and the declared errors at 30. Optional slots omit their key
+/// entirely; unknown keys are skipped — the standard wire-evolution contract.
 private struct CoreOnlySignature: Codable, Equatable {
     var name: String
     var access: AccessMode
@@ -39,6 +39,11 @@ private let countElement: TypeSchema = .structure(fields: [
     .init(key: 0, name: "count", type: .int)
 ])
 
+private let declaredErrors: TypeSchema = .union(cases: [
+    .init(name: "retired", fields: [], description: "no longer served"),
+    .init(name: "full", fields: [.init(key: 0, name: "capacity", type: .int)]),
+])
+
 /// Reads the encoded map's integer keys in wire order, structurally skipping
 /// every value — the layout pin that stays honest no matter how `TypeSchema`
 /// itself encodes.
@@ -65,6 +70,7 @@ struct MethodSignatureWireTests {
             response: summaryResponse,
             requestStream: lineElement,
             responseStream: countElement,
+            errors: declaredErrors,
             description: "keeps a feed in sync",
             requestDescription: "opening request",
             responseDescription: "terminal summary",
@@ -96,6 +102,7 @@ struct MethodSignatureWireTests {
             response: summaryResponse,
             requestStream: lineElement,
             responseStream: countElement,
+            errors: declaredErrors,
             description: "keeps a feed in sync",
             requestDescription: "opening request",
             responseDescription: "terminal summary",
@@ -103,7 +110,7 @@ struct MethodSignatureWireTests {
             responseStreamDescription: "counts coming down"
         )
         let bytes = try #require(MMPackEncoder().encode(signature).mpSuccess)
-        #expect(try mapKeys(of: bytes) == [0, 1, 2, 10, 11, 12, 13, 20, 21, 22, 23])
+        #expect(try mapKeys(of: bytes) == [0, 1, 2, 10, 11, 12, 13, 20, 21, 22, 23, 30])
     }
 
     @Test("core-only bytes decode as a MethodSignature with every optional slot nil")
@@ -128,7 +135,7 @@ struct MethodSignatureWireTests {
         )
     }
 
-    @Test("a reader that only knows the core keys skips the stream and doc slots")
+    @Test("a reader that only knows the core keys skips the stream, doc and error slots")
     func fullBytesDecodeOnCoreOnlyReader() throws {
         let streaming = MethodSignature(
             name: "feed.sync",
@@ -137,6 +144,7 @@ struct MethodSignatureWireTests {
             response: summaryResponse,
             requestStream: lineElement,
             responseStream: countElement,
+            errors: declaredErrors,
             description: "keeps a feed in sync"
         )
         let bytes = try #require(MMPackEncoder().encode(streaming).mpSuccess)

@@ -357,6 +357,36 @@ A method has four independent, combinable parts: an opening `Request`, a client-
 - **Credit-based flow control:** each direction starts with 8 items of credit. The receiver grants more in watermark batches as it consumes. A sender with zero credit suspends, so memory stays bounded. One stream never blocks sibling streams.
 - **Graceful termination:** END finishes your direction. STOP asks the peer to finish theirs (a typed `.peerStopped`, never an error). CANCEL aborts the whole call. Every call, unary or streaming, ends with exactly one terminal response. It tells the client whether the call ended gracefully or failed. A handler relaying a quiet source sees STOP at once via `sink.stopRequested()`, before its next send.
 
+## Declared errors
+
+The errors a call can fail with are part of its contract. A top-level `Errors` block declares the namespace's errors, which every call can return. An `Errors` part in a `Call` adds the call's own. `Error("Full")` declares a named error the way `Type` declares a named type, and `Case(.reference("Full"))` lists it:
+
+```swift
+#schema("journal") {
+    Errors {
+        Case("retired", exitCode: 10, description: "The journal is retired")
+    }
+    Error("Full", exitCode: 12) { Field("capacity", .int) }
+    Call("append") {
+        Access { .write }
+        Errors {
+            Case("emptyLine", exitCode: 11)
+            Case(.reference("Full"))
+        }
+        Request { Field("line", .string) }
+    }
+}
+```
+
+`#schema` generates one flat enum per call, `Journal.AppendError` with the cases `retired`, `emptyLine`, and `full(Journal.Full)`, plus `unknown(String)` for a case this build does not know. The namespace's errors also get `Journal.Error`, which `Journal.AppendError(_:)` lifts into the call's enum. A case can carry inline fields (`Case("tooLong", exitCode: 13) { Field("limit", .int) }`) or a named `Type` (`Case("conflict", .reference("Conflict"), exitCode: 14)`).
+
+- **Handlers** return the call's enum: `On(Journal.append) { auth, request in .failure(.emptyLine) }`.
+- **Clients** get it typed: `call(Journal.append, ...)` fails with `.declared(.emptyLine)`, and with `.undeclared(MMCallError)` for anything the contract does not declare (a denial, a dropped connection).
+- **The generated CLI** exits with the case's `exitCode` (2 to 63, unique within a call) and prints the case, its description, and its fields on stderr: `full: ... {"capacity":10000}`.
+- **On the wire** every declared error is error code 64 with the case name as the message and the union value as the payload. The case name is the identity, so reordering errors is safe. Discovery serves each method's errors (`MethodSignature` key 30), the fingerprint covers them, and `verify(against:)` checks them. See WireProtocol.md, section 6.2.
+
+A namespace with errors has a type named `Error`, which shadows `Swift.Error` inside it: write `Swift.Error` there. Importing MMSchema also makes a bare `Error.self` ambiguous with the `Error(...)` DSL function; write `(any Error).self`.
+
 ## Authorization model
 
 Entities are dotted paths (`box.item`) in a tree. Each has an `EntityACL`, like a file: owner uid, group gid, and a 9-bit rwx/ugo mode.

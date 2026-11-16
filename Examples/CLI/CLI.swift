@@ -17,6 +17,7 @@ import ProgramStatus
 /// swift run mm-example-cli journal add --input notes.txt journal.notes
 /// printf 'buy milk\n!call mom\n' | swift run mm-example-cli journal add --input - journal.notes
 /// swift run mm-example-cli journal read journal.notes --output text
+/// swift run mm-example-cli journal read journal.old   # exits 10: retired
 /// ```
 ///
 /// The whole tool is one declaration — the CLI twin of the daemon's

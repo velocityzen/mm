@@ -53,6 +53,8 @@ Unary calls return `Result<Response, MMCallError>` directly. Streaming calls ret
 - ``OutboundStreamHandle`` for client streams: credit-gated `send(_:)`, one-shot `finish()`, and `result()`.
 - ``BidirectionalStreamHandle``: independent `inbound`/`outbound` halves that share one terminal.
 
+A call whose contract declares errors fails with ``MMDeclaredCallError``: `.declared` carries the generated error enum (`Journal.AppendError`), typed, and `.undeclared` carries the ``MMCallError`` for anything the contract does not declare. Stream handles carry the failure type as their last generic parameter, so their `result()` fails the same way.
+
 ``StreamSendOutcome`` reports `.peerStopped`, `.callEnded`, and `.connectionClosed` as typed, graceful outcomes, not errors.
 
 To consume a stream while the same task makes other calls, use ``withStream(_:each:_:)``. It runs `each` in a structured sibling task, which enforces the head-of-line rule. It returns only after the body finishes and the sequence ends, so it joins both for you.
@@ -88,3 +90,5 @@ The connection lifecycle is intentionally simple. ``ClientState`` is `.connected
 
 - ``MMClientError``
 - ``MMCallError``
+- ``MMDeclaredCallError``
+- ``MMCallFailure``

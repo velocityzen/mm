@@ -92,12 +92,13 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
     /// Same name on both sides, different `AccessMode` — the verb now needs
     /// a different permission class on its target entity.
     public var accessChanged: [Change]
-    /// Same name on both sides, different request, response, **or stream**
-    /// `TypeSchema` (request stream / response stream) — payloads may no
-    /// longer round-trip; new fields must be optional per the wire-evolution
-    /// contract, so a signature change here means the contract moved underneath
-    /// this build. A method that gained or lost a stream direction lands here
-    /// too (one side's stream schema is `nil`). Descriptions never count.
+    /// Same name on both sides, different request, response, **stream**
+    /// (request stream / response stream) **or declared errors** `TypeSchema`
+    /// — payloads may no longer round-trip; new fields must be optional per
+    /// the wire-evolution contract, so a signature change here means the
+    /// contract moved underneath this build. A method that gained or lost a
+    /// stream direction, or its declared errors, lands here too (one side's
+    /// schema is `nil`). Descriptions never count.
     public var signatureChanged: [Change]
     /// Methods the server serves that this client has no descriptor for —
     /// harmless to this build, informative for upgrade planning.
@@ -197,6 +198,7 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
                 || localStripped.response != remoteStripped.response
                 || localStripped.requestStream != remoteStripped.requestStream
                 || localStripped.responseStream != remoteStripped.responseStream
+                || localStripped.errors != remoteStripped.errors
             {
                 signature.append(Change(local: localMethod, remote: remoteMethod))
             }

@@ -25,6 +25,8 @@ The `#schema` macro (see ``schema(_:description:_:)``) takes the same declaratio
 - the typed descriptors, `all`, and `types`
 - the re-emitted contract
 
+A contract also declares the errors its calls fail with. A top-level `Errors` block holds the namespace's, an `Errors` part in a `Call` adds the call's own, and `Error("Full", exitCode:)` declares a named error that `Case(.reference("Full"))` lists. `#schema` generates one flat ``MMDeclaredError`` enum per call (`Journal.AppendError`) and wraps the call's descriptor in ``MethodWithErrors``. Each ``MethodSignature`` serves the call's errors as a union (``MethodSignature/errors``), and the fingerprint covers them. Exit codes are presentation for the generated CLI, in ``declaredErrorExitCodes``.
+
 Shared named types live in `#schemaTypes` containers (``schemaTypes(_:_:)``) or in hand-written ``SchemaDescribable`` types.
 
 ``TypeSchema`` models wire shapes: structures with integer-keyed fields, string-valued enumerations, tagged unions, raw bytes (``MMBytes``), and nominal ``TypeDefinition`` references. `TypeSchema.of(_:)` reads the schema of a Swift type with a memoized decoder probe. If the probe cannot handle a type, conform it to ``SchemaDescribable`` instead.
@@ -98,6 +100,23 @@ Every server also serves the ``Builtins``:
 - ``Field``
 - ``Fields(_:)``
 - ``StreamOptions``
+
+### Declared errors
+
+- ``Errors(_:)``
+- ``Error(_:exitCode:description:)``
+- ``Error(_:exitCode:description:_:)``
+- ``Case(_:)``
+- ``Case(_:exitCode:description:)``
+- ``Case(_:exitCode:description:_:)``
+- ``Case(_:_:exitCode:description:)``
+- ``ErrorsDeclaration``
+- ``ErrorCaseDeclaration``
+- ``NamedErrorDeclaration``
+- ``ErrorsBuilder``
+- ``declaredErrorExitCodes``
+- ``MMDeclaredError``
+- ``MethodWithErrors``
 
 ### Contract declarations
 

@@ -16,6 +16,9 @@ public enum MMCLIError: LocalizedError, Sendable {
     case lineTooLong(limit: Int)
     /// A call failed. It is reported like any generated command's failure.
     case call(MMCallError, method: String, entity: String)
+    /// A call failed with one of its declared errors. It is reported like a
+    /// generated command's, with the exit code the contract pins.
+    case declared(any MMCLIDeclaredError)
 
     public var errorDescription: String? {
         switch self {
@@ -27,6 +30,8 @@ public enum MMCLIError: LocalizedError, Sendable {
                 return "input line longer than \(limit) bytes"
             case .call(let error, let method, let entity):
                 return MMCLIFailure.message(for: error, method: method, entity: entity)
+            case .declared(let declared):
+                return MMCLIFailure.message(for: declared)
         }
     }
 
@@ -36,6 +41,7 @@ public enum MMCLIError: LocalizedError, Sendable {
     /// - `inputReadFailed` → 74 (EX_IOERR)
     /// - `lineTooLong` → 65 (EX_DATAERR)
     /// - `call` → ``MMCLIFailure/code(for:)``
+    /// - `declared` → the exit code the contract pins for the case
     public var exitCode: ExitCode {
         switch self {
             case .inputUnreadable:
@@ -46,6 +52,8 @@ public enum MMCLIError: LocalizedError, Sendable {
                 return ExitCode(65)
             case .call(let error, _, _):
                 return MMCLIFailure.code(for: error)
+            case .declared(let declared):
+                return ExitCode(declared.exitCode)
         }
     }
 }

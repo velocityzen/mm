@@ -77,6 +77,7 @@
             response: describing(signature.response, text),
             requestStream: signature.requestStream.map { describing($0, text) },
             responseStream: signature.responseStream.map { describing($0, text) },
+            errors: signature.errors.map { describing($0, text) },
             description: text,
             requestDescription: text,
             responseDescription: text,
@@ -221,7 +222,8 @@
 
     /// Where a schema sits in a set.
     enum SchemaSlot: Sendable {
-        case request(Int), response(Int), requestStream(Int), responseStream(Int), definition(Int)
+        case request(Int), response(Int), requestStream(Int), responseStream(Int), errors(Int)
+        case definition(Int)
     }
 
     extension SchemaSet {
@@ -230,6 +232,7 @@
                 [.request(index), .response(index)]
                     + (signatures[index].requestStream == nil ? [] : [.requestStream(index)])
                     + (signatures[index].responseStream == nil ? [] : [.responseStream(index)])
+                    + (signatures[index].errors == nil ? [] : [.errors(index)])
             } + types.indices.map { .definition($0) }
         }
 
@@ -239,6 +242,7 @@
                 case .response(let index): signatures[index].response
                 case .requestStream(let index): signatures[index].requestStream!
                 case .responseStream(let index): signatures[index].responseStream!
+                case .errors(let index): signatures[index].errors!
                 case .definition(let index): types[index].schema
             }
         }
@@ -249,6 +253,7 @@
                 case .response(let index): signatures[index].response = schema
                 case .requestStream(let index): signatures[index].requestStream = schema
                 case .responseStream(let index): signatures[index].responseStream = schema
+                case .errors(let index): signatures[index].errors = schema
                 case .definition(let index):
                     types[index] = TypeDefinition(name: types[index].name, schema: schema)
             }
@@ -321,6 +326,14 @@
         static let enumCases: Gen<TypeSchema.EnumCase> = Hegel.zip(names, descriptions)
             .map { TypeSchema.EnumCase(name: $0, description: $1) }
 
+        static func unions(_ schemas: Gen<TypeSchema>) -> Gen<TypeSchema> {
+            Gen<[TypeSchema.UnionCase]>.array(
+                of: Hegel.zip(names, .array(of: fields(schemas), count: 0...3), descriptions)
+                    .map { TypeSchema.UnionCase(name: $0, fields: $1, description: $2) }
+            )
+            .map { .union(cases: $0) }
+        }
+
         static let schemas: Gen<TypeSchema> = .recursive(maxDepth: 4, maxLeaves: 8, leaf: leaves) {
             schema in
             .oneOf(
@@ -333,11 +346,7 @@
                 Gen<[TypeSchema.EnumCase]>.array(of: enumCases, count: 0...4).map {
                     .enumeration(cases: $0)
                 },
-                Gen<[TypeSchema.UnionCase]>.array(
-                    of: Hegel.zip(names, .array(of: fields(schema), count: 0...3), descriptions)
-                        .map { TypeSchema.UnionCase(name: $0, fields: $1, description: $2) }
-                )
-                .map { .union(cases: $0) }
+                unions(schema)
             )
         }
 
@@ -352,6 +361,9 @@
             schemas
         )
 
+        /// A call's declared errors: a union, as `Errors` blocks resolve to.
+        static let errors: Gen<TypeSchema> = unions(schemas)
+
         static let signatures: Gen<MethodSignature> = Gen { tc in
             MethodSignature(
                 name: try tc.draw(names),
@@ -360,6 +372,7 @@
                 response: try tc.draw(payloads),
                 requestStream: try tc.draw(.optional(schemas)),
                 responseStream: try tc.draw(.optional(schemas)),
+                errors: try tc.draw(.optional(errors)),
                 description: try tc.draw(descriptions),
                 requestDescription: try tc.draw(descriptions),
                 responseDescription: try tc.draw(descriptions),
@@ -618,6 +631,29 @@
                 try tc.event(label)
                 try tc.event(same ? "nothing changed on the wire" : "the wire form changed")
                 #expect((restated.fingerprint == set.fingerprint) == same, "\(label)")
+            }
+        }
+
+        /// One schema fingerprints apart in each slot a signature can hold
+        /// it in beside its request and response: the request stream, the
+        /// response stream, the errors, and none of them.
+        ///
+        /// Mutation check: tagging the errors as either stream fails here.
+        @Test
+        func slotsFingerprintApart() throws {
+            try property { tc in
+                let drawn = try #draw(FingerprintGenerators.signatures, from: tc)
+                let schema = try #draw(FingerprintGenerators.schemas, from: tc)
+                var bare = drawn
+                bare.requestStream = nil
+                bare.responseStream = nil
+                bare.errors = nil
+                var placed = [bare, bare, bare, bare]
+                placed[1].requestStream = schema
+                placed[2].responseStream = schema
+                placed[3].errors = schema
+                let fingerprints = placed.map { SchemaFingerprint.compute([$0]) }
+                #expect(Set(fingerprints).count == placed.count)
             }
         }
     }

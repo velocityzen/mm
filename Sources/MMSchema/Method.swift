@@ -98,7 +98,8 @@ public struct MethodDocumentation: Sendable, Hashable {
 /// slots are optional per the four-part method model (a method may declare
 /// any combination of the four parts); every optional slot encodes nothing on
 /// the wire when absent (synthesized `encodeIfPresent`) and unknown keys are
-/// skipped on decode — the standard wire-evolution contract.
+/// skipped on decode — the standard wire-evolution contract. The errors a
+/// call declares sit in the 30s, after both directions.
 public struct MethodSignature: Sendable, Hashable, Codable {
     public var name: String
     public var access: AccessMode
@@ -122,6 +123,11 @@ public struct MethodSignature: Sendable, Hashable, Codable {
     public var responseStream: TypeSchema?
     /// Documentation of the response-stream elements.
     public var responseStreamDescription: String?
+    /// The errors the call declares, as a ``TypeSchema/union(cases:)``: the
+    /// namespace's errors and the call's own, flattened, each case's name
+    /// the tag its error payload carries. `nil` when the call declares none.
+    /// Case descriptions are documentation, like the other doc slots.
+    public var errors: TypeSchema?
 
     public init(
         name: String,
@@ -130,6 +136,7 @@ public struct MethodSignature: Sendable, Hashable, Codable {
         response: TypeSchema,
         requestStream: TypeSchema? = nil,
         responseStream: TypeSchema? = nil,
+        errors: TypeSchema? = nil,
         description: String? = nil,
         requestDescription: String? = nil,
         responseDescription: String? = nil,
@@ -142,6 +149,7 @@ public struct MethodSignature: Sendable, Hashable, Codable {
         self.response = response
         self.requestStream = requestStream
         self.responseStream = responseStream
+        self.errors = errors
         self.description = description
         self.requestDescription = requestDescription
         self.responseDescription = responseDescription
@@ -161,6 +169,7 @@ public struct MethodSignature: Sendable, Hashable, Codable {
         case responseDescription = 21
         case responseStream = 22
         case responseStreamDescription = 23
+        case errors = 30
     }
 }
 
@@ -175,7 +184,8 @@ extension MethodSignature {
             request: self.request.strippingDescriptions,
             response: self.response.strippingDescriptions,
             requestStream: self.requestStream?.strippingDescriptions,
-            responseStream: self.responseStream?.strippingDescriptions
+            responseStream: self.responseStream?.strippingDescriptions,
+            errors: self.errors?.strippingDescriptions
         )
     }
 }

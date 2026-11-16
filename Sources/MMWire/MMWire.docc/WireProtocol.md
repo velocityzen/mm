@@ -348,6 +348,20 @@ Codes **1 to 63 are reserved for the protocol**. Applications MUST use codes **>
 
 Worked vectors: `92d180a7a26e6f` = `[-32601, "no"]` (no payload); `9301a165c0` = `[1, "e", nil]` (explicit nil payload, decodes as absent).
 
+### 6.2 Declared errors
+
+A method's contract may declare the errors it fails with (its signature's `errors` slot, section 8.1). Every declared error travels as one error object:
+
+- **code**: `64`, the first application code. The code says "a declared error"; the payload says which one.
+- **message**: the error's case name (for example, `full`), so a reader that ignores payloads still sees which error it got.
+- **payload**: the error as a union value (section 8.3, tag 16): an int-keyed map with key `0` the case name and key `1` a map of the case's fields, keyed like a struct's (section 5.1). Key `1` is omitted for a case without fields.
+
+The case name is the error's identity. Cases are matched by name, never by position, so a contract may reorder its errors freely. A receiver that does not know a case name MUST NOT fail: it decodes the error as an unknown declared error that keeps the name (the unknown-case rule of section 6.1). A code-64 error whose payload is absent or does not decode as the method's declared union is an ordinary application error.
+
+Exit codes, descriptions, and the grouping of errors into namespace-wide and per-call sets are presentation. Only the case names and their fields reach the wire.
+
+Worked vectors: `[64, "full", {0: "full", 1: {0: 10000}}]` (a case with one field, `capacity`, at key 0) is `9340a466756c6c8200a466756c6c018100cd2710`. `[64, "retired", {0: "retired"}]` (a case without fields) is `9340a7726574697265648100a772657469726564`.
+
 ## 7. Entities and authorization
 
 ### 7.1 Entity names
@@ -438,7 +452,7 @@ The methods list is scoped by the request's entity and filtered by the requestin
 
 **Filter predicate (normative).** A method is listed if and only if the requesting peer holds **execute** on the method's prefix entity and on every ancestor of that prefix. Each is checked against its own ACL with the first-matching-class-wins rule (section 7.3). A missing ACL record anywhere on the chain excludes the method. A single-segment method name (a namespace **root call**, where the method is the namespace itself, for example `search`) is its own prefix, and is filtered by execute on that entity like its dotted siblings. The filter does not check **read** on the prefix or the method's own declared access class.
 
-`MethodSignature` is an int-keyed struct. Keys are grouped: single digits for the method itself, the 10s for the request direction, the 20s for the response direction. Every slot is directly followed by its own description slot:
+`MethodSignature` is an int-keyed struct. Keys are grouped: single digits for the method itself, the 10s for the request direction, the 20s for the response direction, the 30s for the errors the method declares. Every payload slot is directly followed by its own description slot:
 
 | Key | Field | Type |
 |---|---|---|
@@ -453,6 +467,7 @@ The methods list is scoped by the request's entity and filtered by the requestin
 | 21 | responseDescription | string, **optional** |
 | 22 | responseStream | TypeSchema, **optional**: element shape the server may stream before the terminal (present only for methods with a response stream) |
 | 23 | responseStreamDescription | string, **optional** |
+| 30 | errors | TypeSchema, **optional**: the errors the method declares, as a `union` (section 8.3) with one case per error, named by its wire case name and carrying its fields (section 6.2). Present only for methods that declare errors. Case descriptions are documentation, like the description slots. |
 
 An unset optional slot is absent (its key is omitted). Readers skip unknown keys, per the evolution rule. A method may have any combination of the four parts (request, response, requestStream, responseStream). The five description slots (keys 2, 11, 13, 21, 23) are documentation only: discovery serves them, but they are **never** hashed into the fingerprint and never used in compatibility comparisons. A documentation edit is not schema drift.
 
@@ -560,7 +575,7 @@ Hex: `82000701810005`. A bare `string` is `810005`.
 
 The 8-byte fingerprint in the hello is a stable, cross-platform hash of the server's method set **and named-type table**. The set includes the builtins `server.schema` and `server.entity` (section 8), fingerprinted like any application method (canonical signatures in section 9.5). Independent implementations MUST compute identical values for the same set of method signatures and type definitions. The fingerprint is **FNV-1a 64** over a canonical byte encoding of the sorted signatures, followed by the sorted type definitions.
 
-**Descriptions are never hashed.** The canonical encoding includes none of: the five signature description slots (keys 2, 11, 13, 21, 23), field descriptions (Field key 3), enum-case descriptions, or definition descriptions. Documentation edits never change the fingerprint.
+**Descriptions are never hashed.** The canonical encoding includes none of: the five signature description slots (keys 2, 11, 13, 21, 23), field descriptions (Field key 3), enum-case and union-case descriptions (declared errors' included), or definition descriptions. Documentation edits never change the fingerprint.
 
 ### 9.1 Canonical encoding
 
@@ -568,7 +583,7 @@ A simple tagged, length-prefixed byte encoding, intentionally **not** MessagePac
 
 **string** := `u32 LE` byte count, then the UTF-8 bytes.
 
-**signature** := name (string) ‖ access (`u8`, the raw rwx bits) ‖ request schema ‖ response schema ‖ *stream entries, emitted only when present*: `u8` tag `1` then the request-stream element schema; `u8` tag `2` then the response-stream element schema. A method with no streams emits neither entry, so a set of only unary methods hashes to the same value as before streaming was added (the pinned value of 9.4 is unchanged). The two different tags keep the request and response stream slots distinguishable.
+**signature** := name (string) ‖ access (`u8`, the raw rwx bits) ‖ request schema ‖ response schema ‖ *stream entries, emitted only when present*: `u8` tag `1` then the request-stream element schema; `u8` tag `2` then the response-stream element schema ‖ *errors entry, emitted only when present*: `u8` tag `4` then the errors schema (the `union` of key 30). A method with no streams emits neither stream entry, so a set of only unary methods hashes to the same value as before streaming was added (the pinned value of 9.4 is unchanged). The different tags keep the request stream, response stream, and errors slots distinguishable. A method without declared errors emits no errors entry, so its signature hashes as it did before errors were added.
 
 **schema** := `u8` case tag (the same values as the wire tag table in 8.3: 0 bool, 1 int, 2 uint, 3 float, 4 double, 5 string, 6 bytes, 7 optional, 8 array, 9 map, 10 structure, 11 enumeration, 12 reference, 13 date, 14 datetime, 15 timestamp, 16 union, 255 unknown), then payload:
 
@@ -636,6 +651,10 @@ Pinned fingerprint for a **typed** set, which tests `enumeration`, `reference`, 
 
 (Sorted order for hashing: the one signature, then definitions `box.LineMeta`, `box.Priority`.)
 
+Pinned fingerprint for a signature with **declared errors**, which tests `union` and the tag-4 errors entry (verified independently against the reference implementation): the set below MUST fingerprint to **`0xafdf97619cbd5f59`**.
+
+- Signature: `shelf.put`, access write (2), request `structure[]`, response `structure[{0, "count", uint}]`, errors `union[{"retired", []}, {"full", [{0, "capacity", int}]}]`.
+
 ### 9.5 Builtin canonical signatures
 
 The builtins (section 8) are in the fingerprinted set, so a real server's fingerprint can be reproduced only with their exact canonical signatures, given here.
@@ -644,7 +663,7 @@ The builtins (section 8) are in the fingerprinted set, so a real server's finger
 
 `server.schema`: name `server.schema`, access read (4), request `structure[]` (empty, the same as the `server.entity` request, because targets are in the envelope), response `structure[{0, "fingerprint", uint}, {1, "methods", array(MethodSignature)}, {2, "types", optional(array(TypeDefinition))}, {3, "namespaces", optional(array(NamespaceSignature))}]`.
 
-- `MethodSignature` hashes as `structure[{0, "name", string}, {1, "access", uint}, {2, "description", optional(string)}, {10, "request", TypeSchema}, {11, "requestDescription", optional(string)}, {12, "requestStream", optional(TypeSchema)}, {13, "requestStreamDescription", optional(string)}, {20, "response", TypeSchema}, {21, "responseDescription", optional(string)}, {22, "responseStream", optional(TypeSchema)}, {23, "responseStreamDescription", optional(string)}]`. In the *type*, the stream and description slots are always-present optional fields. In the wire encoding of a concrete signature, an absent slot omits its key.
+- `MethodSignature` hashes as `structure[{0, "name", string}, {1, "access", uint}, {2, "description", optional(string)}, {10, "request", TypeSchema}, {11, "requestDescription", optional(string)}, {12, "requestStream", optional(TypeSchema)}, {13, "requestStreamDescription", optional(string)}, {20, "response", TypeSchema}, {21, "responseDescription", optional(string)}, {22, "responseStream", optional(TypeSchema)}, {23, "responseStreamDescription", optional(string)}, {30, "errors", optional(TypeSchema)}]`. In the *type*, the stream, description, and errors slots are always-present optional fields. In the wire encoding of a concrete signature, an absent slot omits its key.
 - `TypeDefinition` hashes as `structure[{0, "name", string}, {1, "schema", TypeSchema}, {2, "description", optional(string)}]`.
 - `NamespaceSignature` hashes as `structure[{0, "name", string}, {1, "description", string}]`.
 - A `TypeSchema`-typed field uses the pinned schema `structure[{0, "tag", uint}, {1, "first", unknown}, {2, "second", unknown}]`. The payload slots are `unknown` (tag 255) because their shape depends on the tag, which a static schema cannot express.
@@ -767,6 +786,8 @@ Non-canonical decode-only vectors: `cc05` → 5, `d30000000000000005` → 5, `d9
 | `[-32601, "no"]` | `92d180a7a26e6f` | code −32601, message "no", no payload |
 | `[1, "e", nil]` | `9301a165c0` | code 1, message "e", absent payload |
 | `[1, "e", nil, 99, "ex"]` | `9501a165c063a26578` | code 1, message "e", absent payload; trailing elements skipped |
+| `[64, "full", {0: "full", 1: {0: 10000}}]` | `9340a466756c6c8200a466756c6c018100cd2710` | declared error `full` with field key 0 = 10000 (section 6.2) |
+| `[64, "retired", {0: "retired"}]` | `9340a7726574697265648100a772657469726564` | declared error `retired`, no fields |
 
 ### A.6 Fingerprint
 
@@ -776,3 +797,4 @@ Non-canonical decode-only vectors: `cc05` → 5, `d30000000000000005` → 5, `d9
 | "a" | `0xaf63dc4c8601ec8c` |
 | "foobar" | `0x85944171f73967e8` |
 | three-signature set of §9.4 | `0x401118443279fc06` |
+| declared-errors set of §9.4 | `0xafdf97619cbd5f59` |

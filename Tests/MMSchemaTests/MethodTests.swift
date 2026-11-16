@@ -21,6 +21,7 @@ struct MethodTests {
         .init(key: 21, name: "responseDescription", type: .optional(.string)),
         .init(key: 22, name: "responseStream", type: .optional(TypeSchema.schema)),
         .init(key: 23, name: "responseStreamDescription", type: .optional(.string)),
+        .init(key: 30, name: "errors", type: .optional(TypeSchema.schema)),
     ])
 
     /// Builtin requests are empty payloads: the target/scope is the call's

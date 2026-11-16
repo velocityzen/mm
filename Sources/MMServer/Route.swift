@@ -315,6 +315,7 @@ public func Handle<Request: Codable & Sendable, Response: Codable & Sendable>(
     unaryRoute(
         method,
         accepts,
+        signature: { method.signature() },
         decodeRequest: MMPackDecoder().decoding(Request.self),
         encodeResponse: MMPackEncoder().encoding(Response.self),
         body
@@ -326,6 +327,7 @@ public func Handle<Request: Codable & Sendable, Response: Codable & Sendable>(
 func unaryRoute<Request: Codable & Sendable, Response: Codable & Sendable>(
     _ method: Method<Request, Response>,
     _ accepts: Accepts,
+    signature: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
     decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
     encodeResponse: @escaping @Sendable (Response) -> Result<ByteBuffer, MMWireError>,
     _ body: @escaping @Sendable @concurrent (Request, MMContext) async -> Result<Response, MMError>
@@ -334,7 +336,7 @@ func unaryRoute<Request: Codable & Sendable, Response: Codable & Sendable>(
         name: method.name,
         access: method.access,
         accepts: accepts,
-        signatureThunk: { method.signature() },
+        signatureThunk: signature,
         kind: .unary { params, context in
             // Three stages, each folding its failure into the outcome that
             // names it: decode → handler → encode.
@@ -464,6 +466,7 @@ public func Handle<
     serverStreamRoute(
         method,
         accepts,
+        signature: { method.signature() },
         decodeRequest: MMPackDecoder().decoding(Request.self),
         encodeElement: MMPackEncoder().encoding(Element.self),
         encodeResponse: MMPackEncoder().encoding(Response.self),
@@ -480,6 +483,7 @@ func serverStreamRoute<
 >(
     _ method: ServerStreamMethod<Request, Element, Response>,
     _ accepts: Accepts,
+    signature: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
     decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
     encodeElement: @escaping @Sendable (Element) -> Result<ByteBuffer, MMWireError>,
     encodeResponse: @escaping @Sendable (Response) -> Result<ByteBuffer, MMWireError>,
@@ -491,7 +495,7 @@ func serverStreamRoute<
         name: method.name,
         access: method.access,
         accepts: accepts,
-        signatureThunk: { method.signature() },
+        signatureThunk: signature,
         decodeRequest: decodeRequest
     ) { (request: Request, context, msgid, seams, metrics) in
         let sinkState = MMResponseSinkState(
@@ -530,6 +534,7 @@ public func Handle<
     clientStreamRoute(
         method,
         accepts,
+        signature: { method.signature() },
         decodeRequest: MMPackDecoder().decoding(Request.self),
         decodeElement: MMPackDecoder().decoding(Element.self),
         encodeResponse: MMPackEncoder().encoding(Response.self),
@@ -546,6 +551,7 @@ func clientStreamRoute<
 >(
     _ method: ClientStreamMethod<Request, Element, Response>,
     _ accepts: Accepts,
+    signature: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
     decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
     decodeElement: @escaping @Sendable (ByteBuffer) -> Result<Element, MMWireError>,
     encodeResponse: @escaping @Sendable (Response) -> Result<ByteBuffer, MMWireError>,
@@ -557,7 +563,7 @@ func clientStreamRoute<
         name: method.name,
         access: method.access,
         accepts: accepts,
-        signatureThunk: { method.signature() },
+        signatureThunk: signature,
         decodeRequest: decodeRequest
     ) { (request: Request, context, msgid, seams, metrics) in
         let (source, stream) = makeRequestStream(
@@ -600,6 +606,7 @@ public func Handle<
     bidirectionalStreamRoute(
         method,
         accepts,
+        signature: { method.signature() },
         decodeRequest: MMPackDecoder().decoding(Request.self),
         decodeRequestElement: MMPackDecoder().decoding(RequestElement.self),
         encodeResponseElement: MMPackEncoder().encoding(ResponseElement.self),
@@ -618,6 +625,7 @@ func bidirectionalStreamRoute<
 >(
     _ method: BidirectionalStreamMethod<Request, RequestElement, ResponseElement, Response>,
     _ accepts: Accepts,
+    signature: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
     decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
     decodeRequestElement: @escaping @Sendable (ByteBuffer) -> Result<RequestElement, MMWireError>,
     encodeResponseElement: @escaping @Sendable (ResponseElement) -> Result<ByteBuffer, MMWireError>,
@@ -631,7 +639,7 @@ func bidirectionalStreamRoute<
         name: method.name,
         access: method.access,
         accepts: accepts,
-        signatureThunk: { method.signature() },
+        signatureThunk: signature,
         decodeRequest: decodeRequest
     ) { (request: Request, context, msgid, seams, metrics) in
         let (source, stream) = makeRequestStream(

@@ -38,7 +38,7 @@ let result = await withService()
 
 No payload bytes are read before authorization passes. Handlers receive an ``MMContext`` whose `entity` is the call's already-authorized envelope target.
 
-Register handlers with `On` in the service builder, or `Handle` on a bare ``Router``, for all four method shapes. Streaming handlers get a credit-gated ``MMResponseSink`` to send elements, an ``MMRequestStream`` of inbound elements, or both. ``StreamSendOutcome`` reports `.peerStopped` and `.callEnded` as typed, graceful outcomes, not errors. `For(_:_:)` adds a startup check for a namespace: if a declared method has no handler, the daemon does not start.
+Register handlers with `On` in the service builder, or `Handle` on a bare ``Router``, for all four method shapes. Streaming handlers get a credit-gated ``MMResponseSink`` to send elements, an ``MMRequestStream`` of inbound elements, or both. ``StreamSendOutcome`` reports `.peerStopped` and `.callEnded` as typed, graceful outcomes, not errors. For a call whose contract declares errors (a `MethodWithErrors` descriptor), the handler returns `Result<Response, Failure>` with the generated error enum, and the client receives it typed. `For(_:_:)` adds a startup check for a namespace: if a declared method has no handler, the daemon does not start.
 
 Authorization decisions come from an ``EntityACLProvider``, the host's dynamic source of rules. Its requirements, like every handler, are `@concurrent`: they run in connection tasks, off any actor. For static rules, use ``InMemoryACLProvider`` or the declarative `ACLProvider { Entity(...) { ... } }` tree. On Unix sockets, peer identity comes from kernel credentials. If the server cannot read them, it closes the connection without dispatch. A missing ACL is a denial that does not reveal whether the entity exists.
 
@@ -92,6 +92,14 @@ The <doc:IntegrationGuide> shows how to embed all of this in a production daemon
 - ``On(_:_:_:)-(ServerStreamMethod<Request,Element,Response>,_,_)``
 - ``On(_:_:_:)-(ClientStreamMethod<Request,Element,Response>,_,_)``
 - ``On(_:_:_:)-(BidirectionalStreamMethod<Request,RequestElement,ResponseElement,Response>,_,_)``
+- ``Handle(_:_:_:)-(MethodWithErrors<Method<Request,Response>,Failure>,_,_)``
+- ``Handle(_:_:_:)-(MethodWithErrors<ServerStreamMethod<Request,Element,Response>,Failure>,_,_)``
+- ``Handle(_:_:_:)-(MethodWithErrors<ClientStreamMethod<Request,Element,Response>,Failure>,_,_)``
+- ``Handle(_:_:_:)-(MethodWithErrors<BidirectionalStreamMethod<Request,RequestElement,ResponseElement,Response>,Failure>,_,_)``
+- ``On(_:_:_:)-(MethodWithErrors<Method<Request,Response>,Failure>,_,_)``
+- ``On(_:_:_:)-(MethodWithErrors<ServerStreamMethod<Request,Element,Response>,Failure>,_,_)``
+- ``On(_:_:_:)-(MethodWithErrors<ClientStreamMethod<Request,Element,Response>,Failure>,_,_)``
+- ``On(_:_:_:)-(MethodWithErrors<BidirectionalStreamMethod<Request,RequestElement,ResponseElement,Response>,Failure>,_,_)``
 - ``MMContext``
 
 ### Streaming
