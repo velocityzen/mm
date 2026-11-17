@@ -737,9 +737,9 @@ struct SchemaContractMacroTests {
                 #"PutRequest: field "mode" generates the nested enum Mode, the name of another field — \#(rename)"#
             ),
             (
-                "",
-                #"Field("inner") { Field("mode") { Field("x", .int) } }; Field("mode", \#(one))"#,
-                #"PutRequest: field "mode" generates the nested enum Mode, the name of a nested struct in PutRequest — \#(rename)"#
+                #"Union("U") { Case("a") { Field("mode") { Field("x", .int) } }; Case("b") { Field("mode", \#(one)) } }"#,
+                #"Field("x", .int)"#,
+                #"U: field "mode" generates the nested enum Mode, the name of a nested struct in U — \#(rename)"#
             ),
             (
                 #"Union("U") { Case("a") { Field("mode", \#(one)) }; Case("b") { Field("mode", \#(one)) } }"#,

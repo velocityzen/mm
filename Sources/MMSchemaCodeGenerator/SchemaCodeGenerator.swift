@@ -2310,16 +2310,15 @@ private func explicitCodableMembers(_ keyed: [(field: ParsedField, key: Int)]) -
     return lines
 }
 
-/// Nested structs declared via `Field("owner") { ... }` blocks, at any depth.
+/// The structs `Field("owner") { ... }` blocks among `fields` declare, which
+/// are generated in the type that holds the fields. A struct nested in one
+/// of them is generated in that struct, so sibling fields may each nest a
+/// struct of the same name.
 func nestedStructures(in fields: [ParsedField]) -> [(name: String, fields: [ParsedField])] {
-    var result: [(String, [ParsedField])] = []
-    for field in fields {
-        if case .structure(let name, let nested) = field.type {
-            result.append((name, nested))
-            result.append(contentsOf: nestedStructures(in: nested))
-        }
+    fields.compactMap { field in
+        guard case .structure(let name, let nested) = field.type else { return nil }
+        return (name, nested)
     }
-    return result
 }
 
 /// The enum a field's inline `.enumeration` generates, found through
