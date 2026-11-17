@@ -100,6 +100,26 @@
                         Field("seal", GeneratedCodingSeal.self)
                     }
                 }
+                Case("reissued") {
+                    Field("original", "Shipment")
+                    Field("reason", .optional(.string))
+                }
+                Case("rerouted") {
+                    Field("via") {
+                        Field("next", .optional(.reference("Shipment")))
+                    }
+                }
+            }
+            Type("Part") {
+                Field("name", .string)
+                Field("assembly", .optional(.reference("Assembly")))
+                Field("spare") {
+                    Field("part", .optional(.reference("Part")))
+                }
+            }
+            Type("Assembly") {
+                Field("base", "Part")
+                Field("parts", .array(.reference("Part")))
             }
             Call("put") {
                 Access { .write }
@@ -108,6 +128,7 @@
                     Field("conditions", .array(.optional(.reference("Condition"))))
                     Field("flag", .optional(.optional(.bool)))
                     Field("shipments", .optional(.array(.reference("Shipment"))))
+                    Field("assemblies", .optional(.array(.reference("Assembly"))))
                 }
             }
         }
@@ -121,10 +142,15 @@
         /// Hegel sizes everything. A high rate stacks boundary-sized
         /// collections inside each other, which makes the largest requests.
         var boundaryRate: Double
-        /// How deep shipments may split. Each split nests three containers
-        /// (the case map, its fields map and the parts array), so 32 splits
+        /// How deep shipments may nest: split, reissued or rerouted. Each
+        /// level nests at most three containers (the case map, its fields
+        /// map, and a split's parts array or a reroute's via), so 32 levels
         /// nest about 101: inside the decoders' default limit of 128.
         var shipmentDepth: Int
+        /// How deep parts may hold parts. Each level nests at most three
+        /// containers (the part's map, its assembly's map and the
+        /// assembly's parts array), so 32 levels nest about 101.
+        var partDepth: Int
     }
 
     /// Catalog values from their whole domains: any string, integer, float
@@ -140,12 +166,17 @@
         }
 
         /// Hegel shrinks toward the first entries: sizes it chooses, and
-        /// shipments with no splits.
+        /// shipments and parts that hold no others.
         static let shapes: Gen<CatalogShape> = Hegel.zip(
             Gen<Double>.element(of: [0, 0.1, 0.5]),
-            Gen<Int>.element(of: [0, 3, 32])
+            depths,
+            depths
         )
-        .map { CatalogShape(boundaryRate: $0, shipmentDepth: $1) }
+        .map { CatalogShape(boundaryRate: $0, shipmentDepth: $1, partDepth: $2) }
+
+        /// The depths recursive values nest to: none, a few, and as deep as
+        /// the decoders' default nesting limit allows.
+        static let depths: Gen<Int> = .element(of: [0, 3, 32])
 
         /// `anySize`, or `boundarySize` at the shape's boundary rate.
         func sometimes<Value>(_ boundarySize: Gen<Value>, otherwise anySize: Gen<Value>) -> Gen<
@@ -292,15 +323,67 @@
                     },
                     self.held
                 ),
-                branch: { parts in
+                branch: { shipment in
+                    .oneOf(
+                        Gen { tc in
+                            try .split(
+                                parts: tc.draw(Gen<[Catalog.Shipment]>.array(of: shipment)),
+                                box: .init(label: tc.draw(self.text))
+                            )
+                        },
+                        // The union's own type, held directly and through
+                        // an optional in a nested structure.
+                        Gen { tc in
+                            try .reissued(
+                                original: tc.draw(shipment),
+                                reason: tc.draw(.optional(self.text))
+                            )
+                        },
+                        Gen { tc in
+                            try .rerouted(via: .init(next: tc.draw(.optional(shipment))))
+                        }
+                    )
+                }
+            )
+        }
+
+        /// Parts holding parts: through an optional assembly, which holds
+        /// its base part and any number of others, and through an optional
+        /// in a nested structure, the spare. A part ends in at most eight
+        /// parts that hold none, so a request's arrays of assemblies of
+        /// parts stay cheap; a chain of spares still nests as deep as the
+        /// shape allows.
+        var part: Gen<Catalog.Part> {
+            .recursive(
+                maxDepth: self.shape.partDepth,
+                maxLeaves: 8,
+                leaf: Gen { tc in
+                    try Catalog.Part(
+                        name: tc.draw(self.text),
+                        assembly: nil,
+                        spare: .init(part: nil)
+                    )
+                },
+                branch: { part in
                     Gen { tc in
-                        try .split(
-                            parts: tc.draw(Gen<[Catalog.Shipment]>.array(of: parts)),
-                            box: .init(label: tc.draw(self.text))
+                        try Catalog.Part(
+                            name: tc.draw(self.text),
+                            assembly: tc.draw(.optional(Self.assembly(of: part))),
+                            spare: .init(part: tc.draw(.optional(part)))
                         )
                     }
                 }
             )
+        }
+
+        var assembly: Gen<Catalog.Assembly> {
+            Self.assembly(of: self.part)
+        }
+
+        static func assembly(of part: Gen<Catalog.Part>) -> Gen<Catalog.Assembly> {
+            Gen { tc in
+                try Catalog.Assembly(base: tc.draw(part), parts: tc.draw(.array(of: part)))
+            }
         }
 
         /// A case the contract does not declare, as a newer peer sends it:
@@ -309,7 +392,8 @@
             Gen { tc in
                 let name = try tc.draw(self.text)
                 let tag =
-                    ["pending", "shipped", "split", "held"].contains(name) ? name + "+" : name
+                    ["pending", "shipped", "split", "held", "reissued", "rerouted"].contains(name)
+                    ? name + "+" : name
                 // In one order, so a replay draws the same bytes.
                 let fields = try tc.draw(.optional(self.map(keys: Self.integer, values: self.text)))
                     .map { try MMPackRawValue(encodedInOneOrder($0).readableBytesView) }
@@ -335,7 +419,8 @@
                         self.list(of: Gen<Catalog.Condition?>.optional(Self.condition))
                     ),
                     flag: tc.draw(Gen<Bool??>.optional(Gen<Bool?>.optional(.bool()))),
-                    shipments: tc.draw(.optional(self.list(of: self.shipment)))
+                    shipments: tc.draw(.optional(self.list(of: self.shipment))),
+                    assemblies: tc.draw(.optional(self.list(of: self.assembly)))
                 )
             }
         }
@@ -343,12 +428,18 @@
 
     /// The sizes in a request that decide which MessagePack formats encode
     /// it: every string's UTF-8 byte count, every binary's byte count, every
-    /// collection's element count, and how deep its shipments split.
+    /// collection's element count, how deep its shipments and parts nest,
+    /// and which recursive fields it holds.
     struct CatalogSizes {
         var strings: [Int] = []
         var binaries: [Int] = []
         var collections: [Int] = []
         var shipmentDepth = 0
+        var partDepth = 0
+        var holdsReissuedShipment = false
+        var holdsReroutedShipmentWithNext = false
+        var holdsPartWithAssembly = false
+        var holdsPartWithSpare = false
 
         init(_ request: Catalog.PutRequest) {
             self.collections += [request.items.count, request.conditions.count]
@@ -359,6 +450,12 @@
                 self.collections.append(shipments.count)
                 for shipment in shipments {
                     self.add(shipment, depth: 0)
+                }
+            }
+            if let assemblies = request.assemblies {
+                self.collections.append(assemblies.count)
+                for assembly in assemblies {
+                    self.add(assembly, depth: 0)
                 }
             }
         }
@@ -391,8 +488,41 @@
                 case .held(let duties, _):
                     self.strings += duties.values.map(\.utf8.count)
                     self.collections.append(duties.count)
+                case .reissued(let original, let reason):
+                    self.holdsReissuedShipment = true
+                    self.shipmentDepth = max(self.shipmentDepth, depth + 1)
+                    self.strings += reason.map { [$0.utf8.count] } ?? []
+                    self.add(original, depth: depth + 1)
+                case .rerouted(let via):
+                    self.shipmentDepth = max(self.shipmentDepth, depth + 1)
+                    if let next = via.next {
+                        self.holdsReroutedShipmentWithNext = true
+                        self.add(next, depth: depth + 1)
+                    }
                 default:
                     break
+            }
+        }
+
+        private mutating func add(_ assembly: Catalog.Assembly, depth: Int) {
+            self.add(assembly.base, depth: depth)
+            self.collections.append(assembly.parts.count)
+            for part in assembly.parts {
+                self.add(part, depth: depth)
+            }
+        }
+
+        private mutating func add(_ part: Catalog.Part, depth: Int) {
+            self.strings.append(part.name.utf8.count)
+            if let assembly = part.assembly {
+                self.holdsPartWithAssembly = true
+                self.partDepth = max(self.partDepth, depth + 1)
+                self.add(assembly, depth: depth + 1)
+            }
+            if let spare = part.spare.part {
+                self.holdsPartWithSpare = true
+                self.partDepth = max(self.partDepth, depth + 1)
+                self.add(spare, depth: depth + 1)
             }
         }
     }
@@ -413,8 +543,27 @@
         if sizes.binaries.contains(where: { $0 >= 256 }) {
             try tc.event("a binary past bin8")
         }
-        try tc.event("shipment split depth", value: Double(sizes.shipmentDepth))
+        if sizes.holdsReissuedShipment {
+            try tc.event("a reissued shipment")
+        }
+        if sizes.holdsReroutedShipmentWithNext {
+            try tc.event("a rerouted shipment holding the next")
+        }
+        if sizes.holdsPartWithAssembly {
+            try tc.event("a part holding an assembly")
+        }
+        if sizes.holdsPartWithSpare {
+            try tc.event("a part holding a spare")
+        }
+        try tc.event("shipment nesting depth", value: Double(sizes.shipmentDepth))
+        try tc.event("part nesting depth", value: Double(sizes.partDepth))
     }
+
+    /// The events `recordSizes` records for the catalog's recursive types.
+    let recursiveShapeEvents = [
+        "a reissued shipment", "a rerouted shipment holding the next",
+        "a part holding an assembly", "a part holding a spare",
+    ]
 
     // The two paths, named so each property says which one it takes: generic
     // code that only knows `Encodable`/`Decodable` cannot pick the generated

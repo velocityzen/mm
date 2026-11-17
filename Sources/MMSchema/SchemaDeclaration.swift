@@ -1046,12 +1046,56 @@ public func Fields(@SchemaFieldsBuilder _ content: () -> [Field]) -> TypeSchema 
     .structure(fields: assignKeys(content()))
 }
 
+/// Fields declared once and used in several fields blocks: a `Type`'s, a
+/// union case's, a call part's, a nested structure's:
+///
+/// ```swift
+/// Schema("journal") {
+///     let audit = FieldGroup {
+///         Field("author", .string)
+///         Field("written", .timestamp)
+///     }
+///     Type("Line") {
+///         Field("text", .string)
+///         audit
+///     }
+///     Call("append") {
+///         Access { .write }
+///         Request {
+///             Field("text", .string)
+///             audit
+///         }
+///     }
+/// }
+/// ```
+///
+/// A group's fields take their places where it is used, as if written
+/// there: an unpinned field takes the smallest key the block has not used,
+/// a pinned one keeps its pin, and a `Reserved(...)` reserves for the whole
+/// block. So a field added to a group moves the keys of the unpinned fields
+/// after the group in every block that uses it, as adding the field there by
+/// hand would: a block whose keys have to stay uses its groups after its own
+/// fields, or pins its keys. The wire, discovery and the fingerprint see
+/// only the fields, never the group.
+///
+/// `#schema` and `#schemaTypes` expand a group declared with `let` at the
+/// top of their block; the runtime DSL takes one declared anywhere.
+public struct FieldGroup: Sendable, Hashable {
+    let fields: [Field]
+
+    public init(@SchemaFieldsBuilder _ fields: () -> [Field]) {
+        self.fields = fields()
+    }
+}
+
 @resultBuilder
 public enum SchemaFieldsBuilder: MMListBuilding {
     public typealias Element = Field
 
     public static func buildExpression(_ field: Field) -> [Field] { [field] }
     public static func buildExpression(_ fields: [Field]) -> [Field] { fields }
+    /// A ``FieldGroup``'s fields, in its place.
+    public static func buildExpression(_ group: FieldGroup) -> [Field] { group.fields }
     public static func buildExpression(_ reservation: FieldReservation) -> [Field] {
         [Field(reservation: reservation)]
     }

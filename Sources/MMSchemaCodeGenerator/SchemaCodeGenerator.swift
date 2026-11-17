@@ -108,14 +108,21 @@ package enum SchemaCodeGenerator {
             )
         }
         var types: [ParsedTypeDecl] = []
+        var groups = FieldGroupExpansion()
         for item in closure.statements {
+            if let declaration = item.item.as(VariableDeclSyntax.self) {
+                try groups.declare(declaration, context: "#schemaTypes")
+            }
+        }
+        for item in groups.expanding(closure).statements {
+            if item.item.is(VariableDeclSyntax.self) { continue }
             guard let call = item.item.as(FunctionCallExprSyntax.self),
                 let callee = calleeName(call),
                 ["Enum", "Union", "Type", "Alias"].contains(callee)
             else {
                 throw SchemaMacroError(
                     description:
-                        "#schemaTypes supports only Enum(...), Union(...), Type(...) and Alias(...) declarations (static subset)"
+                        "#schemaTypes supports only Enum(...), Union(...), Type(...), Alias(...) and field group declarations (static subset)"
                 )
             }
             types.append(
@@ -127,7 +134,7 @@ package enum SchemaCodeGenerator {
         }
         try validate(types: types, calls: [])
         let resolver = WireDefaultResolver(types: types)
-        types = try types.map { try resolver.resolve($0) }
+        types = try breakingValueCycles(types.map { try resolver.resolve($0) })
         let constrained = constrainedTypeNames(types)
         var declarations: [String] = []
         for type in types {
@@ -400,6 +407,9 @@ struct ParsedUnionCase {
     var fields: [ParsedField]
     /// Why the case is deprecated; nil when it is not.
     var deprecation: String? = nil
+    /// Set for a case on a cycle of declared types that hold each other by
+    /// value: the generated case is `indirect`. See ``breakingValueCycles(_:)``.
+    var isIndirect = false
 
     /// The generated `CodingKey` enum for the case's fields.
     var codingKeysName: String { "\(capitalizedFirst(name))CodingKeys" }
@@ -503,6 +513,10 @@ struct ParsedField {
     /// Set once the block's types are known, for a field that is not
     /// optional with a `default:`; see ``WireDefaultResolver``.
     var wireDefault: ParsedWireDefault? = nil
+    /// Set for a field of a declared `Type` on a cycle of declared types
+    /// that hold each other by value: the generated property keeps its value
+    /// in an `MMIndirect` box. See ``breakingValueCycles(_:)``.
+    var isIndirect = false
 }
 
 /// `append` → `Append` — one spelling for generated-type name derivation.
@@ -568,13 +582,20 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
     var namedErrors: [ParsedNamedError] = []
     var namespaceErrors: [ParsedErrorCase]?
     var seen: Set<String> = []
+    var groups = FieldGroupExpansion()
     for item in closure.statements {
+        if let declaration = item.item.as(VariableDeclSyntax.self) {
+            try groups.declare(declaration, context: "#schema")
+        }
+    }
+    for item in groups.expanding(closure).statements {
+        if item.item.is(VariableDeclSyntax.self) { continue }
         guard let call = item.item.as(FunctionCallExprSyntax.self),
             let callee = calleeName(call)
         else {
             throw SchemaMacroError(
                 description:
-                    "#schema supports only Call, Enum, Union, Type, Error, Errors, and CLI declarations at the top level (the macro form is the DSL's static subset — no conditionals)"
+                    "#schema supports only Call, Enum, Union, Type, Alias, Error, Errors, CLI and field group declarations at the top level (the macro form is the DSL's static subset — no conditionals)"
             )
         }
         switch callee {
@@ -607,7 +628,7 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
             default:
                 throw SchemaMacroError(
                     description:
-                        "#schema supports only Call, Enum, Union, Type, Error, Errors, and CLI declarations at the top level (got \(callee))"
+                        "#schema supports only Call, Enum, Union, Type, Alias, Error, Errors, CLI and field group declarations at the top level (got \(callee))"
                 )
         }
     }
@@ -616,7 +637,7 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
     }
     let generatedNames = try validate(types: types, calls: calls)
     let resolver = WireDefaultResolver(types: types)
-    types = try types.map { try resolver.resolve($0) }
+    types = try breakingValueCycles(types.map { try resolver.resolve($0) })
     calls = try calls.map { try resolver.resolve($0) }
     namedErrors = try namedErrors.map { try resolver.resolve($0) }
     let resolvedNamespaceErrors = try (namespaceErrors ?? []).map {
@@ -1592,6 +1613,12 @@ func parseFields(
     var reservedKeys: Set<Int> = []
     var reservedNames: Set<String> = []
     for item in closure.statements {
+        if let reference = item.item.as(DeclReferenceExprSyntax.self) {
+            throw SchemaMacroError(
+                description:
+                    "\(context): \(reference.trimmedDescription) is not a field group the block declares — the macro expands a group declared at the top of the block: let \(reference.trimmedDescription) = FieldGroup { ... }"
+            )
+        }
         guard let call = item.item.as(FunctionCallExprSyntax.self),
             let callee = calleeName(call),
             callee == "Field" || (callee == "Reserved" && allowsReserved)
@@ -1960,11 +1987,19 @@ func generateStruct(
     }
     let fieldNames = Set(keyed.map(\.field.name))
     for (field, _) in keyed {
+        // A boxed property's wrapper keeps the box in `_<property>`.
+        let wrapper = field.isIndirect ? "@MMIndirect " : ""
+        if field.isIndirect, fieldNames.contains("_\(storageName(field))") {
+            throw SchemaMacroError(
+                description:
+                    "\(name): field \"\(field.name)\" holds \(name) and keeps its box in \"_\(storageName(field))\", another field's name — rename one"
+            )
+        }
         guard let deprecation = field.deprecation else {
             if let description = field.description {
                 lines.append("    /// \(docCommentText(description))")
             }
-            lines.append("    public var \(field.name): \(swiftType(field.type))")
+            lines.append("    \(wrapper)public var \(field.name): \(swiftType(field.type))")
             continue
         }
         // A deprecated property warns wherever it is used, the generated
@@ -1976,7 +2011,7 @@ func generateStruct(
                     "\(name): field \"\(field.name)\" is deprecated and keeps its value in \"\(storage)\", another field's name — rename one"
             )
         }
-        lines.append("    private var \(storage): \(swiftType(field.type))")
+        lines.append("    \(wrapper)private var \(storage): \(swiftType(field.type))")
         if let description = field.description {
             lines.append("    /// \(docCommentText(description))")
         }
@@ -1996,7 +2031,11 @@ func generateStruct(
     lines.append("    public init(\(parameters.joined(separator: ", "))) {")
     lines.append(contentsOf: assignments)
     lines.append("    }")
-    if keyed.contains(where: { $0.field.wireDefault != nil || $0.field.deprecation != nil }) {
+    // Synthesized `Codable` would code a boxed field's `MMIndirect`, which
+    // has no coding of its own.
+    if keyed.contains(where: {
+        $0.field.wireDefault != nil || $0.field.deprecation != nil || $0.field.isIndirect
+    }) {
         lines.append(contentsOf: explicitCodableMembers(keyed).map { "    \($0)" })
     }
     lines.append(contentsOf: mmPackStructMembers(keyed).map { "    \($0)" })
@@ -2015,8 +2054,9 @@ func generateStruct(
 }
 
 /// The `Codable` members of a struct whose fields synthesis cannot code: a
-/// field with a wire default decodes with its fallback, and a deprecated
-/// field lives in private storage. They code as synthesis does otherwise:
+/// field with a wire default decodes with its fallback, a deprecated field
+/// lives in private storage, and a boxed field's `MMIndirect` has no coding
+/// of its own. They code as synthesis does otherwise:
 /// `decode`/`encode` for a field that is not optional, `decodeIfPresent`/
 /// `encodeIfPresent` for one that is.
 private func explicitCodableMembers(_ keyed: [(field: ParsedField, key: Int)]) -> [String] {
@@ -2494,7 +2534,8 @@ private func generateUnion(
         }
         let values = keyed.map { field, _ in "\(field.name): \(swiftType(field.type))" }
         let payload = values.isEmpty ? "" : "(\(values.joined(separator: ", ")))"
-        lines.append("    case `\(unionCase.name)`\(payload)")
+        let indirect = unionCase.isIndirect ? "indirect " : ""
+        lines.append("    \(indirect)case `\(unionCase.name)`\(payload)")
     }
     lines.append(
         "    /// A case this contract does not declare: its name, and its fields' bytes as they"

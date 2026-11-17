@@ -789,8 +789,8 @@ func exitCodeConformances(for contract: ParsedContract, enclosingType: String) -
 /// The DSL functions a contract calls. Re-emitted module-qualified, so a
 /// generated type of the same name in the namespace cannot shadow them.
 private let dslCallees: Set<String> = [
-    "Access", "Alias", "CLI", "Call", "Case", "Enum", "Error", "Errors", "Field", "Fields",
-    "Request", "RequestStream", "Reserved", "Response", "ResponseStream", "Type", "Union",
+    "Access", "Alias", "CLI", "Call", "Case", "Enum", "Error", "Errors", "Field", "FieldGroup",
+    "Fields", "Request", "RequestStream", "Reserved", "Response", "ResponseStream", "Type", "Union",
 ]
 
 /// The statements' source with every DSL callee written as

@@ -207,7 +207,7 @@ struct SchemaContractMacroTests {
             diagnostics: [
                 DiagnosticSpec(
                     message:
-                        "#schema supports only Call, Enum, Union, Type, Error, Errors, and CLI declarations at the top level (the macro form is the DSL's static subset — no conditionals)",
+                        "#schema supports only Call, Enum, Union, Type, Alias, Error, Errors, CLI and field group declarations at the top level (the macro form is the DSL's static subset — no conditionals)",
                     line: 1, column: 1)
             ],
             macros: macros
@@ -597,6 +597,57 @@ struct SchemaContractMacroTests {
             (
                 "", #"Field("text", .string, deprecated: "gone", cli: .input)"#,
                 #"Call("put"): field "text" is cli: .input, which the input runner writes, so it cannot be deprecated"#
+            ),
+        ]
+        for (top, fields, message) in cases {
+            let source = """
+                #schema("box") {
+                    \(top)
+                    Call("put") {
+                        Access(.write)
+                        Request {
+                            \(fields)
+                        }
+                    }
+                }
+                """
+            assertMacroExpansion(
+                source,
+                expandedSource: source,
+                diagnostics: [DiagnosticSpec(message: message, line: 1, column: 1)],
+                macros: macros
+            )
+        }
+    }
+    @Test("diagnostics: types that hold themselves and field groups are checked at expansion")
+    func compositionDiagnostics() {
+        // Each case: the block's declarations before the call, the put
+        // call's request fields, and the diagnosis.
+        let endless =
+            "has no finite value: every value of it holds another value of a type on its cycle, without end — make a field on the way optional, or an array"
+        let groupsOnly =
+            "#schema declares only field groups besides its entries: let name = FieldGroup { ... } (static subset)"
+        let cases: [(top: String, fields: String, message: String)] = [
+            (#"Type("A") { Field("a", "A") }"#, #"Field("x", .int)"#, #"Type("A") \#(endless)"#),
+            (
+                #"Type("A") { Field("b", "B") }; Type("B") { Field("a", .array(.reference("A"))); Field("c", "A") }"#,
+                #"Field("x", .int)"#, #"Type("A") \#(endless)"#
+            ),
+            (
+                #"Union("U") { Case("a") { Field("u", "U") }; Case("b") { Field("n", "N") } }; Type("N") { Field("u", "U") }"#,
+                #"Field("x", .int)"#, #"Union("U") \#(endless)"#
+            ),
+            (
+                #"Type("A") { Field("_a", .int); Field("a", .optional(.reference("A"))) }"#,
+                #"Field("x", .int)"#,
+                #"A: field "a" holds A and keeps its box in "_a", another field's name — rename one"#
+            ),
+            (#"var audit = FieldGroup { Field("a", .int) }"#, #"audit"#, groupsOnly),
+            (#"let count = 3"#, #"Field("x", .int)"#, groupsOnly),
+            (#"let audit = FieldGroup(Field("a", .int))"#, #"audit"#, groupsOnly),
+            (
+                "", #"audit"#,
+                #"put.Request: audit is not a field group the block declares — the macro expands a group declared at the top of the block: let audit = FieldGroup { ... }"#
             ),
         ]
         for (top, fields, message) in cases {

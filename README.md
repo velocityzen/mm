@@ -444,6 +444,44 @@ A contract changes without a version bump. Add fields with `.optional(...)` or a
 - **`deprecated:` is documentation.** It goes on a field, an enum or union case, a type, or a call, with a reason or `""`. A deprecated generated struct field is `@available(*, deprecated)`, and the generated memberwise initializer still takes it. Everywhere else it is a doc-comment note. Discovery serves every deprecation (WireProtocol.md, section 8). The generated CLI marks deprecated calls and options in its help, and warns on stderr when a deprecated call runs or a deprecated option or enum value is given.
 - **The fingerprint** covers a default (a changed default is a contract change) and never a deprecation or a reservation. See WireProtocol.md, section 9.1.
 
+## Schema composition
+
+A named type can hold itself, and fields shared by several blocks are declared once:
+
+```swift
+#schema("outline") {
+    let audit = FieldGroup {
+        Field("author", .string)
+        Field("written", .timestamp)
+    }
+    Type("Node") {
+        Field("title", .string)
+        Field("parent", .optional(.reference("Node")))
+        Field("children", .array(.reference("Node")))
+        audit
+    }
+    Union("Expression") {
+        Case("number") { Field("value", .int) }
+        Case("sum") {
+            Field("left", "Expression")
+            Field("right", "Expression")
+        }
+    }
+    Call("evaluate") {
+        Access { .read }
+        Request { Field("expression", "Expression") }
+        Response {
+            Field("value", .int)
+            audit
+        }
+    }
+}
+```
+
+- **Recursive types.** A type may hold itself directly or through other named types, through an optional, a nested `Field("x") { ... }` structure, a union case, an array or a map. On the wire a value nests only as deep as it does. Swift lays out a struct's properties inline, so `#schema` keeps a field that holds its own type through an optional or a nested structure in an `MMIndirect` box (`@MMIndirect public var parent: Node?`), and makes a union case that holds its union `indirect`. The property types, the initializers, equality and the wire bytes are what they would be without the box. A type whose every value would hold another value of its cycle without end (`Field("next", "Node")` with no optional on the way) is refused at compile time.
+- **Field groups.** `let audit = FieldGroup { ... }` declares fields once; a bare `audit` among a block's fields (a `Type`'s, a union case's, a call part's, a nested structure's) puts them there. Their keys are assigned as if they were written in that place: an unpinned field takes the smallest key the block has not used, a pinned one keeps its pin. So a field added to a group moves the keys of the unpinned fields after the group, in every block that uses it: use groups after a block's own fields, or pin keys, where keys have to stay. The wire, discovery and the fingerprint see only the fields. `#schema` expands a group declared with `let` at the top of its block; the runtime DSL takes one declared anywhere.
+- **One block at a time.** A macro reads only its own block. A type from another container is a Swift type (`Field("meta", CommonTypes.LineMeta.self)`) whose shape `#schema` never sees: it can't check a default against one, or box a field on a cycle that runs through one. And the compiler doesn't let a macro's arguments use what another macro generated in the same module, so a shared `#schemaTypes` container goes in a module of its own.
+
 ## Authorization model
 
 Entities are dotted paths (`box.item`) in a tree. Each has an `EntityACL`, like a file: owner uid, group gid, and a 9-bit rwx/ugo mode.

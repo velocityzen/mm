@@ -22,8 +22,10 @@
     /// A request's `Codable` bytes with the value in one slot replaced.
     struct ReplacedSlot {
         var payload: ByteBuffer
-        /// Whether the slot is in a held shipment under a split.
-        var underSplit: Bool
+        /// The case of the shipment holding the slot's held shipment most
+        /// closely: `split`, `reissued` or `rerouted`; nil when no shipment
+        /// holds it, or the slot is in an item.
+        var holder: String?
     }
 
     /// Text no generator makes, so a value holding it encodes to bytes found
@@ -49,8 +51,9 @@
         let target: Int
         let duties: [Int: String]
         private(set) var seen = 0
-        /// The target's customs, and whether it is under a split.
-        private(set) var found: (customs: Catalog.Shipment.Customs, underSplit: Bool)?
+        /// The target's customs, and the case of the shipment holding it
+        /// most closely, if any.
+        private(set) var found: (customs: Catalog.Shipment.Customs, holder: String?)?
 
         init(target: Int, duties: [Int: String]) {
             self.target = target
@@ -60,23 +63,37 @@
         /// How many held shipments `shipments` holds at any depth.
         static func count(in shipments: [Catalog.Shipment]) -> Int {
             var counting = HeldShipments(target: -1, duties: [:])
-            _ = counting.visit(shipments, depth: 0)
+            _ = counting.visit(shipments)
             return counting.seen
         }
 
-        mutating func visit(_ shipments: [Catalog.Shipment], depth: Int) -> [Catalog.Shipment] {
-            shipments.map { shipment in
-                switch shipment {
-                    case .held(_, let customs):
-                        defer { self.seen += 1 }
-                        guard self.seen == self.target else { return shipment }
-                        self.found = (customs, depth > 0)
-                        return .held(duties: self.duties, customs: customs)
-                    case .split(let parts, let box):
-                        return .split(parts: self.visit(parts, depth: depth + 1), box: box)
-                    default:
-                        return shipment
-                }
+        mutating func visit(
+            _ shipments: [Catalog.Shipment],
+            holder: String? = nil
+        ) -> [Catalog.Shipment] {
+            shipments.map { self.visit($0, holder: holder) }
+        }
+
+        mutating func visit(_ shipment: Catalog.Shipment, holder: String?) -> Catalog.Shipment {
+            switch shipment {
+                case .held(_, let customs):
+                    defer { self.seen += 1 }
+                    guard self.seen == self.target else { return shipment }
+                    self.found = (customs, holder)
+                    return .held(duties: self.duties, customs: customs)
+                case .split(let parts, let box):
+                    return .split(parts: self.visit(parts, holder: "split"), box: box)
+                case .reissued(let original, let reason):
+                    return .reissued(
+                        original: self.visit(original, holder: "reissued"),
+                        reason: reason
+                    )
+                case .rerouted(let via):
+                    return .rerouted(
+                        via: .init(next: via.next.map { self.visit($0, holder: "rerouted") })
+                    )
+                default:
+                    return shipment
             }
         }
     }
@@ -164,12 +181,35 @@
             }
         }
 
+        /// A held shipment, alone or held by a shipment of each case that
+        /// holds others: what a request without a held shipment gets, so
+        /// the slot sits under every holder even when the request's
+        /// shipments nest none.
+        var heldAloneOrUnderAHolder: Gen<Catalog.Shipment> {
+            .oneOf(
+                self.held,
+                Gen { tc in
+                    try .split(parts: [tc.draw(self.held)], box: .init(label: tc.draw(self.text)))
+                },
+                Gen { tc in
+                    try .reissued(
+                        original: tc.draw(self.held),
+                        reason: tc.draw(.optional(self.text))
+                    )
+                },
+                Gen { tc in
+                    try .rerouted(via: .init(next: tc.draw(self.held)))
+                }
+            )
+        }
+
         /// `request` encoded through `Codable` with its dictionaries in one
         /// order, and the value in `slot` replaced by `replacement`. An item
         /// slot is in one of the request's items, a held shipment slot in
         /// one of its held shipments at any depth; a request without one
-        /// gets one. The slot is found by its bytes: it first takes a value
-        /// holding `slotSentinel`, whose encoding occurs once.
+        /// gets one, alone or under a holder. The slot is found by its
+        /// bytes: it first takes a value holding `slotSentinel`, whose
+        /// encoding occurs once.
         func replacing(
             _ slot: CodableSlot,
             in request: Catalog.PutRequest,
@@ -178,7 +218,7 @@
         ) throws -> ReplacedSlot {
             var request = request
             let marker: [UInt8]
-            var underSplit = false
+            var holder: String?
             var after: [UInt8] = []
             switch slot {
                 case .lookup, .serials, .stamp:
@@ -203,16 +243,16 @@
                 case .duties, .customs:
                     var shipments = request.shipments ?? []
                     if HeldShipments.count(in: shipments) == 0 {
-                        shipments.append(try tc.draw(self.held))
+                        shipments.append(try tc.draw(self.heldAloneOrUnderAHolder))
                     }
                     let count = HeldShipments.count(in: shipments)
                     var held = HeldShipments(
                         target: try tc.draw(Gen<Int>.int(in: 0...(count - 1))),
                         duties: [0: slotSentinel]
                     )
-                    request.shipments = held.visit(shipments, depth: 0)
+                    request.shipments = held.visit(shipments)
                     let found = try #require(held.found)
-                    underSplit = found.underSplit
+                    holder = found.holder
                     marker = try codableBytes(held.duties)
                     if slot == .customs {
                         // The customs follow the duties, under key 1.
@@ -231,7 +271,7 @@
                 range = (marked.upperBound + 1)..<end
             }
             bytes.replaceSubrange(range, with: replacement)
-            return ReplacedSlot(payload: ByteBuffer(bytes: bytes), underSplit: underSplit)
+            return ReplacedSlot(payload: ByteBuffer(bytes: bytes), holder: holder)
         }
     }
 

@@ -123,6 +123,26 @@ private enum Catalog: MethodNamespace {
                     Field("seal", GeneratedCodingSeal.self)
                 }
             }
+            Case("reissued") {
+                Field("original", "Shipment")
+                Field("reason", .optional(.string))
+            }
+            Case("rerouted") {
+                Field("via") {
+                    Field("next", .optional(.reference("Shipment")))
+                }
+            }
+        }
+        Type("Part") {
+            Field("name", .string)
+            Field("assembly", .optional(.reference("Assembly")))
+            Field("spare") {
+                Field("part", .optional(.reference("Part")))
+            }
+        }
+        Type("Assembly") {
+            Field("base", "Part")
+            Field("parts", .array(.reference("Part")))
         }
         Call("put") {
             Access { .write }
@@ -131,6 +151,7 @@ private enum Catalog: MethodNamespace {
                 Field("conditions", .array(.optional(.reference("Condition"))))
                 Field("flag", .optional(.optional(.bool)))
                 Field("shipments", .optional(.array(.reference("Shipment"))))
+                Field("assemblies", .optional(.array(.reference("Assembly"))))
             }
         }
         Call("relay") {

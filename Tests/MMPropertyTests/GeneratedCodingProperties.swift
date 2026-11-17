@@ -128,7 +128,7 @@
                 reaching: [
                     "a binary past bin8", "a collection past fixarray or fixmap",
                     "a string past fixstr", "a string past str8",
-                ]
+                ] + recursiveShapeEvents
             ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let generators = CatalogGenerators(shape)
@@ -175,7 +175,7 @@
                 reaching: [
                     "a binary past bin8", "a collection past fixarray or fixmap",
                     "a string past fixstr", "a string past str8",
-                ],
+                ] + recursiveShapeEvents,
                 reachingAfter: ["flag holds an absent optional": 1_000]
             ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
@@ -265,7 +265,9 @@
         /// fail on it with the same error: a `DecodingError` names the same
         /// coding path. The place is an item's maps or external type, or a
         /// held shipment's map or the structure holding its external type,
-        /// at any depth of splits. The bytes are most often what the
+        /// at any depth of shipments holding shipments: split, reissued or
+        /// rerouted, the last two cases of the union holding the union
+        /// itself. The bytes are most often what the
         /// place's `Decodable` refuses with a `DecodingError`, which
         /// `corruptedPayloadsDecodeOrFailTheSameWay` reaches in a few cases
         /// in a thousand. An item's serials refuse with an `MMWireError`
@@ -282,7 +284,8 @@
                 reaching: ["failed with decodingFailed"],
                 reachingAfter: Dictionary(
                     uniqueKeysWithValues: (CodableSlot.allCases.map(\.rawValue) + [
-                        "a held shipment under a split", "failed with keyNotFound",
+                        "a held shipment under a split", "a held shipment under a reissued one",
+                        "a held shipment under a rerouted one", "failed with keyNotFound",
                         "failed with typeMismatch",
                     ])
                     .map { ($0, 1_000) }
@@ -290,9 +293,14 @@
             ) { tc in
                 // Sizes Hegel chooses: boundary sizes pick header formats,
                 // which name no path, and make the largest requests.
-                let shipmentDepth = try #draw(Gen<Int>.element(of: [0, 3, 32]), from: tc)
+                let shipmentDepth = try #draw(CatalogGenerators.depths, from: tc)
+                let partDepth = try #draw(CatalogGenerators.depths, from: tc)
                 let generators = CatalogGenerators(
-                    CatalogShape(boundaryRate: 0, shipmentDepth: shipmentDepth)
+                    CatalogShape(
+                        boundaryRate: 0,
+                        shipmentDepth: shipmentDepth,
+                        partDepth: partDepth
+                    )
                 )
                 let request = try #draw(generators.putRequest, from: tc)
                 // Half the time a slot whose `Decodable` can refuse with a
@@ -304,8 +312,12 @@
                 let replacement = try #draw(generators.slotBytes(for: slot), from: tc)
                 let replaced = try generators.replacing(slot, in: request, with: replacement, tc)
                 try tc.event(slot.rawValue)
-                if replaced.underSplit {
-                    try tc.event("a held shipment under a split")
+                if let holder = replaced.holder {
+                    try tc.event(
+                        holder == "split"
+                            ? "a held shipment under a split"
+                            : "a held shipment under a \(holder) one"
+                    )
                 }
                 let generated = decodedThroughGeneratedCode(
                     Catalog.PutRequest.self,

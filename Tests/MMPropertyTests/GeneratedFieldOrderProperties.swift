@@ -487,7 +487,8 @@
                     items: [item, other],
                     conditions: [],
                     flag: nil,
-                    shipments: nil
+                    shipments: nil,
+                    assemblies: nil
                 )
                 let itemsKey = encodedBytes(Catalog.PutRequest.CodingKeys.items.rawValue)
                 var requestEntries = try mapEntries(encodedBytes(request))

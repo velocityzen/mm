@@ -18,7 +18,8 @@
 
     /// A request's `Codable` bytes with every dictionary's entries sorted by
     /// their keys' bytes: each item's lookup and serials, and each held
-    /// shipment's duties, at any depth of splits. Everything else keeps its
+    /// shipment's duties, at any depth of shipments holding shipments.
+    /// Everything else keeps its
     /// bytes and its place: a struct's or a union's fields come in
     /// declaration order on every run, and an undeclared case's fields are
     /// bytes the request holds, which the generator writes in one order.
@@ -179,6 +180,21 @@
                                 try copy.value()
                             }
                         }
+                    case (Keys.fields.rawValue, "reissued"):
+                        try copy.structure { copy, key in
+                            if key == Catalog.Shipment.ReissuedCodingKeys.original.rawValue {
+                                try copy.shipment()
+                            } else {
+                                try copy.value()
+                            }
+                        }
+                    case (Keys.fields.rawValue, "rerouted"):
+                        // The via holds the next shipment, if any.
+                        try copy.structure { copy, _ in
+                            try copy.structure { copy, _ in
+                                try copy.optional { try $0.shipment() }
+                            }
+                        }
                     default:
                         try copy.value()
                 }
@@ -192,7 +208,7 @@
         case lookup = "a lookup in another order"
         case serials = "serials in another order"
         case duties = "duties in another order"
-        case dutiesUnderSplit = "duties under a split in another order"
+        case dutiesUnderAnotherShipment = "duties under another shipment in another order"
     }
 
     /// Rebuilds every dictionary of a request in another hash table, and
@@ -211,27 +227,36 @@
                 item.serials = self.rebuilt(item.serials, at: .serials)
                 return item
             }
-            request.shipments = request.shipments.map { self.shipments($0, depth: 0) }
+            request.shipments = request.shipments.map { shipments in
+                shipments.map { self.shipment($0, depth: 0) }
+            }
             return request
         }
 
-        mutating func shipments(
-            _ shipments: [Catalog.Shipment],
-            depth: Int
-        ) -> [Catalog.Shipment] {
-            shipments.map { shipment in
-                switch shipment {
-                    case .held(let duties, let customs):
-                        let place: DictionaryPlace = depth > 0 ? .dutiesUnderSplit : .duties
-                        return .held(duties: self.rebuilt(duties, at: place), customs: customs)
-                    case .split(let parts, let box):
-                        return .split(parts: self.shipments(parts, depth: depth + 1), box: box)
-                    case .unknown(_, let fields?):
-                        self.undeclaredFields.append(fields)
-                        return shipment
-                    default:
-                        return shipment
-                }
+        mutating func shipment(_ shipment: Catalog.Shipment, depth: Int) -> Catalog.Shipment {
+            switch shipment {
+                case .held(let duties, let customs):
+                    let place: DictionaryPlace = depth > 0 ? .dutiesUnderAnotherShipment : .duties
+                    return .held(duties: self.rebuilt(duties, at: place), customs: customs)
+                case .split(let parts, let box):
+                    return .split(
+                        parts: parts.map { self.shipment($0, depth: depth + 1) },
+                        box: box
+                    )
+                case .reissued(let original, let reason):
+                    return .reissued(
+                        original: self.shipment(original, depth: depth + 1),
+                        reason: reason
+                    )
+                case .rerouted(let via):
+                    return .rerouted(
+                        via: .init(next: via.next.map { self.shipment($0, depth: depth + 1) })
+                    )
+                case .unknown(_, let fields?):
+                    self.undeclaredFields.append(fields)
+                    return shipment
+                default:
+                    return shipment
             }
         }
 
@@ -275,7 +300,7 @@
                 reachingAfter: [
                     "an undeclared case's fields with two entries or more": 1_000,
                     "duties in another order": 1_000,
-                    "duties under a split in another order": 1_000,
+                    "duties under another shipment in another order": 1_000,
                 ]
             ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
