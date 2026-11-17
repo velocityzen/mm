@@ -40,6 +40,15 @@ extension MMDuration: ExpressibleByArgument {
     }
 }
 
+/// An identifier as a typed command argument: hyphenated hexadecimal text, so
+/// a generated `Field("order", .uuid)` becomes a
+/// `--order f81d4fae-7dec-11d0-a765-00a0c91e6bf6` option.
+extension MMUUID: ExpressibleByArgument {
+    public init?(argument: String) {
+        self.init(argument)
+    }
+}
+
 /// Raw bytes as a typed command argument: base64 text, so a generated
 /// `Field("blob", .bytes)` becomes a `--blob AAEC` option.
 extension MMBytes: ExpressibleByArgument {

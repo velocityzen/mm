@@ -92,6 +92,17 @@ func mpReadDuration(from buffer: inout ByteBuffer) throws -> MMDuration {
     }
 }
 
+/// Reads a `bin` holding exactly 16 bytes as an identifier.
+func mpReadUUID(from buffer: inout ByteBuffer) throws -> MMUUID {
+    let bin = try buffer.readMessagePackBinary().get()
+    guard let value = MMUUID(bytes: bin.readableBytesView) else {
+        throw MMWireError.decodingFailed(
+            description: "invalid uuid: \(bin.readableBytes) bytes where 16 are required"
+        )
+    }
+    return value
+}
+
 /// The standard-library scalars schema fields use, read straight from the
 /// bytes: what their own `init(from:)` does through a single-value container,
 /// without opening a decoder for the value. Returns nil for every other type.
@@ -264,8 +275,8 @@ final class MPDecodingState {
 
     /// Values whose bytes the coder reads itself: `ByteBuffer` (a zero-copy
     /// `bin`/`str` slice), ``MMBytes``, ``MMPackRawValue`` (one value of any
-    /// family, sitting at `depth`), the wire time kinds, and the standard
-    /// scalars.
+    /// family, sitting at `depth`), the wire time kinds, ``MMUUID``, and the
+    /// standard scalars.
     /// Returns nil for every other type.
     static func readDirectly<T>(
         _ type: T.Type,
@@ -287,6 +298,9 @@ final class MPDecodingState {
         }
         if let value = try timeKindValue(type, from: &buffer) {
             return value
+        }
+        if type == MMUUID.self {
+            return (try mpReadUUID(from: &buffer) as! T)
         }
         return try mpReadScalar(type, from: &buffer)
     }

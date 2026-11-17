@@ -16,6 +16,7 @@ MMWire implements the lowest layers of the matter-in-motion protocol. It depends
 - The decoder skips unknown keys.
 - `ByteBuffer`-typed fields get zero-copy bin/str slices.
 - The wire time kinds (`MMDate`, `MMDateTime`, `MMTimestamp` and `MMDuration` from MMSchema) are also special-cased. They travel as MessagePack bin holding a VPTS encoding (<doc:VPTS>), or a duration's binary form (<doc:Duration>), never as their ISO-string `Codable` form.
+- An `MMUUID` from MMSchema travels as MessagePack bin holding its 16 bytes, never as its text `Codable` form.
 
 The types the schema macros generate also carry generated MessagePack code (`MMPackCodable` in MMSchema). For those, the coders' `MMPackEncodable` and `MMPackDecodable` overloads skip `Encoder`, `Decoder`, and their containers, and write the same bytes and accept the same input as the `Codable` path. The one exception is a struct with no fields: its generated code steps over exactly one value, where `Decodable` reads nothing at all. Generic code cannot pick an overload from a type parameter, so ``MMPackEncoder/encoding(_:)`` and ``MMPackDecoder/decoding(_:)`` resolve the path once per type. The server's routes use them for every payload, and the client's streams for their items. Where there is nowhere to keep a resolved coder, ``MMPackEncoder/encodeCheckingForGeneratedCode(_:)`` and ``MMPackDecoder/decodeCheckingForGeneratedCode(_:from:)`` check on each call instead, with one cached conformance lookup and no allocation. The client's unary calls and stream terminals use them.
 

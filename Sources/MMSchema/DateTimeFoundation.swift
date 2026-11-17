@@ -1,8 +1,8 @@
-// The one deliberate exception to MMSchema's no-imports rule, and it is
-// conditionally compiled: `DateComponents` interop exists only where
-// Foundation does. Nothing else in the module touches Foundation — the wire
-// types, parsing, formatting, and arithmetic stay dependency-free and
-// ICU-free.
+// One of the two deliberate exceptions to MMSchema's no-imports rule (the
+// other is MMUUIDFoundation.swift), and it is conditionally compiled:
+// `DateComponents` interop exists only where Foundation does. Nothing else
+// in the module touches Foundation — the wire types, parsing, formatting,
+// and arithmetic stay dependency-free and ICU-free.
 #if canImport(Foundation)
 import Foundation
 

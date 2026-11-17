@@ -70,6 +70,8 @@ On the MessagePack wire, all three use VPTS binary, the variable-precision times
 
 Elapsed time is a kind of its own too: `.duration` (``MMDuration``), a signed span exact to the attosecond. It holds a Swift `Duration` and converts both ways without loss, so `MMDuration(later - earlier)` records the span between two timestamps. It has no calendar: a day is 86,400 seconds, and there are no years or months. Its `Codable` form is ISO 8601 duration text (`PT1H30M`, `-PT0.5S`). On the wire it is a compact binary form of 1 to 18 bytes (spec: the duration article under MMWire).
 
+An identifier is a kind of its own as well: `.uuid` (``MMUUID``), a 128-bit universally unique identifier (RFC 9562). ``MMUUID/random()`` makes a version 4 one without Foundation, and with Foundation it converts to and from `UUID` without loss. Its `Codable` form is the lowercase hyphenated text (`f81d4fae-7dec-11d0-a765-00a0c91e6bf6`); on the wire it is a bin of its 16 bytes.
+
 Authorization works like a filesystem:
 
 - ``EntityName`` is a validated dotted path.
@@ -209,6 +211,7 @@ Every server also serves the ``Builtins``:
 ### Bytes
 
 - ``MMBytes``
+- ``MMUUID``
 - ``MMPackRawValue``
 
 ### Time

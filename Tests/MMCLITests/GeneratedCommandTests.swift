@@ -33,6 +33,7 @@ enum Ledger: MethodNamespace {
                 Field("format", .optional(.string), default: "json")
                 Field("when", .optional(.timestamp), default: .now)
                 Field("wait", .optional(.duration))
+                Field("order", .optional(.uuid))
                 Field("exclude", .array(.string))
                 Field("only", .optional(.array(.string)))
             }
@@ -370,6 +371,19 @@ struct GeneratedCommandTests {
         }
     }
 
+    @Test("a uuid option takes hyphenated text in either case and refuses other forms")
+    func uuidOption() throws {
+        let base = ["--socket", "/tmp/ledger.sock", "x", "ledger.main", "--kind", "credit"]
+        #expect(try Ledger.AppendCommand.parse(base).order == nil)
+        let command = try Ledger.AppendCommand.parse(
+            base + ["--order", "F81D4FAE-7DEC-11D0-A765-00A0C91E6BF6"]
+        )
+        #expect(command.order == MMUUID(high: 0xF81D_4FAE_7DEC_11D0, low: 0xA765_00A0_C91E_6BF6))
+        #expect(throws: (any Error).self) {
+            try Ledger.AppendCommand.parse(base + ["--order", "f81d4fae7dec11d0a76500a0c91e6bf6"])
+        }
+    }
+
     @Test("short: .auto derives the short from the long name, renamed or not")
     func derivedShorts() throws {
         let command = try Ledger.AppendCommand.parse([
@@ -465,6 +479,7 @@ struct GeneratedCommandTests {
                     Field("format", .optional(.string), default: "json")
                     Field("when", .optional(.timestamp), default: .now)
                     Field("wait", .optional(.duration))
+                    Field("order", .optional(.uuid))
                     Field("exclude", .array(.string))
                     Field("only", .optional(.array(.string)))
                 }

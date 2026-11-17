@@ -245,6 +245,11 @@ struct MPGeneratedWriter: MMPackWriter {
     }
 
     @usableFromInline
+    mutating func writeUUID(_ value: MMUUID) {
+        mpWriteUUID(value, into: &self.buffer)
+    }
+
+    @usableFromInline
     mutating func writeArrayHeader(count: Int) {
         self.buffer.writeMessagePackArrayHeader(count: count)
     }
@@ -354,6 +359,11 @@ struct MPGeneratedReader: MMPackReader {
     @usableFromInline
     mutating func readDuration() throws -> MMDuration {
         try mpReadDuration(from: &self.buffer)
+    }
+
+    @usableFromInline
+    mutating func readUUID() throws -> MMUUID {
+        try mpReadUUID(from: &self.buffer)
     }
 
     @usableFromInline

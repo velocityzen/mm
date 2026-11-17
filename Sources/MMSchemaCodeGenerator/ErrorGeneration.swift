@@ -490,7 +490,7 @@ private func checkReferences(
     func check(_ type: ParsedType, context: String) throws {
         switch type {
             case .bool, .int, .uint, .float, .double, .string, .bytes,
-                .date, .datetime, .timestamp, .duration, .external:
+                .date, .datetime, .timestamp, .duration, .uuid, .external:
                 break
             case .optional(let wrapped), .array(let wrapped):
                 try check(wrapped, context: context)

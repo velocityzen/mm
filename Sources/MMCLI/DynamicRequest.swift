@@ -211,6 +211,7 @@ public struct MMCLIDynamicRequest: Codable, Sendable {
             case .datetime: return "datetime"
             case .timestamp: return "timestamp"
             case .duration: return "duration"
+            case .uuid: return "uuid"
             case .reference(let name): return "reference(\(name))"
             case .unknown: return "unknown"
         }
@@ -318,6 +319,12 @@ private struct DynamicRequestNode: Encodable {
                 }
                 var single = encoder.singleValueContainer()
                 try single.encode(duration)
+            case .uuid:
+                guard case .string(let text) = self.value, let uuid = MMUUID(text) else {
+                    throw self.invalid(encoder, expected: "UUID")
+                }
+                var single = encoder.singleValueContainer()
+                try single.encode(uuid)
             case .bytes:
                 guard case .bytes(let bytes) = self.value else {
                     throw self.invalid(encoder, expected: "bytes")

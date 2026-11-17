@@ -88,7 +88,7 @@ private func typesHeldByValue(in declaration: ParsedTypeDecl) -> Set<String> {
 private func typesHeldByValue(in type: ParsedType) -> Set<String> {
     switch type {
         case .bool, .int, .uint, .float, .double, .string, .bytes,
-            .date, .datetime, .timestamp, .duration, .array, .map, .external:
+            .date, .datetime, .timestamp, .duration, .uuid, .array, .map, .external:
             return []
         case .optional(let wrapped):
             return typesHeldByValue(in: wrapped)
@@ -109,7 +109,7 @@ private func requireFiniteValues(_ types: [ParsedTypeDecl]) throws {
     func hasFiniteValue(_ type: ParsedType) -> Bool {
         switch type {
             case .bool, .int, .uint, .float, .double, .string, .bytes,
-                .date, .datetime, .timestamp, .duration, .optional, .array, .map, .external:
+                .date, .datetime, .timestamp, .duration, .uuid, .optional, .array, .map, .external:
                 return true
             case .structure(_, let fields):
                 return fields.allSatisfy { hasFiniteValue($0.type) }

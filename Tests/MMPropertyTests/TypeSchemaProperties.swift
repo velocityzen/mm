@@ -31,8 +31,8 @@
                     "a map": 1_000, "a negative field key": 1_000, "a node three deep": 1_000,
                     "a reference name beyond ASCII": 1_000, "a scalar, tag 0": 1_000,
                     "a scalar, tag 1": 1_000, "a scalar, tag 13": 1_000, "a scalar, tag 14": 1_000,
-                    "a scalar, tag 15": 1_000, "a scalar, tag 17": 1_000, "a scalar, tag 2": 1_000,
-                    "a scalar, tag 3": 1_000,
+                    "a scalar, tag 15": 1_000, "a scalar, tag 17": 1_000, "a scalar, tag 18": 1_000,
+                    "a scalar, tag 2": 1_000, "a scalar, tag 3": 1_000,
                     "a scalar, tag 4": 1_000, "a scalar, tag 5": 1_000, "a scalar, tag 6": 1_000,
                     "a structure": 1_000, "a union": 1_000, "a union case without fields": 1_000,
                     "an empty case name": 1_000, "an empty enumeration": 1_000,
@@ -73,7 +73,7 @@
                     "a node three deep": 1_000, "a reference name beyond ASCII": 1_000,
                     "a scalar, tag 0": 1_000, "a scalar, tag 1": 1_000, "a scalar, tag 13": 1_000,
                     "a scalar, tag 14": 1_000, "a scalar, tag 15": 1_000, "a scalar, tag 17": 1_000,
-                    "a scalar, tag 2": 1_000,
+                    "a scalar, tag 18": 1_000, "a scalar, tag 2": 1_000,
                     "a scalar, tag 3": 1_000, "a scalar, tag 4": 1_000, "a scalar, tag 5": 1_000,
                     "a scalar, tag 6": 1_000, "a structure": 1_000, "a union": 1_000,
                     "a union case without fields": 1_000, "an array": 1_000,
@@ -294,6 +294,7 @@
             case .datetime: return .datetime
             case .timestamp: return .timestamp
             case .duration: return .duration
+            case .uuid: return .uuid
             case .optional(let wrapped): return .optional(wrapped)
             case .array(let element): return .array(element)
             case .map(let key, let value): return .map(key: key, value: value)
@@ -461,10 +462,10 @@
             }
         }
 
-        /// Tags past the table's 0...17, short of its 255.
+        /// Tags past the table's 0...18, short of its 255.
         static let unlistedTags: Gen<UInt8> = .oneOf(
-            .element(of: [18, 128, 254]),
-            .integer(in: 18...254)
+            .element(of: [19, 128, 254]),
+            .integer(in: 19...254)
         )
 
         /// Integers no `UInt8` holds.
@@ -627,6 +628,7 @@
                 case .timestamp: 15
                 case .union: 16
                 case .duration: 17
+                case .uuid: 18
                 case .unknown: 255
             }
         }
@@ -804,7 +806,7 @@
             if place.path.count >= 3 { labels.insert("a node three deep") }
             switch place.node {
                 case .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime,
-                    .timestamp, .duration:
+                    .timestamp, .duration, .uuid:
                     labels.insert("a scalar, tag \(DocumentedSchema.tag(of: place.node))")
                 case .unknown: labels.insert("unknown")
                 case .optional: labels.insert("an optional")

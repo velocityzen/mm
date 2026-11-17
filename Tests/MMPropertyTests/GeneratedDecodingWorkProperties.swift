@@ -104,6 +104,11 @@
             return try self.base.readDuration()
         }
 
+        mutating func readUUID() throws -> MMUUID {
+            try self.counting()
+            return try self.base.readUUID()
+        }
+
         mutating func readArrayHeader(depth: Int) throws -> Int {
             try self.counting()
             return try self.base.readArrayHeader(depth: depth)

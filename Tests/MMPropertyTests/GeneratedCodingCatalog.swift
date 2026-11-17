@@ -82,6 +82,8 @@
                 Field("thumbnail", .optional(.bytes))
                 Field("lead", .duration)
                 Field("grace", .optional(.duration))
+                Field("lot", .uuid)
+                Field("supplier", .optional(.uuid))
             }
             Union("Shipment") {
                 Case("pending")
@@ -307,7 +309,9 @@
                     photo: tc.draw(self.bytes),
                     thumbnail: tc.draw(.optional(self.bytes)),
                     lead: tc.draw(DurationGenerators.durations),
-                    grace: tc.draw(.optional(DurationGenerators.durations))
+                    grace: tc.draw(.optional(DurationGenerators.durations)),
+                    lot: tc.draw(UUIDGenerators.uuids),
+                    supplier: tc.draw(.optional(UUIDGenerators.uuids))
                 )
             }
         }

@@ -9,7 +9,7 @@
 ///   0 `bool`, 1 `int`, 2 `uint`, 3 `float`, 4 `double`, 5 `string`,
 ///   6 `bytes`, 7 `optional`, 8 `array`, 9 `map`, 10 `structure`,
 ///   11 `enumeration`, 12 `reference`, 13 `date`, 14 `datetime`,
-///   15 `timestamp`, 16 `union`, 17 `duration`, 255 `unknown`.
+///   15 `timestamp`, 16 `union`, 17 `duration`, 18 `uuid`, 255 `unknown`.
 /// - key **1**: first payload — the wrapped schema for `optional`, the element
 ///   schema for `array`, the key schema for `map`, the field list for
 ///   `structure`, the case list for `enumeration` and `union`, the qualified
@@ -45,6 +45,9 @@ public indirect enum TypeSchema: Sendable, Hashable {
     /// A span of elapsed time — ``MMDuration``, exact to the attosecond: on
     /// the wire, `bin` holding the duration encoding.
     case duration
+    /// A universally unique identifier — ``MMUUID``: on the wire, `bin`
+    /// holding its 16 bytes.
+    case uuid
     case optional(TypeSchema)
     case array(TypeSchema)
     case map(key: TypeSchema, value: TypeSchema)
@@ -247,7 +250,7 @@ extension TypeSchema {
         let rebuilt: TypeSchema
         switch self {
             case .bool, .int, .uint, .float, .double, .string, .bytes,
-                .date, .datetime, .timestamp, .duration, .reference, .unknown:
+                .date, .datetime, .timestamp, .duration, .uuid, .reference, .unknown:
                 rebuilt = self
             case .optional(let wrapped):
                 rebuilt = .optional(child(wrapped))
@@ -369,6 +372,7 @@ extension TypeSchema: Codable {
             case .timestamp: return 15
             case .union: return 16
             case .duration: return 17
+            case .uuid: return 18
             case .unknown: return 255
         }
     }
@@ -378,7 +382,7 @@ extension TypeSchema: Codable {
         try container.encode(tag, forKey: .tag)
         switch self {
             case .bool, .int, .uint, .float, .double, .string, .bytes,
-                .date, .datetime, .timestamp, .duration, .unknown:
+                .date, .datetime, .timestamp, .duration, .uuid, .unknown:
                 break
             case .optional(let wrapped):
                 try container.encode(wrapped, forKey: .first)
@@ -455,6 +459,7 @@ extension TypeSchema: Codable {
                         .union(cases: $0)
                     } ?? .unknown
             case 17: self = .duration
+            case 18: self = .uuid
             default:
                 self = .unknown
         }

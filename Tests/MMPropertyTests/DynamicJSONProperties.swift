@@ -43,7 +43,7 @@
                     "a later enumeration case": 1_000, "a map keyed by integers": 1_000,
                     "a map keyed by unsigned integers": 1_000, "a negative map key": 1_000,
                     "a reference chain": 1_000, "a string": 1_000, "a timestamp": 1_000,
-                    "a duration": 1_000,
+                    "a duration": 1_000, "a uuid": 1_000,
                     "a uint": 1_000, "a union case with fields": 1_000,
                     "a union case without fields": 1_000, "a value four levels deep": 1_000,
                     "an array with items": 1_000, "an empty array": 1_000, "an empty map": 1_000,

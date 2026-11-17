@@ -327,6 +327,7 @@ func kindName(_ type: ParsedType) -> String {
         case .datetime: "datetime"
         case .timestamp: "timestamp"
         case .duration: "duration"
+        case .uuid: "uuid"
         case .optional: "an optional"
         case .array: "an array"
         case .map: "a map"
@@ -340,7 +341,7 @@ func kindName(_ type: ParsedType) -> String {
 func isScalarKind(_ type: ParsedType) -> Bool {
     switch type {
         case .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp,
-            .duration:
+            .duration, .uuid:
             true
         default:
             false
@@ -447,7 +448,7 @@ func fieldsHoldConstraints(_ fields: [ParsedField], constrained: Set<String>) ->
 func holdsConstraints(_ type: ParsedType, constrained: Set<String>) -> Bool {
     switch type {
         case .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp,
-            .duration:
+            .duration, .uuid:
             return false
         case .optional(let wrapped), .array(let wrapped):
             return holdsConstraints(wrapped, constrained: constrained)

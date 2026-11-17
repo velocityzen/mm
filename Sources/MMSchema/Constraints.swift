@@ -377,7 +377,7 @@ extension TypeSchema {
     public var isScalarKind: Bool {
         switch self {
             case .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime,
-                .timestamp, .duration:
+                .timestamp, .duration, .uuid:
                 true
             default:
                 false
@@ -398,6 +398,7 @@ extension TypeSchema {
             case .datetime: "datetime"
             case .timestamp: "timestamp"
             case .duration: "duration"
+            case .uuid: "uuid"
             case .optional: "an optional"
             case .array: "an array"
             case .map: "a map"

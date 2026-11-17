@@ -36,6 +36,7 @@
                     "expected datetime": 1_000,
                     "expected timestamp": 1_000,
                     "expected duration": 1_000,
+                    "expected uuid": 1_000,
                 ]
             ) { tc in
                 let policy = try #draw(SchemaValueGenerators.policies(unknownSlots: false), from: tc)
@@ -118,7 +119,7 @@
     /// among them, an array and a map.
     private let extraKinds: [TypeSchema] = [
         .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp,
-        .duration,
+        .duration, .uuid,
         .enumeration(cases: [TypeSchema.EnumCase(name: "on"), TypeSchema.EnumCase(name: "off")]),
         .array(.int), .map(key: .string, value: .int),
     ]
@@ -147,6 +148,7 @@
             case .datetime: "datetime"
             case .timestamp: "timestamp"
             case .duration: "duration"
+            case .uuid: "uuid"
             case .array: "array"
             case .map, .structure, .union: "map"
             case .reference, .unknown:

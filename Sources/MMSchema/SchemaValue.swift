@@ -175,6 +175,11 @@ extension SchemaValue {
                     return self.mismatch(path, expected: "ISO duration (PT1H30M)")
                 }
                 return .success(self)
+            case .uuid:
+                guard case .string(let text) = self, MMUUID(text) != nil else {
+                    return self.mismatch(path, expected: "UUID (8-4-4-4-12 hexadecimal digits)")
+                }
+                return .success(self)
             case .bytes:
                 switch self {
                     case .bytes:
@@ -533,6 +538,7 @@ extension SchemaValue {
             case .datetime: return "a datetime"
             case .timestamp: return "a timestamp"
             case .duration: return "a duration"
+            case .uuid: return "a uuid"
             case .optional: return "an optional"
             case .array: return "an array"
             case .map: return "a map"
