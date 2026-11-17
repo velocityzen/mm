@@ -41,6 +41,7 @@
                     "an optional": 1_000, "unknown": 1_000, "a boolean default": 1_000,
                     "an integer default": 1_000, "a floating default": 1_000,
                     "a whole floating default": 1_000, "a string default": 1_000,
+                    "a duration default": 1_000,
                     "a deprecated field": 1_000, "a deprecated case": 1_000,
                 ]
             ) { tc in
@@ -61,7 +62,8 @@
         /// was: a whole floating default stays floating, never an integer.
         ///
         /// Mutation check: date decoded as datetime, a map's key and value
-        /// swapped, or a union no longer decoded, fails here at 100 cases.
+        /// swapped, a union no longer decoded, or a duration field's default
+        /// left as its text, fails here at 100 cases.
         @Test
         func schemasDecodeToThemselves() throws {
             try property(
@@ -83,6 +85,7 @@
                     "an optional": 1_000, "unknown": 1_000, "a boolean default": 1_000,
                     "an integer default": 1_000, "a floating default": 1_000,
                     "a whole floating default": 1_000, "a string default": 1_000,
+                    "a duration default": 1_000,
                     "a deprecated field": 1_000, "a deprecated case": 1_000,
                     "a deprecated definition": 1_000,
                 ]
@@ -104,6 +107,13 @@
                     .decode(TypeDefinition.self, from: ByteBuffer(bytes: definitionBytes)).get()
                 #expect(
                     try packedBytes(decoded) == definitionBytes,
+                    "\(definition) decoded as \(decoded)"
+                )
+                // The bytes do not tell a duration default from its text;
+                // the fingerprint hashes each default's kind.
+                #expect(
+                    SchemaFingerprint.compute([], types: [decoded])
+                        == SchemaFingerprint.compute([], types: [definition]),
                     "\(definition) decoded as \(decoded)"
                 )
             }
@@ -729,6 +739,11 @@
                 case .integer(let value)?: try container.encode(value, forKey: WireKey(5))
                 case .floating(let value)?: try container.encode(value, forKey: WireKey(5))
                 case .string(let value)?: try container.encode(value, forKey: WireKey(5))
+                case .duration(let value)?:
+                    try container.encode(
+                        canonicalDurationText(of: value.duration.attoseconds),
+                        forKey: WireKey(5)
+                    )
                 case nil: break
             }
             try container.encodeIfPresent(field.deprecation, forKey: WireKey(6))
@@ -799,6 +814,7 @@
                             ? "a whole floating default" : "a floating default"
                     )
                 case .string?: labels.insert("a string default")
+                case .duration?: labels.insert("a duration default")
                 case nil: break
             }
         }

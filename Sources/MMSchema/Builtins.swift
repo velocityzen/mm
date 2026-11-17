@@ -78,6 +78,10 @@ public struct SchemaResponse: Codable, Hashable, Sendable {
         self.types = try container.decodeIfPresent([TypeDefinition].self, forKey: .types) ?? []
         self.namespaces =
             try container.decodeIfPresent([NamespaceSignature].self, forKey: .namespaces) ?? []
+        // A field of a named duration reads its text default as a duration
+        // only through the type table, so the response reproduces the
+        // served schemas and their fingerprint.
+        self = self.readingDurationDefaults()
     }
 
     public func encode(to encoder: any Encoder) throws {

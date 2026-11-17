@@ -8,9 +8,9 @@ extension TypeSchema {
     /// Each rule applies to the value itself, after an optional is
     /// unwrapped:
     ///
-    /// - ``minimum`` and ``maximum`` bound a number, both ends inclusive:
-    ///   an integer bound on `int` and `uint`, a floating one on `float` and
-    ///   `double`.
+    /// - ``minimum`` and ``maximum`` bound a number or a duration, both ends
+    ///   inclusive: an integer bound on `int` and `uint`, a floating one on
+    ///   `float` and `double`, a duration on `duration`.
     /// - ``minimumLength`` and ``maximumLength`` bound a length, both ends
     ///   inclusive: a string's Unicode scalars (`"café"` is 4 precomposed and
     ///   5 decomposed), a byte string's bytes, an array's elements, a map's
@@ -21,7 +21,8 @@ extension TypeSchema {
     /// ## Wire encoding (fixed)
     ///
     /// A map with integer keys, each rule left out when absent: **0** the
-    /// minimum and **1** the maximum (a number), **2** the minimum length
+    /// minimum and **1** the maximum (a number, or for a duration a `bin`
+    /// holding its binary form), **2** the minimum length
     /// and **3** the maximum length (non-negative integers), **4** the
     /// pattern (a string). A rule this peer cannot read decodes as absent,
     /// like a key it does not know, so an older peer sees a value as less
@@ -62,16 +63,19 @@ extension TypeSchema {
         }
     }
 
-    /// One end of a numeric range: an integer for `int` and `uint` values, a
-    /// finite floating-point number for `float` and `double` values.
+    /// One end of a range: an integer for `int` and `uint` values, a finite
+    /// floating-point number for `float` and `double` values, a duration for
+    /// `duration` values.
     public enum Bound: Sendable, Hashable, CustomStringConvertible {
         case integer(Int64)
         case floating(Double)
+        case duration(MMDuration)
 
         public var description: String {
             switch self {
                 case .integer(let value): "\(value)"
                 case .floating(let value): "\(value)"
+                case .duration(let value): "\(value)"
             }
         }
     }
@@ -110,9 +114,10 @@ extension TypeSchema.Constraints: Codable {
 }
 
 extension TypeSchema.Bound: SchemaDescribable {
-    /// A bound is an integer or a floating number, and its decoder reads
-    /// whichever the value is, so its shape depends on the value: `unknown`
-    /// by construction, as for ``TypeSchema``'s own payload slots.
+    /// A bound is an integer, a floating number or a duration, and its
+    /// decoder reads whichever the value is, so its shape depends on the
+    /// value: `unknown` by construction, as for ``TypeSchema``'s own payload
+    /// slots.
     public static var schema: TypeSchema { .unknown }
 }
 
@@ -122,26 +127,32 @@ extension TypeSchema.Bound: Codable {
         switch self {
             case .integer(let value): try container.encode(value)
             case .floating(let value): try container.encode(value)
+            // A `bin` holding the binary form on the wire, ISO 8601 text in
+            // JSON: the coders' own form of a duration.
+            case .duration(let value): try container.encode(value)
         }
     }
 
     /// An integer reads as ``integer(_:)``, any other number as
-    /// ``floating(_:)``; a non-finite number or an integer past `Int64.max`
-    /// is no bound.
+    /// ``floating(_:)``, a duration as ``duration(_:)``; a non-finite number
+    /// or an integer past `Int64.max` is no bound.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.singleValueContainer()
         if let integer = try? container.decode(Int64.self) {
             self = .integer(integer)
             return
         }
-        let floating = try container.decode(Double.self)
-        guard floating.isFinite else {
-            throw DecodingError.dataCorruptedError(
-                in: container,
-                debugDescription: "a bound is a finite number"
-            )
+        if let floating = try? container.decode(Double.self) {
+            guard floating.isFinite else {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "a bound is a finite number"
+                )
+            }
+            self = .floating(floating)
+            return
         }
-        self = .floating(floating)
+        self = .duration(try container.decode(MMDuration.self))
     }
 }
 
@@ -177,11 +188,30 @@ extension TypeSchema.Constraints {
         if value.isNaN, self.minimum != nil || self.maximum != nil {
             return "is not a number, outside every range"
         }
-        if let minimum, value < minimum.doubleValue {
+        if let minimum, let limit = minimum.doubleValue, value < limit {
             return "is \(value), less than the minimum \(minimum)"
         }
-        if let maximum, value > maximum.doubleValue {
+        if let maximum, let limit = maximum.doubleValue, value > limit {
             return "is \(value), more than the maximum \(maximum)"
+        }
+        return nil
+    }
+
+    /// Whether either end of the range is a duration.
+    var hasDurationBound: Bool {
+        if case .duration? = self.minimum { return true }
+        if case .duration? = self.maximum { return true }
+        return false
+    }
+
+    /// Why a duration breaks these constraints, or nil when it keeps them.
+    /// Only duration bounds bound a duration.
+    public func violation(of value: MMDuration) -> String? {
+        if case .duration(let limit)? = self.minimum, value < limit {
+            return "is \(value), less than the minimum \(limit)"
+        }
+        if case .duration(let limit)? = self.maximum, value > limit {
+            return "is \(value), more than the maximum \(limit)"
         }
         return nil
     }
@@ -222,10 +252,13 @@ extension TypeSchema.Constraints {
         "does not match the pattern \(pattern)"
     }
 
+    // A duration bound bounds no number.
+
     private static func isBelow(_ value: Int64, _ bound: TypeSchema.Bound) -> Bool {
         switch bound {
             case .integer(let limit): value < limit
             case .floating(let limit): Double(value) < limit
+            case .duration: false
         }
     }
 
@@ -233,6 +266,7 @@ extension TypeSchema.Constraints {
         switch bound {
             case .integer(let limit): value > limit
             case .floating(let limit): Double(value) > limit
+            case .duration: false
         }
     }
 
@@ -240,6 +274,7 @@ extension TypeSchema.Constraints {
         switch bound {
             case .integer(let limit): limit >= 0 && value < UInt64(limit)
             case .floating(let limit): Double(value) < limit
+            case .duration: false
         }
     }
 
@@ -247,25 +282,35 @@ extension TypeSchema.Constraints {
         switch bound {
             case .integer(let limit): limit < 0 || value > UInt64(limit)
             case .floating(let limit): Double(value) > limit
+            case .duration: false
         }
     }
 }
 
 extension TypeSchema.Bound {
-    var doubleValue: Double {
+    /// The bound as a number; nil for a duration.
+    var doubleValue: Double? {
         switch self {
             case .integer(let value): Double(value)
             case .floating(let value): value
+            case .duration: nil
         }
     }
 
     /// Whether this bound lies above `other`: exactly for two integers,
-    /// which a `Double` cannot tell apart near the ends of `Int64`.
+    /// which a `Double` cannot tell apart near the ends of `Int64`, and for
+    /// two durations. A number and a duration are not ordered.
     func isMore(than other: Self) -> Bool {
-        if case .integer(let value) = self, case .integer(let otherValue) = other {
-            return value > otherValue
+        switch (self, other) {
+            case (.integer(let value), .integer(let otherValue)):
+                return value > otherValue
+            case (.duration(let value), .duration(let otherValue)):
+                return value > otherValue
+            case (.duration, _), (_, .duration):
+                return false
+            default:
+                return self.doubleValue! > other.doubleValue!
         }
-        return self.doubleValue > other.doubleValue
     }
 }
 
@@ -291,6 +336,10 @@ extension TypeSchema {
         }
 
         public func violation(of value: Double) -> String? {
+            self.constraints.violation(of: value)
+        }
+
+        public func violation(of value: MMDuration) -> String? {
             self.constraints.violation(of: value)
         }
 
@@ -327,17 +376,27 @@ extension TypeSchema.Constraints {
             return "a field of the named type \(name) takes its constraints from the type"
         }
         if self.minimum != nil || self.maximum != nil {
+            let bounds = [self.minimum, self.maximum].compactMap { $0 }
             switch kind {
                 case .int, .uint:
-                    for bound in [self.minimum, self.maximum].compactMap({ $0 }) {
-                        if case .floating = bound {
+                    for bound in bounds {
+                        guard case .integer = bound else {
                             return "a range on \(kind.kindName) takes integer bounds"
                         }
                     }
                 case .float, .double:
-                    break
+                    for case .duration in bounds {
+                        return "a range on \(kind.kindName) takes numeric bounds"
+                    }
+                case .duration:
+                    for bound in bounds {
+                        guard case .duration = bound else {
+                            return "a range on duration takes duration bounds"
+                        }
+                    }
                 default:
-                    return "a range applies to int, uint, float or double, not \(kind.kindName)"
+                    return
+                        "a range applies to int, uint, float, double or duration, not \(kind.kindName)"
             }
         }
         if let minimum, let maximum, minimum.isMore(than: maximum) {

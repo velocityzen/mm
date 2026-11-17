@@ -16,7 +16,8 @@ struct ParsedWireDefault {
 /// Checks and spells a block's wire defaults by the runtime's rules
 /// (`TypeSchema.Default.fitted(to:constraints:)`): a `bool`, `int`, `uint`,
 /// `float`, `double` or `string` field takes a value of its own kind that
-/// keeps its constraints, an integer standing for a floating number; a field
+/// keeps its constraints, an integer standing for a floating number, and a
+/// `duration` field ISO 8601 text that keeps its constraints; a field
 /// of the block's `Enum` or of an inline `.enumeration` takes one of its case
 /// names, and of the block's `Alias` a value of the alias's scalar that keeps
 /// the alias's constraints. Every other kind takes none.
@@ -254,7 +255,17 @@ private func fittedDefault(
                 swiftExpression: quoted(value),
                 schemaLiteral: ".string(\(quoted(value)))"
             )
-        case (.bool, _), (.int, _), (.uint, _), (.float, _), (.double, _), (.string, _):
+        case (.duration, .string(let text)):
+            guard let attoseconds = durationAttoseconds(parsing: text) else {
+                throw refusal("the default \(literal.text) is no value of duration")
+            }
+            try check(constraints?.violation(ofDuration: attoseconds))
+            return ParsedWireDefault(
+                swiftExpression: durationExpression(attoseconds),
+                schemaLiteral: ".duration(\(durationExpression(attoseconds)))"
+            )
+        case (.bool, _), (.int, _), (.uint, _), (.float, _), (.double, _), (.string, _),
+            (.duration, _):
             throw refusal("the default \(literal.text) is no value of \(kindName(kind))")
         default:
             throw refusal("a field of \(kindName(kind)) takes no default")
@@ -280,12 +291,14 @@ extension ParsedConstraints {
             switch bound {
                 case .integer(let limit): value < limit
                 case .floating(let limit): Double(value) < limit
+                case .duration: false
             }
         }
         func isAbove(_ bound: ParsedBound) -> Bool {
             switch bound {
                 case .integer(let limit): value > limit
                 case .floating(let limit): Double(value) > limit
+                case .duration: false
             }
         }
         if let minimum, isBelow(minimum) {
@@ -299,11 +312,23 @@ extension ParsedConstraints {
 
     /// Why a floating default breaks these constraints.
     fileprivate func violation(of value: Double, text: String) -> String? {
-        if let minimum, value < minimum.doubleValue {
+        if let minimum, let limit = minimum.doubleValue, value < limit {
             return "\(text) is less than the minimum \(minimum.text)"
         }
-        if let maximum, value > maximum.doubleValue {
+        if let maximum, let limit = maximum.doubleValue, value > limit {
             return "\(text) is more than the maximum \(maximum.text)"
+        }
+        return nil
+    }
+
+    /// Why a duration default breaks these constraints, named by its
+    /// canonical text as the runtime names it.
+    func violation(ofDuration attoseconds: Int128) -> String? {
+        if case .duration(let limit)? = minimum, attoseconds < limit {
+            return "\(durationText(attoseconds)) is less than the minimum \(durationText(limit))"
+        }
+        if case .duration(let limit)? = maximum, attoseconds > limit {
+            return "\(durationText(attoseconds)) is more than the maximum \(durationText(limit))"
         }
         return nil
     }

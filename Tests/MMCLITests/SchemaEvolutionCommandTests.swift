@@ -4,8 +4,8 @@ import MMSchema
 import Testing
 
 /// A fixture contract with wire defaults and deprecations on the command
-/// line: a defaulted scalar and enum option, a deprecated option, call and
-/// enum case.
+/// line: a defaulted scalar, enum and duration option, a duration whose
+/// default is a flag default, a deprecated option, call and enum case.
 enum Catalogue: MethodNamespace {
     #schema("catalogue") {
         CLI(.enabled)
@@ -18,6 +18,8 @@ enum Catalogue: MethodNamespace {
             Request {
                 Field("limit", .int, default: 20)
                 Field("shelf", "Shelf", default: "top")
+                Field("wait", .duration, constraints: .range(.seconds(1)...), default: "PT30S")
+                Field("delay", .optional(.duration), default: "PT1M")
                 Field(
                     "legacy",
                     .optional(.string),
@@ -42,6 +44,27 @@ struct SchemaEvolutionCommandTests {
         ])
         #expect(given.limit == 5)
         #expect(given.shelf == .attic)
+    }
+
+    @Test(
+        "a duration option takes its wire default when absent, and a bare optional one its flag default"
+    )
+    func durationDefaults() throws {
+        let socket = ["--socket", "/tmp/catalogue.sock"]
+        let bare = try Catalogue.ListCommand.parse(socket)
+        #expect(bare.wait == MMDuration(.seconds(30)))
+        #expect(bare.delay == nil)
+        #expect(
+            try Catalogue.ListCommand.parse(socket + ["--delay"]).delay == MMDuration(.seconds(60))
+        )
+        let given = try Catalogue.ListCommand.parse(
+            socket + ["--wait", "PT5S", "--delay", "PT0.25S"]
+        )
+        #expect(given.wait == MMDuration(.seconds(5)))
+        #expect(given.delay == MMDuration(.milliseconds(250)))
+        #expect(throws: (any Error).self) {
+            try Catalogue.ListCommand.parse(socket + ["--wait", "5s"])
+        }
     }
 
     @Test("help marks the deprecated call and option")

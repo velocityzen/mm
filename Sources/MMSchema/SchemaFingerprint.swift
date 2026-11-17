@@ -53,15 +53,17 @@
 /// - constraints: `u8` flags for the rules present (bit 0 minimum, bit 1
 ///   maximum, bit 2 minimum length, bit 3 maximum length, bit 4 pattern),
 ///   then each present rule in that order — a bound as `u8` 0 + `i64 LE` for
-///   an integer or `u8` 1 + the `f64` bit pattern `LE` for a floating one, a
-///   length as `i64 LE`, the pattern as a string. Constraints with no rule
+///   an integer, `u8` 1 + the `f64` bit pattern `LE` for a floating one, or
+///   `u8` 2 + `u32 LE` byte count + the binary form for a duration; a
+///   length as `i64 LE`; the pattern as a string. Constraints with no rule
 ///   are no constraints, and a field or definition without constraints
 ///   encodes exactly as it did before they existed, so every unconstrained
 ///   fingerprint keeps its value.
 /// - default: `u8` kind, then the value — 0 a boolean as `u8` 0 or 1, 1 an
 ///   integer as `i64 LE`, 2 a floating number as its `f64` bit pattern
-///   `LE`, 3 a string. A field without a default encodes as it did before
-///   defaults existed.
+///   `LE`, 3 a string, 4 a duration as its canonical ISO 8601 text (a
+///   string). A field without a default encodes as it did before defaults
+///   existed.
 /// - **descriptions and deprecations are never hashed** — not the five
 ///   signature doc slots, not field, case, or definition descriptions, not
 ///   any deprecation. Doc edits are not schema drift.
@@ -231,6 +233,11 @@ public enum SchemaFingerprint {
                 case .floating(let value):
                     bytes.append(1)
                     appendUInt64(value.bitPattern, into: &bytes)
+                case .duration(let value):
+                    let encoded = value.encoded()
+                    bytes.append(2)
+                    appendUInt32(UInt32(encoded.count), into: &bytes)
+                    bytes.append(contentsOf: encoded)
             }
         }
         for length in [constraints.minimumLength, constraints.maximumLength].compactMap({ $0 }) {
@@ -255,6 +262,9 @@ public enum SchemaFingerprint {
             case .string(let value):
                 bytes.append(3)
                 append(value, into: &bytes)
+            case .duration(let value):
+                bytes.append(4)
+                append(value.description, into: &bytes)
         }
     }
 

@@ -18,21 +18,32 @@ struct ParsedConstraints: Equatable {
 enum ParsedBound: Equatable {
     case integer(Int64)
     case floating(Double)
+    /// A duration, in attoseconds.
+    case duration(Int128)
 
-    var doubleValue: Double {
+    /// The bound as a number; nil for a duration.
+    var doubleValue: Double? {
         switch self {
             case .integer(let value): Double(value)
             case .floating(let value): value
+            case .duration: nil
         }
     }
 
     /// Whether this bound lies above `other`: exactly for two integers,
-    /// which a `Double` cannot tell apart near the ends of `Int64`.
+    /// which a `Double` cannot tell apart near the ends of `Int64`, and for
+    /// two durations. A number and a duration are not ordered.
     func isMore(than other: Self) -> Bool {
-        if case .integer(let value) = self, case .integer(let otherValue) = other {
-            return value > otherValue
+        switch (self, other) {
+            case (.integer(let value), .integer(let otherValue)):
+                return value > otherValue
+            case (.duration(let value), .duration(let otherValue)):
+                return value > otherValue
+            case (.duration, _), (_, .duration):
+                return false
+            default:
+                return self.doubleValue! > other.doubleValue!
         }
-        return self.doubleValue > other.doubleValue
     }
 
     /// The `TypeSchema.Bound` expression.
@@ -40,13 +51,16 @@ enum ParsedBound: Equatable {
         switch self {
             case .integer(let value): ".integer(\(value))"
             case .floating(let value): ".floating(\(value))"
+            case .duration(let attoseconds): ".duration(\(durationExpression(attoseconds)))"
         }
     }
 
+    /// The bound as the runtime's `TypeSchema.Bound` describes it.
     var text: String {
         switch self {
             case .integer(let value): "\(value)"
             case .floating(let value): "\(value)"
+            case .duration(let attoseconds): durationText(attoseconds)
         }
     }
 }
@@ -164,7 +178,7 @@ private func parseConstraint(_ expression: ExprSyntax, context: String) throws -
                 switch bound {
                     case nil: return nil
                     case .integer(let value): return Int(value)
-                    case .floating:
+                    case .floating, .duration:
                         throw SchemaMacroError(
                             description: "\(context): a length takes integer bounds")
                 }
@@ -186,8 +200,10 @@ private func parseConstraint(_ expression: ExprSyntax, context: String) throws -
 }
 
 /// Reads a range of numeric literals: `1...1000`, `1...`, `...100`,
-/// `0.0...1.0`, `-5...5`. A floating literal at either end makes both ends
-/// floating, as Swift infers the runtime overload.
+/// `0.0...1.0`, `-5...5`; or of `Duration` literals:
+/// `.seconds(1)...(.seconds(300))`, `.milliseconds(250)...`. A floating
+/// literal at either end makes both ends floating, as Swift infers the
+/// runtime overload.
 private func parseRange(
     _ expression: ExprSyntax,
     context: String
@@ -198,7 +214,7 @@ private func parseRange(
     else {
         throw SchemaMacroError(
             description:
-                "\(context): a range is closed or one-sided, of numeric literals (1...10, 1..., ...10), not \(expression.trimmedDescription)"
+                "\(context): a range is closed or one-sided, of numeric or Duration literals (1...10, 1..., ...10, .seconds(1)...(.seconds(5))), not \(expression.trimmedDescription)"
         )
     }
     func literal(_ text: String) throws -> ParsedBound? {
@@ -208,13 +224,24 @@ private func parseRange(
         if digits.first?.isNumber == true, !digits.hasPrefix("0x"), let value = Double(text) {
             return .floating(value)
         }
+        if let attoseconds = durationLiteralAttoseconds(text) { return .duration(attoseconds) }
         throw SchemaMacroError(
             description:
-                "\(context): a bound is a numeric literal, not \(text) — the macro reads bounds from source"
+                "\(context): a bound is a numeric literal or a Duration literal with an integer count (.seconds(30), .milliseconds(250)), not \(text) — the macro reads bounds from source"
         )
     }
     var minimum = try literal(parts[0])
     var maximum = try literal(parts[1])
+    switch (minimum, maximum) {
+        case (.duration, .integer?), (.duration, .floating?), (.integer, .duration?),
+            (.floating, .duration?):
+            throw SchemaMacroError(
+                description:
+                    "\(context): a range's ends are both numbers or both durations, not \(expression.trimmedDescription)"
+            )
+        default:
+            break
+    }
     if case .floating = minimum, case .integer(let value) = maximum { maximum = .floating(Double(value)) }
     if case .floating = maximum, case .integer(let value) = minimum { minimum = .floating(Double(value)) }
     return (minimum, maximum)
@@ -258,17 +285,27 @@ extension ParsedConstraints {
                 break
         }
         if self.minimum != nil || self.maximum != nil {
+            let bounds = [self.minimum, self.maximum].compactMap { $0 }
             switch kind {
                 case .int, .uint:
-                    for bound in [self.minimum, self.maximum].compactMap({ $0 }) {
-                        if case .floating = bound {
+                    for bound in bounds {
+                        guard case .integer = bound else {
                             return "a range on \(kindName(kind)) takes integer bounds"
                         }
                     }
                 case .float, .double:
-                    break
+                    for case .duration in bounds {
+                        return "a range on \(kindName(kind)) takes numeric bounds"
+                    }
+                case .duration:
+                    for bound in bounds {
+                        guard case .duration = bound else {
+                            return "a range on duration takes duration bounds"
+                        }
+                    }
                 default:
-                    return "a range applies to int, uint, float or double, not \(kindName(kind))"
+                    return
+                        "a range applies to int, uint, float, double or duration, not \(kindName(kind))"
             }
         }
         if let minimum, let maximum, minimum.isMore(than: maximum) {
@@ -512,7 +549,7 @@ func constraintCheckLines(
     let argument: String
     switch kind {
         case .int: argument = "of: Int64(\(unwrapped))"
-        case .uint, .double, .string: argument = "of: \(unwrapped)"
+        case .uint, .double, .string, .duration: argument = "of: \(unwrapped)"
         case .float: argument = "of: Double(\(unwrapped))"
         default: argument = "ofLength: \(unwrapped).count"
     }

@@ -919,6 +919,12 @@ private func validateFieldDefault(
             guard case .now = flagDefault else {
                 throw mismatch("`.now` — the only default a calendar/clock field takes")
             }
+        case .duration:
+            guard case .string(let text) = flagDefault,
+                durationAttoseconds(parsing: text) != nil
+            else {
+                throw mismatch("ISO 8601 duration text (\"PT30S\")")
+            }
         case .map, .structure, .external:
             guard case .string = flagDefault else {
                 throw mismatch("a string literal (the option takes JSON text)")
@@ -938,7 +944,7 @@ private func validateFieldDefault(
             guard case .string = flagDefault else {
                 throw mismatch("a string literal (the option takes JSON text)")
             }
-        case .optional, .array, .bytes, .duration, .uuid:
+        case .optional, .array, .bytes, .uuid:
             throw SchemaMacroError(
                 description:
                     "Call(\"\(call.name)\"): field \"\(field.name)\" default: is not supported for this field type"
@@ -3909,8 +3915,16 @@ private func emitField(
         defaultInitializer = " = \(wireDefault.swiftExpression)"
     } else if let fieldDefault = field.defaultValue {
         let literal: String
+        var kind = field.type
+        while case .optional(let wrapped) = kind { kind = wrapped }
         switch fieldDefault {
-            case .string(let value): literal = quoted(value)
+            case .string(let value):
+                // Validated: a duration field's default is its text.
+                if case .duration = kind, let attoseconds = durationAttoseconds(parsing: value) {
+                    literal = durationExpression(attoseconds)
+                } else {
+                    literal = quoted(value)
+                }
             case .integer(let source), .floating(let source), .boolean(let source):
                 literal = source
             case .now:

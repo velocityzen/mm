@@ -289,10 +289,11 @@
     enum FingerprintGenerators {
         /// Names from a small pool, so duplicates and near misses come up
         /// (`é` precomposed and decomposed are equal Strings with different
-        /// bytes), or any text.
+        /// bytes; `PT60S` is a duration's text, not canonical), or any text.
         static let names: Gen<String> = .oneOf(
             .element(of: [
                 "a", "b", "aa", "journal.append", "server.schema", "\u{E9}", "e\u{301}", "",
+                "PT1S", "PT60S",
             ]),
             .string()
         )
@@ -301,14 +302,35 @@
 
         /// A field's default of each kind: booleans, integers and floating
         /// numbers around their edges, whole floating numbers among them,
-        /// and the names.
+        /// the names, and durations, whose text a few names also are.
         static let defaults: Gen<TypeSchema.Default> = .oneOf(
             Gen<Bool>.bool().map { .bool($0) },
             SchemaValueGenerators.int64s(edgeRate: 0.3).map { .integer($0) },
             SchemaValueGenerators.doubles(edgeRate: 0.3).map { .floating($0) },
             Gen<Int64>.integer(in: -3...3).map { .floating(Double($0)) },
-            names.map { .string($0) }
+            names.map { .string($0) },
+            DurationGenerators.durations.map { .duration($0) }
         )
+
+        /// `value` as a field of `type` holds it once read: text on a
+        /// duration field that is a duration's text is that duration, and a
+        /// duration on any other field is its canonical text, since a
+        /// default travels bare and a reader takes its kind from the field's.
+        /// A field of a named type is read alone, so it keeps text.
+        static func fitted(_ value: TypeSchema.Default?, to type: TypeSchema) -> TypeSchema.Default?
+        {
+            var kind = type
+            while case .optional(let wrapped) = kind { kind = wrapped }
+            switch (value, kind) {
+                case (.string(let text)?, .duration):
+                    guard case .success(let attoseconds) = modelDuration(text) else { return value }
+                    return .duration(duration(attoseconds: attoseconds))
+                case (.duration(let span)?, let kind) where kind != .duration:
+                    return .string(canonicalDurationText(of: span.duration.attoseconds))
+                default:
+                    return value
+            }
+        }
 
         static let keys: Gen<Int?> = .optional(
             .oneOf(.int(), .element(of: [0, 1, -1, .min, .max]))
@@ -324,12 +346,19 @@
 
         static func fields(_ schemas: Gen<TypeSchema>) -> Gen<TypeSchema.Field> {
             Gen { tc in
-                TypeSchema.Field(
+                var type = try tc.draw(schemas)
+                let value = try tc.draw(.optional(defaults))
+                // A duration default sits mostly on a duration field, which
+                // keeps it, as a defaulted field is an optional one.
+                if case .duration? = value, try tc.draw(.bool(probability: 0.7)) {
+                    type = .optional(.duration)
+                }
+                return TypeSchema.Field(
                     key: try tc.draw(keys),
                     name: try tc.draw(names),
-                    type: try tc.draw(schemas),
+                    type: type,
                     description: try tc.draw(descriptions),
-                    defaultValue: try tc.draw(.optional(defaults)),
+                    defaultValue: fitted(value, to: type),
                     deprecation: try tc.draw(descriptions)
                 )
             }
@@ -475,7 +504,7 @@
                 case .fieldDefaultChanged:
                     // Added, dropped, or another value, of its kind or not.
                     let index = try pick(fields.count, tc)
-                    var value = try tc.draw(.optional(defaults))
+                    var value = fitted(try tc.draw(.optional(defaults)), to: fields[index].type)
                     if value == fields[index].defaultValue {
                         value = value == nil ? .bool(false) : nil
                     }
@@ -746,6 +775,193 @@
                 #expect(Set(fingerprints).count == placed.count)
             }
         }
+
+        /// A discovery response decodes to the schemas it served once each
+        /// field's text default is read as its field's kind through the
+        /// response's own type table: text a duration's grammar reads, on a
+        /// field that is a duration through optionals and named types, is
+        /// that duration. So a client's fingerprint of what it discovered is
+        /// the server's, a named duration's default included.
+        ///
+        /// Mutation check: decoding the response without reading through
+        /// its type table fails here.
+        @Test
+        func discoveryReadsDurationDefaultsThroughItsTypes() throws {
+            try property(
+                reachingAfter: [
+                    "a named duration's default": 1_000, "text read as a duration": 1_000,
+                    "text a named duration keeps": 1_000,
+                ]
+            ) { tc in
+                var set = try #draw(FingerprintGenerators.sets(signatureCount: 1...3), from: tc)
+                if try #draw(.bool(probability: 0.7), from: tc) {
+                    // A named duration, sometimes behind a second name, and
+                    // a call whose field of it is defaulted.
+                    set.types.append(TypeDefinition(name: "spans.Wait", schema: .duration))
+                    set.types.append(
+                        TypeDefinition(name: "spans.Outer", schema: .reference("spans.Wait"))
+                    )
+                    let name = try #draw(.element(of: ["spans.Wait", "spans.Outer"]), from: tc)
+                    let value = try #draw(
+                        .oneOf(
+                            DurationGenerators.durations.map { TypeSchema.Default.duration($0) },
+                            DurationGenerators.grammaticalTexts.map {
+                                TypeSchema.Default.string($0)
+                            },
+                            FingerprintGenerators.names.map { TypeSchema.Default.string($0) },
+                            FingerprintGenerators.defaults
+                        ),
+                        from: tc
+                    )
+                    let field = TypeSchema.Field(
+                        key: 0,
+                        name: "wait",
+                        type: .optional(.reference(name)),
+                        defaultValue: value
+                    )
+                    set.signatures.append(
+                        MethodSignature(
+                            name: "spans.put",
+                            access: .write,
+                            request: .structure(fields: [field]),
+                            response: .structure(fields: [])
+                        )
+                    )
+                }
+                let served = discoveredForm(set)
+                let response = SchemaResponse(
+                    fingerprint: served.fingerprint,
+                    methods: served.signatures,
+                    types: served.types
+                )
+                let decoded = try MMPackDecoder().decode(
+                    SchemaResponse.self,
+                    from: MMPackEncoder().encode(response).get()
+                )
+                .get()
+                for label in Set(fieldDefaults(of: served).map(\.label)) { try tc.event(label) }
+                // Bytes for what the wire carries (a NaN default is no
+                // value `==` matches), the fingerprint for each default's
+                // kind, which the bytes do not tell.
+                #expect(try packedBytes(decoded) == packedBytes(response))
+                #expect(
+                    SchemaFingerprint.compute(decoded.methods, types: decoded.types)
+                        == served.fingerprint
+                )
+            }
+        }
+    }
+
+    /// The set as a reader holds it once each text default whose field is
+    /// a duration, through optionals and the set's named types (the first
+    /// of a name), is read as that duration, by the grammar's model.
+    func discoveredForm(_ set: SchemaSet) -> SchemaSet {
+        var table: [String: TypeSchema] = [:]
+        for definition in set.types where table[definition.name] == nil {
+            table[definition.name] = definition.schema
+        }
+        func reading(_ schema: TypeSchema) -> TypeSchema {
+            func fields(_ fields: [TypeSchema.Field]) -> [TypeSchema.Field] {
+                fields.map { field in
+                    var read = field
+                    read.type = reading(field.type)
+                    if case .string(let text)? = field.defaultValue, isDuration(field.type, table),
+                        case .success(let span) = modelDuration(text)
+                    {
+                        read.defaultValue = .duration(duration(attoseconds: span))
+                    }
+                    return read
+                }
+            }
+            switch schema {
+                case .optional(let wrapped): return .optional(reading(wrapped))
+                case .array(let element): return .array(reading(element))
+                case .map(let key, let value): return .map(key: reading(key), value: reading(value))
+                case .structure(let list): return .structure(fields: fields(list))
+                case .union(let cases):
+                    return .union(
+                        cases: cases.map {
+                            TypeSchema.UnionCase(
+                                name: $0.name,
+                                fields: fields($0.fields),
+                                description: $0.description,
+                                deprecation: $0.deprecation
+                            )
+                        }
+                    )
+                default: return schema
+            }
+        }
+        var read = set
+        read.signatures = set.signatures.map { signature in
+            var signature = signature
+            signature.request = reading(signature.request)
+            signature.response = reading(signature.response)
+            signature.requestStream = signature.requestStream.map(reading)
+            signature.responseStream = signature.responseStream.map(reading)
+            signature.errors = signature.errors.map(reading)
+            return signature
+        }
+        read.types = set.types.map { definition in
+            var definition = definition
+            definition.schema = reading(definition.schema)
+            return definition
+        }
+        return read
+    }
+
+    /// Whether `schema`, through optionals and the named types in `table`,
+    /// is a duration.
+    func isDuration(_ schema: TypeSchema, _ table: [String: TypeSchema]) -> Bool {
+        var current = schema
+        var seen: Set<String> = []
+        while true {
+            switch current {
+                case .optional(let wrapped): current = wrapped
+                case .reference(let name):
+                    guard seen.insert(name).inserted, let next = table[name] else { return false }
+                    current = next
+                case .duration: return true
+                default: return false
+            }
+        }
+    }
+
+    /// Each field default in the set's signatures, labeled by what a reader
+    /// makes of it.
+    func fieldDefaults(of set: SchemaSet) -> [(default: TypeSchema.Default, label: String)] {
+        var table: [String: TypeSchema] = [:]
+        for definition in set.types where table[definition.name] == nil {
+            table[definition.name] = definition.schema
+        }
+        var found: [(TypeSchema.Default, String)] = []
+        func visit(_ schema: TypeSchema) {
+            for place in nodes(of: schema) {
+                var fields: [TypeSchema.Field] = []
+                if case .structure(let list) = place.node { fields = list }
+                if case .union(let cases) = place.node { fields = cases.flatMap(\.fields) }
+                for field in fields {
+                    guard let value = field.defaultValue else { continue }
+                    var kind = field.type
+                    while case .optional(let wrapped) = kind { kind = wrapped }
+                    switch (value, kind) {
+                        case (.duration, .reference):
+                            found.append((value, "a named duration's default"))
+                        case (.duration, _): found.append((value, "text read as a duration"))
+                        case (.string, .reference) where isDuration(field.type, table):
+                            found.append((value, "text a named duration keeps"))
+                        default: break
+                    }
+                }
+            }
+        }
+        for signature in set.signatures {
+            [signature.request, signature.response].forEach(visit)
+            [signature.requestStream, signature.responseStream, signature.errors].compactMap { $0 }
+                .forEach(visit)
+        }
+        set.types.map(\.schema).forEach(visit)
+        return found
     }
 
 #endif

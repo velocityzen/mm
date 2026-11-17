@@ -64,7 +64,9 @@
 
         /// Each rule refuses exactly the values on its wrong side, worded as
         /// documented: a range on int, uint and floating-point values (NaN
-        /// keeping none), a length on strings (in Unicode scalars), bytes,
+        /// keeping none) and on durations (compared to the attosecond, and
+        /// named by their canonical text whatever text they came in), a
+        /// length on strings (in Unicode scalars), bytes,
         /// arrays and maps, and a pattern matched against the whole string.
         /// The same check as above, over structures of one to three
         /// constrained fields of one kind, so every rule meets values on
@@ -78,6 +80,7 @@
                     "refused by a range on an int": 1_000,
                     "refused by a range on a uint": 1_000,
                     "refused by a range on a double": 1_000,
+                    "refused by a range on a duration": 1_000,
                     "refused for not being a number": 1_000,
                     "refused by a length on a string": 1_000,
                     "refused by a pattern": 1_000,
@@ -145,25 +148,33 @@
     }
 
     extension TypeSchema.Bound {
-        /// The bound as Swift prints its number: `5`, `0.5`, `1.0`.
+        /// The bound as Swift prints its number, `5`, `0.5`, `1.0`, or as a
+        /// duration's canonical text.
         fileprivate var text: String {
             switch self {
                 case .integer(let value): "\(value)"
                 case .floating(let value): "\(value)"
+                case .duration(let value): canonicalDurationText(of: value.duration.attoseconds)
             }
         }
 
-        /// The bound as a real number.
+        /// The bound as a real number; NaN for a duration, which no number
+        /// is compared with.
         fileprivate var real: Double {
             switch self {
                 case .integer(let value): Double(value)
                 case .floating(let value): value
+                case .duration: .nan
             }
         }
 
-        /// Whether this bound lies above `other`, exactly for two integers.
+        /// Whether this bound lies above `other`, exactly for two integers
+        /// and two durations.
         fileprivate func isMore(than other: Self) -> Bool {
             if case .integer(let value) = self, case .integer(let otherValue) = other {
+                return value > otherValue
+            }
+            if let value = self.attoseconds, let otherValue = other.attoseconds {
                 return value > otherValue
             }
             return self.real > other.real
@@ -192,7 +203,9 @@
 
         /// The scalar kinds rules apply to, a string twice: it takes two
         /// kinds of rule, a length and a pattern.
-        static let scalarKinds: [TypeSchema] = [.int, .uint, .double, .float, .string, .string, .bytes]
+        static let scalarKinds: [TypeSchema] = [
+            .int, .uint, .double, .float, .duration, .string, .string, .bytes,
+        ]
 
         /// Probes whose scalars are mostly of the `focus` kind, so a case
         /// meets that kind's rules many times.
@@ -265,7 +278,7 @@
         /// visits, one per case: a string twice, for its length and its
         /// pattern.
         static let ruleKinds: [TypeSchema] = [
-            .int, .uint, .double, .float, .string, .string, .bytes, .array(.int),
+            .int, .uint, .double, .float, .duration, .string, .string, .bytes, .array(.int),
             .map(key: .string, value: .int),
         ]
 
@@ -295,7 +308,8 @@
         /// Values of a probe's element kind: for a scalar, the generators'
         /// edges and whole domain, and small values on either side of the
         /// rules' small bounds. NaN, which keeps no range, is a third of
-        /// the floating-point values.
+        /// the floating-point values. A duration is its canonical text or
+        /// the same span in seconds alone, its fraction's 18 digits kept.
         static func values(of schema: TypeSchema, edgeRate: Double) -> Gen<SchemaValue> {
             let small: [Double] = [-1.5, -0.5, 0.25, 0.5, 1, 1.5]
             switch schema {
@@ -324,6 +338,20 @@
                         .element(of: small.map { Float($0) }), .element(of: [.nan])
                     )
                     .map { .double(Double($0)) }
+                case .duration:
+                    let attoseconds = Gen<Int128>.oneOf(
+                        DurationGenerators.attoseconds,
+                        .element(
+                            of: ConstraintDecorator.durationEdges.flatMap {
+                                [$0 &- 1, $0, $0 &+ 1]
+                            }
+                        )
+                    )
+                    return Gen { tc in
+                        .string(
+                            try tc.draw(DurationGenerators.spellings(of: try tc.draw(attoseconds)))
+                        )
+                    }
                 case .string:
                     return Gen<String>.oneOf(
                         SchemaValueGenerators.names,
@@ -375,6 +403,20 @@
             .floating(-1), .floating(0), .floating(0.5), .floating(1), .floating(100),
             .floating(9_007_199_254_740_992), .floating(.greatestFiniteMagnitude), .integer(1),
         ]
+        /// Spans, in attoseconds, around the ends of `Duration` and the
+        /// units a range is written in, each a duration bound and, with its
+        /// neighbors, a duration value.
+        static let durationEdges: [Int128] = [
+            .min, -1_000_000_000_000_000_000, -1, 0, 1, 1_000_000_000, 500_000_000_000_000_000,
+            1_000_000_000_000_000_000, 86_400_000_000_000_000_000_000, .max,
+        ]
+        /// The same as minimums and maximums, leaning low and high.
+        static let durationMinimums: [TypeSchema.Bound] = durationEdges.dropLast(2).map {
+            .duration(MMDuration(Duration(attoseconds: $0)))
+        }
+        static let durationMaximums: [TypeSchema.Bound] = durationEdges.dropFirst(2).map {
+            .duration(MMDuration(Duration(attoseconds: $0)))
+        }
 
         /// `schema` with constraints drawn for the fields in it, and each
         /// scalar in it (the root, an array's element, a map's value, a
@@ -397,7 +439,7 @@
                                 fields: try self.decorate(tc, unionCase.fields)
                             )
                         })
-                case .int, .uint, .float, .double, .string, .bytes:
+                case .int, .uint, .float, .double, .duration, .string, .bytes:
                     guard try tc.draw(.bool(probability: self.aliasRate)) else { return schema }
                     return .reference(try self.alias(tc, of: schema))
                 default:
@@ -411,7 +453,7 @@
         mutating func decorateDefinitions(_ tc: TestCase) throws {
             for index in self.definitions.indices {
                 switch self.definitions[index].schema {
-                    case .int, .uint, .float, .double, .string, .bytes:
+                    case .int, .uint, .float, .double, .duration, .string, .bytes:
                         continue
                     default:
                         let body = try self.decorate(tc, self.definitions[index].schema)
@@ -468,6 +510,11 @@
                     (constraints.minimum, constraints.maximum) = Self.ordered(
                         try self.bound(tc, from: Self.floatingMinimums),
                         try self.bound(tc, from: Self.floatingMaximums)
+                    )
+                case .duration:
+                    (constraints.minimum, constraints.maximum) = Self.ordered(
+                        try self.bound(tc, from: Self.durationMinimums),
+                        try self.bound(tc, from: Self.durationMaximums)
                     )
                 case .string:
                     (constraints.minimumLength, constraints.maximumLength) = try self.lengths(tc)
@@ -698,12 +745,14 @@
                             switch $0 {
                                 case .integer(let bound): number < bound
                                 case .floating(let bound): Double(number) < bound
+                                case .duration: false
                             }
                         },
                         above: {
                             switch $0 {
                                 case .integer(let bound): number > bound
                                 case .floating(let bound): Double(number) > bound
+                                case .duration: false
                             }
                         })
                 case .uint(let number):
@@ -714,12 +763,14 @@
                             switch $0 {
                                 case .integer(let bound): bound > 0 && number < UInt64(bound)
                                 case .floating(let bound): Double(number) < bound
+                                case .duration: false
                             }
                         },
                         above: {
                             switch $0 {
                                 case .integer(let bound): bound < 0 || number > UInt64(bound)
                                 case .floating(let bound): Double(number) > bound
+                                case .duration: false
                             }
                         })
                 case .double(let number):
@@ -732,6 +783,20 @@
                         "\(number)",
                         below: { number < $0.real },
                         above: { number > $0.real })
+                case .string(let text)
+                where constraints.minimum?.attoseconds != nil
+                    || constraints.maximum?.attoseconds != nil:
+                    // Duration bounds sit only on durations, whose text the
+                    // schema already holds to the grammar.
+                    guard case .success(let span) = modelDuration(text) else {
+                        return "is \(text), no duration"
+                    }
+                    self.refusedLabel = "refused by a range on a duration"
+                    return range(
+                        canonicalDurationText(of: span),
+                        below: { span < $0.attoseconds! },
+                        above: { span > $0.attoseconds! }
+                    )
                 case .string(let text):
                     if let problem = length(text.unicodeScalars.count, "a string") { return problem }
                     if let pattern = constraints.pattern,

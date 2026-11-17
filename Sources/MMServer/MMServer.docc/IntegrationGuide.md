@@ -150,7 +150,7 @@ Alias("Author", .string, constraints: .length(1...64), description: "Who wrote a
 Field("line", .string, constraints: .length(...4096), description: "The line text", cli: .input)
 ```
 
-- A **range** is inclusive, either end may be open (`.range(1...)`, `.range(...0.5)`), and takes integer bounds on `int` and `uint`, floating ones on `float` and `double` (integer bounds on a floating field become floating).
+- A **range** is inclusive, either end may be open (`.range(1...)`, `.range(...0.5)`), and takes integer bounds on `int` and `uint`, floating ones on `float` and `double` (integer bounds on a floating field become floating), and `Duration` literals on `duration` (`.range(.milliseconds(500)...)`), compared to the attosecond.
 - A **length** is inclusive and counts a string's Unicode scalars (`"café"` is 4 precomposed, 5 decomposed), a byte string's bytes, an array's elements, or a map's entries. `.nonEmpty` is `.length(1...)`.
 - A **pattern** is a regular expression the whole string matches, as if written `^...$`. Keep it to the syntax ECMAScript and PCRE share, so every peer reads it alike.
 - A list holds at most one rule of each kind. `#schema` refuses at compile time a rule on a kind that does not take it, bounds that cross, a negative length, a pattern that does not compile, and constraints on a field of a named type (the type carries them). The runtime DSL refuses the same with a precondition.

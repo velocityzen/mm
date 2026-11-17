@@ -561,7 +561,7 @@ In **JSON projections** of wire values (discovery tooling, the CLI's parameter a
 
 A `structure` lists its fields in **declaration order** (the order in which the type's decoder requests them). `Field` is an int-keyed struct: key 0 = `key` (the field's integer wire key, or nil/absent for string-keyed fields), key 1 = `name` (string), key 2 = `type` (TypeSchema), key 3 = `description` (string, **optional**, documentation only), key 4 = `constraints` (Constraints, section 8.4, **optional**; part of the contract, and hashed), key 5 = `defaultValue` (the bare value, **optional**; part of the contract, and hashed), key 6 = `deprecation` (string, **optional**, documentation only; possibly empty).
 
-**Field defaults.** A field with a `defaultValue` has an `optional` type. The default is the value a reader fills in where the key is absent or holds `nil`. It is a value of the field's kind: a bool for `bool`, an integer for `int` and `uint` (not negative for `uint`), a floating number for `float` and `double`, a string for `string`, a case name for an `enumeration`, and for a reference to a named scalar, a value of its scalar. It keeps the field's or the type's constraints, a `float`'s as the 32-bit value a reader holds. Other kinds take no default. The value is written bare: a MessagePack bool, integer, float64 or string. An integer reads as an integer and any other number as a floating number, so a floating default is written as a float64 even when it is whole. A reader that cannot read a default skips it, as it skips an unknown key.
+**Field defaults.** A field with a `defaultValue` has an `optional` type. The default is the value a reader fills in where the key is absent or holds `nil`. It is a value of the field's kind: a bool for `bool`, an integer for `int` and `uint` (not negative for `uint`), a floating number for `float` and `double`, a string for `string`, a span for `duration`, a case name for an `enumeration`, and for a reference to a named scalar, a value of its scalar. It keeps the field's or the type's constraints, a `float`'s as the 32-bit value a reader holds. Other kinds take no default. The value is written bare: a MessagePack bool, integer, float64 or string, and a duration as a string of its canonical ISO 8601 text (`PT30S`, never `PT0.5M`; the JSON projection's text, rules above). An integer reads as an integer and any other number as a floating number, so a floating default is written as a float64 even when it is whole. A string reads as text, unless the field's kind, through `optional` and named scalars, is `duration`: then text that is a duration (any spelling the projection's parsers accept) reads as that span. A field of a named scalar takes its kind from the type table, which a discovery response carries (section 8.1). A reader that cannot read a default skips it, as it skips an unknown key, and an older peer reads a duration default as the text it travels as.
 
 An `enumeration` is a closed set of **string-valued** cases. The wire value of an enum-typed field is the case name as a MessagePack string (fixed decision). Renaming a case breaks the wire. Reordering does not, but it changes the fingerprint, like field order. Decoders MUST map an unrecognized value to a local fallback case instead of failing (the wire-enum rule of section 6.1). The fallback keeps the value, and a peer SHOULD write it back unchanged, so a value a later contract adds passes through an older peer. `EnumCase` is an int-keyed struct: key 0 = `name` (string, the wire value), key 1 = `description` (string, **optional**), key 2 = `deprecation` (string, **optional**, documentation only). Cases appear in declaration order.
 
@@ -592,8 +592,8 @@ A field (Field key 4) or a named scalar (TypeDefinition key 3) may declare **con
 
 | Key | Rule | Value |
 |---|---|---|
-| 0 | minimum | number: an integer bound for `int` and `uint`, a finite floating bound for `float` and `double` |
-| 1 | maximum | number, as for the minimum |
+| 0 | minimum | number: an integer bound for `int` and `uint`, a finite floating bound for `float` and `double`; for `duration`, a bin holding the bound's binary form (<doc:Duration>) |
+| 1 | maximum | as for the minimum |
 | 2 | minimumLength | non-negative integer |
 | 3 | maximumLength | non-negative integer |
 | 4 | pattern | string: a regular expression |
@@ -601,12 +601,12 @@ A field (Field key 4) or a named scalar (TypeDefinition key 3) may declare **con
 Rules (normative):
 
 - Each rule applies to the value itself, after an `optional` is unwrapped. A nil optional keeps every rule.
-- **Range.** The minimum and the maximum are inclusive, and either may be absent (an open end). A NaN keeps no range: it breaks every range that has a bound.
+- **Range.** The minimum and the maximum are inclusive, and either may be absent (an open end). A NaN keeps no range: it breaks every range that has a bound. Durations compare exactly, to the attosecond. In JSON projections a duration bound is its canonical text, like any duration.
 - **Length.** Inclusive at both ends. It counts a string's **Unicode scalars** (not its UTF-8 bytes or its grapheme clusters, so `café` is 4 precomposed and 5 decomposed), a bin's bytes, an array's elements, and a map's entries.
 - **Pattern.** The string must match the pattern **whole**, as if it were written `^...$`. Patterns keep to the syntax that ECMAScript and PCRE share, so every implementation reads them alike.
-- **Where rules apply.** A range applies to `int`, `uint`, `float`, and `double`. A length applies to `string`, `bytes`, `array`, and `map`. A pattern applies to `string`. A contract that puts a rule on any other kind, a floating bound on an integer kind, a minimum above its maximum, a negative length, or a pattern that does not compile is refused where it is declared.
+- **Where rules apply.** A range applies to `int`, `uint`, `float`, `double`, and `duration`. A length applies to `string`, `bytes`, `array`, and `map`. A pattern applies to `string`. A contract that puts a rule on any other kind, a floating bound on an integer kind, a duration bound on a number or a number bound on a duration, a minimum above its maximum, a negative length, or a pattern that does not compile is refused where it is declared.
 - **Named scalars.** A named scalar is a `TypeDefinition` whose schema is a scalar kind (`bool`, `int`, `uint`, `float`, `double`, `string`, `bytes`, `date`, `datetime`, `timestamp`, `duration`, `uuid`). It reads on the wire exactly as its kind does, and its constraints bind every value of the type. A field whose type is a named scalar takes its constraints from the type and declares none of its own. A definition whose schema is a `reference` to a named scalar is a named scalar too, and along such a chain each definition's constraints apply.
-- **Decoding constraints never fails**, by the rule of section 8.3. A rule a reader cannot read (a bound that is not a finite number, a length that is negative or not an integer, a pattern that is not a string) decodes as absent, and so does a value that is not a map. An older peer sees a value as less constrained, never as unreadable.
+- **Decoding constraints never fails**, by the rule of section 8.3. A rule a reader cannot read (a bound that is neither a finite number nor a duration's bin, a length that is negative or not an integer, a pattern that is not a string) decodes as absent, and so does a value that is not a map. An older peer sees a value as less constrained, never as unreadable: one that predates duration bounds reads a bin bound as absent.
 
 **Enforcement (normative).** A server MUST check the constraints of a request's params and of every request-stream item at ingress, after decoding and before any handler sees the value. Params that break a constraint are answered with `malformedParams` (code 3). A request-stream item that breaks one ends the call with `streamViolation` (code 6). A client MAY check before sending, and the reference client does so in debug builds of the module that declares the call. The server's check never depends on the client's.
 
@@ -618,6 +618,7 @@ A path joins field names and map keys with `.`, writes an array element as `[ind
 |---|---|
 | minimum | `is 0, less than the minimum 1` |
 | maximum | `is 1001, more than the maximum 1000` |
+| either end, on a duration | `is PT0.4S, less than the minimum PT0.5S` (canonical text, whatever text the value came in) |
 | either end, by a NaN | `is not a number, outside every range` |
 | minimumLength | `has length 0, less than the minimum length 1` |
 | maximumLength | `has length 9, more than the maximum length 8` |
@@ -650,9 +651,9 @@ A simple tagged, length-prefixed byte encoding, intentionally **not** MessagePac
 
 **type definition** := `u8` tag `3` ‖ the qualified name (string) ‖ the definition's schema; or, for a definition that declares constraints, `u8` tag `5` ‖ the qualified name (string) ‖ the definition's schema ‖ its **constraints**. Type-definition entries follow the signature stream (see 9.2). An empty type table emits nothing, so a fingerprint without types keeps its value from before types were added.
 
-**constraints** := `u8` flags for the rules present (bit 0 minimum, bit 1 maximum, bit 2 minimumLength, bit 3 maximumLength, bit 4 pattern), then each present rule in that order: a bound as `u8` `0` then `i64 LE` for an integer, or `u8` `1` then the IEEE 754 `f64` bit pattern `LE` for a floating bound; a length as `i64 LE`; the pattern as a string. Constraints without any rule are no constraints. A field or definition without constraints encodes exactly as it did before constraints were added (flags bit 1 clear, tag 3), so every unconstrained fingerprint keeps its value.
+**constraints** := `u8` flags for the rules present (bit 0 minimum, bit 1 maximum, bit 2 minimumLength, bit 3 maximumLength, bit 4 pattern), then each present rule in that order: a bound as `u8` `0` then `i64 LE` for an integer, `u8` `1` then the IEEE 754 `f64` bit pattern `LE` for a floating bound, or `u8` `2`, a `u32 LE` byte count, then the binary form for a bound of the field's own binary kind (today `duration`, whose form is in <doc:Duration>; the schema hashed before the constraints says which kind); a length as `i64 LE`; the pattern as a string. Constraints without any rule are no constraints. A field or definition without constraints encodes exactly as it did before constraints were added (flags bit 1 clear, tag 3), so every unconstrained fingerprint keeps its value.
 
-**default** := `u8` kind (`0` bool, `1` integer, `2` floating, `3` string), then the value: a bool as `u8` `0` or `1`; an integer as `i64 LE`; a floating number as the IEEE 754 `f64` bit pattern `LE`; a string as a string. A field without a default encodes exactly as it did before defaults were added (flags bit 2 clear), so every fingerprint without defaults keeps its value.
+**default** := `u8` kind (`0` bool, `1` integer, `2` floating, `3` string, `4` a value of the field's own text kind), then the value: a bool as `u8` `0` or `1`; an integer as `i64 LE`; a floating number as the IEEE 754 `f64` bit pattern `LE`; a string as a string; kind 4 as its canonical text, a string. Kind 4 is today a `duration` default, read as section 8.3 says: a default of the field's kind, through named scalars, and not text a `string` field holds. A field without a default encodes exactly as it did before defaults were added (flags bit 2 clear), so every fingerprint without defaults keeps its value, and neither a duration bound nor a duration default changes a fingerprint without one.
 
 ### 9.2 Sorting and hashing
 
@@ -721,6 +722,13 @@ Pinned fingerprint for a **defaulted** set, which tests field defaults of each k
 
 - Signature: `shelf.list`, access read (4), request `structure[{0, "limit", optional(int), minimum 1 (integer), maximum 100 (integer), default 50 (integer)}, {1, "ratio", optional(double), default 0.5 (floating)}, {2, "on", optional(bool), default true}, {3, "shelf", optional(reference("shelf.Shelf")), default "top" (string)}]`, response `structure[{0, "count", uint}]`.
 - Type definition: `shelf.Shelf` = `enumeration["top", "attic"]`.
+
+Pinned fingerprint for a **duration** set, which tests duration bounds (bound tag 2), duration defaults (kind 4), a default on a reference to a named duration, and a duration range on a tag-5 definition (verified independently against a model written from section 9.1 and <doc:Duration>): the set below MUST fingerprint to **`0x1618eeb2439093fd`**.
+
+- Signature: `timer.start`, access write (2), request `structure[{0, "wait", duration, minimum PT0.5S}, {1, "grace", optional(duration), maximum PT10S, default PT2S}, {2, "timeout", optional(reference("timer.Timeout")), default PT30S}]`, response `structure[{0, "ok", bool}]`.
+- Type definition: `timer.Timeout` = `duration`, minimum PT1S, maximum PT5M.
+
+The bounds' binary forms: PT0.5S is `10 01 f4`, PT10S `01 0a`, PT1S `01 01`, PT5M `02 01 2c`.
 
 ### 9.5 Builtin canonical signatures
 

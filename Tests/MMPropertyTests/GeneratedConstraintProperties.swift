@@ -57,6 +57,43 @@
         }
     }
 
+    /// A call whose request holds ranges of durations: on a named scalar,
+    /// on an optional field, on a field with a wire default, and on a
+    /// list's items through the named scalar.
+    enum Spans: MethodNamespace {
+        #schema("spans") {
+            Alias("Timeout", .duration, constraints: .range(.seconds(1)...(.seconds(300))))
+            Call("wait") {
+                Access { .write }
+                Request {
+                    Field("timeout", .reference("Timeout"))
+                    Field(
+                        "delay",
+                        .optional(.duration),
+                        constraints: .range(.milliseconds(-500)...)
+                    )
+                    Field(
+                        "grace",
+                        .duration,
+                        constraints: .range(...(.milliseconds(10_000))),
+                        default: "PT2S"
+                    )
+                    Field("steps", .array(.reference("Timeout")), constraints: .length(...3))
+                }
+                Response {
+                    Field("ok", .bool)
+                }
+            }
+        }
+    }
+
+    /// `spans.wait` as a release build of the declaring module describes it.
+    let releasedWait = Method<Spans.WaitRequest, Spans.WaitResponse>(
+        name: "spans.wait",
+        access: .write,
+        requestCheck: MMConstraintCheck(beforeSending: false)
+    )
+
     /// `rules.put` as a release build of the declaring module describes it:
     /// the client sends whatever it is given, and the server's ingress
     /// answers.
@@ -134,6 +171,174 @@
                     #endif
                     #expect(handled.value - before == (oracle == nil ? 2 : 0))
                 }
+            }
+        }
+
+        /// The same agreement for ranges of durations: the generated check,
+        /// validation against the contract, the server's ingress and a
+        /// debug client name the same first span past its bounds, compared
+        /// to the attosecond, and name it by its canonical text whatever
+        /// text the value came in.
+        ///
+        /// Mutation check: a minimum that keeps a span an attosecond below
+        /// it fails here at 100 cases.
+        @Test
+        func generatedDurationChecksAgreeWithTheContractAtBothEnds() async throws {
+            try await withRulesServer { connection, handled in
+                try await property(
+                    reaching: ["accepted", "refused"],
+                    reachingAfter: [
+                        "refused at timeout": 1_000,
+                        "refused at delay": 1_000,
+                        "refused at grace": 1_000,
+                        "refused at steps": 1_000,
+                        "refused an attosecond past a bound": 1_000,
+                        "accepted on a bound": 1_000,
+                    ]
+                ) { tc in
+                    let request = try #draw(SpansRequests.requests, from: tc)
+                    let value = try #draw(SpansRequests.schemaValues(of: request), from: tc)
+                    let schema = try Spans.wait.signature().get().request
+                    var oracle: SchemaValueError?
+                    if case .failure(let error) = value.validated(
+                        against: schema,
+                        resolver: TypeResolver(Spans.types),
+                        checkingConstraints: true
+                    ) {
+                        oracle = error
+                    }
+                    if let oracle {
+                        try tc.event("refused")
+                        try tc.event("refused at \(oracle.path.prefix { $0 != "." && $0 != "[" })")
+                        if SpansRequests.spans(of: request).contains(where: SpansRequests.justPast)
+                        {
+                            try tc.event("refused an attosecond past a bound")
+                        }
+                    } else {
+                        try tc.event("accepted")
+                        if SpansRequests.spans(of: request).contains(
+                            where: SpansRequests.bounds.contains
+                        ) {
+                            try tc.event("accepted on a bound")
+                        }
+                    }
+                    #expect(request.constraintViolation(at: "") == oracle)
+
+                    let before = handled.value
+                    let released = await connection.call(releasedWait, on: rulesEntity, request)
+                    if let oracle {
+                        let refusal = MMError(
+                            code: 3, message: "malformed params: \(oracle.path): \(oracle.problem)")
+                        #expect(released == .failure(.malformedParams(refusal)))
+                    } else {
+                        #expect(released == .success(Spans.WaitResponse(ok: true)))
+                    }
+
+                    let checked = await connection.call(Spans.wait, on: rulesEntity, request)
+                    #if DEBUG
+                        if let oracle {
+                            #expect(checked == .failure(.invalidRequest(path: oracle.path, problem: oracle.problem)))
+                        } else {
+                            #expect(checked == .success(Spans.WaitResponse(ok: true)))
+                        }
+                    #else
+                        #expect(checked.map { _ in () } == released.map { _ in () })
+                    #endif
+                    #expect(handled.value - before == (oracle == nil ? 2 : 0))
+                }
+            }
+        }
+    }
+
+    /// `spans.wait` requests whose spans each keep their range or, at a
+    /// break rate drawn for the case, break it: on a bound, an attosecond
+    /// inside or past it, at the ends of `Duration`, or anywhere on the
+    /// side they fall.
+    enum SpansRequests {
+        static let second: Int128 = 1_000_000_000_000_000_000
+
+        /// The bounds of the call's ranges.
+        static let bounds: Set<Int128> = [second, 300 * second, -second / 2, 10 * second]
+
+        /// Whether a span is an attosecond past one of the bounds.
+        static func justPast(_ span: Int128) -> Bool {
+            [second - 1, 300 * second + 1, -second / 2 - 1, 10 * second + 1].contains(span)
+        }
+
+        /// A span inside `range`, or past one of its ends when `breaking`.
+        static func spans(in range: (minimum: Int128?, maximum: Int128?), breaking: Bool) -> Gen<
+            Int128
+        > {
+            Gen { tc in
+                let low = range.minimum ?? .min
+                let high = range.maximum ?? .max
+                guard breaking else {
+                    let edges =
+                        [low, high]
+                        + [range.minimum.map { $0 + 1 }, range.maximum.map { $0 - 1 }].compactMap {
+                            $0
+                        }
+                    return try tc.draw(.oneOf(.element(of: edges), .integer(in: low...high)))
+                }
+                // Past whichever end the range has.
+                let below = try range.minimum != nil && (range.maximum == nil || tc.draw(.bool()))
+                if below {
+                    return try tc.draw(
+                        .oneOf(.element(of: [low - 1, .min]), .integer(in: Int128.min...(low - 1)))
+                    )
+                }
+                return try tc.draw(
+                    .oneOf(.element(of: [high + 1, .max]), .integer(in: (high + 1)...Int128.max))
+                )
+            }
+        }
+
+        static func duration(_ span: Int128) -> MMDuration {
+            MMDuration(Duration(attoseconds: span))
+        }
+
+        static let requests: Gen<Spans.WaitRequest> = Gen { tc in
+            let breakRate = try tc.draw(.element(of: [0.0, 0.1, 0.3]))
+            func span(_ range: (minimum: Int128?, maximum: Int128?)) throws -> Int128 {
+                try tc.draw(spans(in: range, breaking: try tc.draw(.bool(probability: breakRate))))
+            }
+            let timeout = (minimum: Optional(second), maximum: Optional(300 * second))
+            return Spans.WaitRequest(
+                timeout: Spans.Timeout(duration(try span(timeout))),
+                delay: try tc.draw(.bool()) ? duration(try span((-second / 2, nil))) : nil,
+                grace: duration(try span((nil, 10 * second))),
+                steps: try (0..<tc.draw(.int(in: 0...4))).map { _ in
+                    Spans.Timeout(duration(try span(timeout)))
+                }
+            )
+        }
+
+        /// Every span a request holds.
+        static func spans(of request: Spans.WaitRequest) -> [Int128] {
+            let durations: [MMDuration] =
+                [request.timeout.rawValue, request.grace] + (request.delay.map { [$0] } ?? [])
+                + request.steps.map(\.rawValue)
+            return durations.map(\.duration.attoseconds)
+        }
+
+        /// The request as a `SchemaValue`, each span in a text drawn among
+        /// its spellings.
+        static func schemaValues(of request: Spans.WaitRequest) -> Gen<SchemaValue> {
+            Gen { tc in
+                func text(_ value: MMDuration) throws -> SchemaValue {
+                    .string(
+                        try tc.draw(DurationGenerators.spellings(of: value.duration.attoseconds))
+                    )
+                }
+                var members: [SchemaValue.Member] = [
+                    .init("timeout", try text(request.timeout.rawValue))
+                ]
+                if let delay = request.delay { members.append(.init("delay", try text(delay))) }
+                members.append(.init("grace", try text(request.grace)))
+                members.append(
+                    .init("steps", .array(try request.steps.map { try text($0.rawValue) }))
+                )
+                return .object(members)
             }
         }
     }
@@ -302,8 +507,8 @@
     }
 
     /// Runs `body` with a client connected to a server, on a socket of its
-    /// own, that serves `rules.put` and counts the requests its handler
-    /// gets.
+    /// own, that serves `rules.put` and `spans.wait` and counts the
+    /// requests its handlers get.
     func withRulesServer(
         _ body: @escaping @Sendable (MMClientConnection, HandledCount) async throws -> Void
     ) async throws {
@@ -311,7 +516,7 @@
         try await withTempSocketPath(prefix: "mm-rules-") { path in
             let server = ServerRuntime(
                 configuration: MMServerConfiguration(endpoint: .unix(path: path)),
-                namespaces: [Rules.self],
+                namespaces: [Rules.self, Spans.self],
                 aclProvider: InMemoryACLProvider([
                     rulesEntity: EntityACL(owner: getuid(), group: getgid(), mode: 0o700)
                 ]),
@@ -320,6 +525,10 @@
                 Handle(Rules.put) { _, _ in
                     handled.increment()
                     return .success(Rules.PutResponse(ok: true))
+                }
+                Handle(Spans.wait) { _, _ in
+                    handled.increment()
+                    return .success(Spans.WaitResponse(ok: true))
                 }
             }
             try await withListeningServer(server, seconds: 3_600) { _ in

@@ -3,6 +3,7 @@
 /// ```swift
 /// Field("limit", .int, constraints: .range(1...1000))
 /// Field("ratio", .double, constraints: .range(0.0...1.0))
+/// Field("timeout", .duration, constraints: .range(.seconds(1)...(.seconds(300))))
 /// Field("title", .string, constraints: .length(1...200))
 /// Field("tags", .array(.string), constraints: .nonEmpty)
 /// Alias("Slug", .string, constraints: .length(1...64), .pattern("[a-z0-9-]+"))
@@ -68,6 +69,27 @@ public struct Constraint: Sendable, Hashable {
     /// A floating range with no lower end: `.range(...1.0)`.
     public static func range(_ range: PartialRangeThrough<Double>) -> Constraint {
         Constraint(rule: .range(minimum: nil, maximum: .floating(range.upperBound)))
+    }
+
+    /// A duration range, both ends inclusive, for a `duration` value:
+    /// `.range(.seconds(1)...(.seconds(300)))`.
+    public static func range(_ range: ClosedRange<Duration>) -> Constraint {
+        Constraint(
+            rule: .range(
+                minimum: .duration(MMDuration(range.lowerBound)),
+                maximum: .duration(MMDuration(range.upperBound))
+            )
+        )
+    }
+
+    /// A duration range with no upper end: `.range(.seconds(1)...)`.
+    public static func range(_ range: PartialRangeFrom<Duration>) -> Constraint {
+        Constraint(rule: .range(minimum: .duration(MMDuration(range.lowerBound)), maximum: nil))
+    }
+
+    /// A duration range with no lower end: `.range(...(.seconds(300)))`.
+    public static func range(_ range: PartialRangeThrough<Duration>) -> Constraint {
+        Constraint(rule: .range(minimum: nil, maximum: .duration(MMDuration(range.upperBound))))
     }
 
     /// A length, both ends inclusive: a string's Unicode scalars, a byte

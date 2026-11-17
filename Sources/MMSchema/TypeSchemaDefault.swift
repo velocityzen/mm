@@ -7,21 +7,25 @@ extension TypeSchema {
     ///
     /// The kind matches the field's: a boolean for `bool`, an integer for
     /// `int` and `uint`, a floating number for `float` and `double`, a
-    /// string for `string`, and for a named type the kind of what it names:
-    /// a case's name for an enum, the scalar's kind for an alias.
+    /// string for `string`, a duration for `duration` (declared as its ISO
+    /// 8601 text, `default: "PT30S"`), and for a named type the kind of what
+    /// it names: a case's name for an enum, the scalar's kind for an alias.
     ///
     /// ## Wire encoding (fixed)
     ///
-    /// The value itself: a MessagePack bool, integer, float64, or string.
-    /// An integer reads as ``integer(_:)`` and any other number as
-    /// ``floating(_:)``. A default this peer cannot read decodes as absent,
-    /// like a key it does not know.
+    /// The value itself: a MessagePack bool, integer, float64, or string,
+    /// and a duration as its canonical ISO 8601 text. An integer reads as
+    /// ``integer(_:)`` and any other number as ``floating(_:)``. Text reads
+    /// as ``string(_:)``, and on a `duration` field (optionals unwrapped) as
+    /// ``duration(_:)`` when it is a duration's text. A default this peer
+    /// cannot read decodes as absent, like a key it does not know.
     public enum Default: Sendable, Hashable, CustomStringConvertible {
         case bool(Bool)
         case integer(Int64)
         case floating(Double)
         /// A string, or the name of an enum's case.
         case string(String)
+        case duration(MMDuration)
 
         public var description: String {
             switch self {
@@ -29,6 +33,7 @@ extension TypeSchema {
                 case .integer(let value): "\(value)"
                 case .floating(let value): "\(value)"
                 case .string(let value): "\"\(value)\""
+                case .duration(let value): "\(value)"
             }
         }
     }
@@ -49,6 +54,8 @@ extension TypeSchema.Default: Codable {
             case .integer(let value): try container.encode(value)
             case .floating(let value): try container.encode(value)
             case .string(let value): try container.encode(value)
+            // Text on every coder; the wire's `bin` form is for values.
+            case .duration(let value): try container.encode(value.description)
         }
     }
 
@@ -70,7 +77,8 @@ extension TypeSchema.Default {
     /// This default as a field of `kind` holds it, or why it cannot be that
     /// field's: a `bool`, `int`, `uint`, `float`, `double` or `string`
     /// field takes a value of its own kind, an integer standing for a
-    /// floating number; an enumeration takes one of its case names; every
+    /// floating number; a `duration` field takes a duration, or text that
+    /// reads as one; an enumeration takes one of its case names; every
     /// other kind takes none. The value must keep `constraints`, a `float`
     /// field's as the `Float` the generated code holds.
     package func fitted(
@@ -92,8 +100,15 @@ extension TypeSchema.Default {
             case (.enumeration(let cases), .string(let name))
             where cases.contains(where: { $0.name == name }):
                 fitted = self
+            case (.duration, .duration):
+                fitted = self
+            case (.duration, .string(let text)):
+                guard case .success(let value) = MMDuration.parse(text) else {
+                    return .failure(.mismatch(self, kind: kind.kindName))
+                }
+                fitted = .duration(value)
             case (.bool, _), (.int, _), (.uint, _), (.float, _), (.double, _), (.string, _),
-                (.enumeration, _):
+                (.enumeration, _), (.duration, _):
                 return .failure(.mismatch(self, kind: kind.kindName))
             default:
                 return .failure(.unsupported(kind: kind.kindName))
@@ -118,6 +133,8 @@ extension TypeSchema.Default {
             case (.double, .floating(let value)):
                 constraints.violation(of: value)
             case (.string, .string(let value)):
+                constraints.violation(of: value)
+            case (.duration, .duration(let value)):
                 constraints.violation(of: value)
             default:
                 nil
@@ -146,5 +163,76 @@ extension TypeSchema {
                     "the default \(value) \(problem)"
             }
         }
+    }
+}
+
+extension TypeSchema {
+    /// The same shape with each field's text default read as a duration
+    /// where the field's kind, through `optional` and the named scalars in
+    /// `definitions`, is `duration`. A duration default travels as text, so
+    /// a field decoded on its own reads one as a duration only when its own
+    /// type says so; a field of a named scalar needs the type table, which
+    /// a discovery response carries (section 8.1 of the wire spec).
+    func readingDurationDefaults(through definitions: [String: TypeSchema]) -> TypeSchema {
+        self.rewritten(field: { field in
+            guard case .string(let text)? = field.defaultValue,
+                Self.isDuration(field.type, through: definitions),
+                case .success(let duration) = MMDuration.parse(text)
+            else { return field }
+            var read = field
+            read.defaultValue = .duration(duration)
+            return read
+        })
+    }
+
+    /// Whether `schema`, through `optional` and references to named types,
+    /// is a duration; false for a reference that never ends.
+    private static func isDuration(_ schema: TypeSchema, through definitions: [String: TypeSchema])
+        -> Bool
+    {
+        var current = schema
+        var seen: Set<String> = []
+        while true {
+            switch current {
+                case .optional(let wrapped):
+                    current = wrapped
+                case .reference(let name):
+                    guard seen.insert(name).inserted, let next = definitions[name] else {
+                        return false
+                    }
+                    current = next
+                case .duration:
+                    return true
+                default:
+                    return false
+            }
+        }
+    }
+}
+
+extension SchemaResponse {
+    /// The response with every duration default read as a duration, the
+    /// named scalars resolved through its own type table.
+    func readingDurationDefaults() -> SchemaResponse {
+        var table: [String: TypeSchema] = [:]
+        for definition in self.types where table[definition.name] == nil {
+            table[definition.name] = definition.schema
+        }
+        var read = self
+        read.methods = self.methods.map { method in
+            var method = method
+            method.request = method.request.readingDurationDefaults(through: table)
+            method.response = method.response.readingDurationDefaults(through: table)
+            method.requestStream = method.requestStream?.readingDurationDefaults(through: table)
+            method.responseStream = method.responseStream?.readingDurationDefaults(through: table)
+            method.errors = method.errors?.readingDurationDefaults(through: table)
+            return method
+        }
+        read.types = self.types.map { definition in
+            var definition = definition
+            definition.schema = definition.schema.readingDurationDefaults(through: table)
+            return definition
+        }
+        return read
     }
 }

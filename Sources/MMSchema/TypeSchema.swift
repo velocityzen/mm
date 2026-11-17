@@ -307,22 +307,31 @@ extension TypeSchema.Field: Codable {
     }
 
     /// A default or deprecation this peer cannot read decodes as absent,
-    /// like a key it does not know.
+    /// like a key it does not know. A `duration` field's default travels as
+    /// text, so the field's kind reads it as a duration.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(TypeSchema.self, forKey: .type)
+        var defaultValue =
+            (try? container.decodeIfPresent(TypeSchema.Default.self, forKey: .defaultValue))
+            ?? nil
+        var kind = type
+        while case .optional(let wrapped) = kind { kind = wrapped }
+        if case .duration = kind, case .string(let text)? = defaultValue,
+            case .success(let duration) = MMDuration.parse(text)
+        {
+            defaultValue = .duration(duration)
+        }
         self.init(
             key: try container.decodeIfPresent(Int.self, forKey: .key),
             name: try container.decode(String.self, forKey: .name),
-            type: try container.decode(TypeSchema.self, forKey: .type),
+            type: type,
             description: try container.decodeIfPresent(String.self, forKey: .description),
             constraints: try container.decodeIfPresent(
                 TypeSchema.Constraints.self,
                 forKey: .constraints
             ),
-            defaultValue: (try? container.decodeIfPresent(
-                TypeSchema.Default.self,
-                forKey: .defaultValue
-            )) ?? nil,
+            defaultValue: defaultValue,
             deprecation: (try? container.decodeIfPresent(String.self, forKey: .deprecation))
                 ?? nil
         )

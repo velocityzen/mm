@@ -249,7 +249,6 @@
         /// no default.
         static let others: [DefaultedKind] = [
             DefaultedKind(source: ".timestamp", schema: .timestamp, takes: []),
-            DefaultedKind(source: ".duration", schema: .duration, takes: []),
             DefaultedKind(source: ".uuid", schema: .uuid, takes: []),
             DefaultedKind(source: ".array(.string)", schema: .array(.string), takes: ["length"]),
             DefaultedKind(
@@ -328,6 +327,16 @@
             ]
         )
         .map { DefaultLiteral(source: "\($0)", value: .floating($0)) }
+
+        /// Text that may be a duration's: the duration generators' texts,
+        /// grammatical and broken, at the ends of the range and not, and
+        /// twice as often any span's text, canonical or spelled apart.
+        static let durations: Gen<DefaultLiteral> = Gen<String>.oneOf(
+            DurationGenerators.allTexts.map(\.text),
+            DurationGenerators.grammaticalTexts,
+            DurationGenerators.grammaticalTexts
+        )
+        .map { DefaultLiteral(source: "\"\($0)\"", value: .string($0)) }
 
         static func literals(kind: String) -> Gen<DefaultLiteral> {
             switch kind {
@@ -449,11 +458,85 @@
         return rules
     }
 
+    /// A range of `Duration` literals around a default's text: ends on,
+    /// beside or away from the span it reads as, or, by `placement`, one
+    /// just past it, each end written in a unit that holds it.
+    func declaredDurationRange(around value: TypeSchema.Default, placement: String, _ tc: TestCase)
+        throws
+        -> DeclaredRule
+    {
+        let nanosecond: Int128 = 1_000_000_000
+        func spelled(_ span: Int128) -> Bool {
+            span % nanosecond == 0 && Int64(exactly: span / nanosecond) != nil
+                || span % 1_000_000_000_000_000_000 == 0
+                    && Int64(exactly: span / 1_000_000_000_000_000_000) != nil
+        }
+        /// `span` rounded down to a whole nanosecond.
+        func floor(_ span: Int128) -> Int128 {
+            let (quotient, remainder) = span.quotientAndRemainder(dividingBy: nanosecond)
+            return (remainder < 0 ? quotient - 1 : quotient) * nanosecond
+        }
+        var span: Int128?
+        if case .string(let text) = value, case .success(let attoseconds) = modelDuration(text) {
+            span = attoseconds
+        }
+        var near = DeclaredRule.durationSpans
+        if let span, span > Int128.min / 2, span < Int128.max / 2 {
+            let below = floor(span)
+            let above = below == span ? span : below + nanosecond
+            near += [below, above, below - nanosecond, above + nanosecond]
+        }
+        near = near.filter(spelled)
+        func ordered(_ low: Int128, _ high: Int128) -> (Int128, Int128) {
+            low <= high ? (low, high) : (high, low)
+        }
+        var (minimum, maximum): (Int128?, Int128?) = ordered(
+            try tc.draw(.element(of: near)),
+            try tc.draw(.element(of: near))
+        )
+        switch try tc.draw(.int(in: 0...3)) {
+            case 0: minimum = nil
+            case 1: maximum = nil
+            default: break
+        }
+        if let span, span > Int128.min / 2, span < Int128.max / 2 {
+            let below = floor(span)
+            let above = below == span ? span : below + nanosecond
+            let pastAbove = above == span ? span + nanosecond : above
+            let pastBelow = below == span ? span - nanosecond : below
+            switch placement {
+                case "past the minimum" where spelled(pastAbove):
+                    (minimum, maximum) = (pastAbove, maximum.map { max($0, pastAbove) })
+                case "past the maximum" where spelled(pastBelow):
+                    (minimum, maximum) = (minimum.map { min($0, pastBelow) }, pastBelow)
+                case "on a bound" where spelled(span):
+                    if try tc.draw(.bool()) {
+                        (minimum, maximum) = (span, maximum.map { max($0, span) })
+                    } else {
+                        (minimum, maximum) = (minimum.map { min($0, span) }, span)
+                    }
+                default:
+                    break
+            }
+        }
+        let low = try minimum.map { "(\(try tc.draw(DeclaredRule.durationLiteral($0))))" } ?? ""
+        let high = try maximum.map { "(\(try tc.draw(DeclaredRule.durationLiteral($0))))" } ?? ""
+        func bound(_ span: Int128?) -> TypeSchema.Bound? {
+            span.map { .duration(MMDuration(Duration(attoseconds: $0))) }
+        }
+        return DeclaredRule(
+            source: ".range(\(low)...\(high))",
+            rule: .range(bound(minimum), bound(maximum))
+        )
+    }
+
     extension TypeSchema.Bound {
+        /// The bound as a number; NaN for a duration, which equals none.
         var doubleValue: Double {
             switch self {
                 case .integer(let value): Double(value)
                 case .floating(let value): value
+                case .duration: .nan
             }
         }
     }
@@ -526,6 +609,11 @@
                         return .floating(Double(integer))
                     }
                     return Double(argument.filter { $0 != "_" }).map { .floating($0) }
+                case "duration":
+                    guard let start = argument.range(of: "attoseconds: ") else { return nil }
+                    return Int128(argument[start.upperBound...]).map {
+                        .duration(MMDuration(Duration(attoseconds: $0)))
+                    }
                 case "string":
                     guard argument.hasPrefix("\""), argument.hasSuffix("\""), argument.count >= 2
                     else {
@@ -831,6 +919,7 @@
                         }
                         if case .enumeration = fitsTo { try tc.event("accepted: an enum case") }
                         if aliasName != nil { try tc.event("accepted: an alias's default") }
+
                         if let constraints,
                             [constraints.minimum, constraints.maximum].contains(where: {
                                 $0.map { $0.doubleValue == literal.value.numberValue } ?? false
@@ -851,6 +940,115 @@
                         }
                         if message.contains("is beyond float") {
                             try tc.event("refused: beyond float")
+                        }
+
+                        #expect(message.hasPrefix(context), "\(message)")
+                        #expect(refusalReason(message) == reason, "\(message), not \(refusal)")
+                    case (.success(let value), .failure(let message)):
+                        Issue.record("the runtime fits \(value), #schema refuses: \(message)")
+                    case (.failure(let refusal), .success):
+                        Issue.record("the runtime refuses (\(refusal)), #schema takes it")
+                }
+            }
+        }
+
+        /// `#schema` takes a duration field's `default:` exactly when the
+        /// runtime fits it: text the grammar of `MMDuration.parse` reads,
+        /// whatever its spelling, that keeps the field's or the alias's
+        /// range, compared to the attosecond. Both refuse the rest for the
+        /// same reason, and the default `#schema` serves is the span the
+        /// runtime serves.
+        ///
+        /// Mutation check: the macro reading `M` before `T` as minutes, or
+        /// comparing a duration default with its bounds as doubles, fails
+        /// here at 1,000 cases.
+        @Test
+        func theMacroFitsDurationDefaultsAsTheRuntimeDoes() throws {
+            try property(
+                reaching: ["accepted", "refused: no value of the kind"],
+                reachingAfter: [
+                    "accepted: a duration spelled apart": 1_000,
+                    "accepted: a bound on the default": 1_000,
+                    "accepted: an alias's default": 1_000,
+                    "refused: less than the minimum": 1_000,
+                    "refused: more than the maximum": 1_000,
+                    "refused: an alias's rule": 1_000,
+                    "refused: a literal of another kind": 1_000,
+                ]
+            ) { tc in
+                // Mostly text of a span, so the range decides; else text
+                // the grammar refuses, or a literal of another kind.
+                let literal = try #draw(
+                    .oneOf(
+                        DurationGenerators.grammaticalTexts.map {
+                            DefaultLiteral(source: "\"\($0)\"", value: .string($0))
+                        },
+                        DefaultLiteral.durations,
+                        DefaultLiteral.durations,
+                        DefaultLiteral.literals(kind: "any")
+                    ),
+                    from: tc
+                )
+                let placement = try #draw(
+                    .element(of: [
+                        "near", "near", "near", "past the minimum", "past the maximum",
+                        "on a bound",
+                    ]),
+                    from: tc
+                )
+                let ranged = try #draw(.bool(probability: 0.7), from: tc)
+                let rules =
+                    ranged
+                    ? [try declaredDurationRange(around: literal.value, placement: placement, tc)]
+                    : []
+                let alias = try #draw(.bool(probability: 0.3), from: tc)
+                let constraints =
+                    rules.isEmpty
+                    ? "" : ", constraints: \(rules.map(\.source).joined(separator: ", "))"
+                let source = """
+                    #schema("box") {
+                        \(alias ? #"Alias("Wait", .duration\#(constraints))"# : "")
+                        Call("put") {
+                            Access(.write)
+                            Request {
+                                Field("f", \(alias ? #""Wait""# : ".duration" + constraints), default: \(literal.source))
+                            }
+                        }
+                    }
+                    """
+                try tc.note(source)
+                let declared = rules.isEmpty ? nil : declaredConstraints(rules, on: .duration)
+                let expected = literal.value.fitted(to: .duration, constraints: declared)
+                let context = #"Call("put").Request: field "f""# + (alias ? " of Wait" : "") + ": "
+                switch (expected, schemaExpansion(source)) {
+                    case (.success(let value), .success(let expansion)):
+                        try tc.event("accepted")
+                        if alias { try tc.event("accepted: an alias's default") }
+                        if case .duration(let span) = value, case .string(let text) = literal.value
+                        {
+                            if text != canonicalDurationText(of: span.duration.attoseconds) {
+                                try tc.event("accepted: a duration spelled apart")
+                            }
+                            if [declared?.minimum, declared?.maximum].contains(where: {
+                                $0??.attoseconds == span.duration.attoseconds
+                            }) {
+                                try tc.event("accepted: a bound on the default")
+                            }
+                        }
+                        let served = expandedDefaults(expansion)
+                        #expect(
+                            !served.isEmpty && served.allSatisfy { sameDefault($0, value) },
+                            "served \(served)"
+                        )
+                    case (.failure(let refusal), .failure(let message)):
+                        let reason = refusalReason("\(refusal)")
+                        try tc.event("refused: \(reason)")
+                        if alias, case .constraints = refusal {
+                            try tc.event("refused: an alias's rule")
+                        }
+                        if case .string = literal.value {
+                        } else {
+                            try tc.event("refused: a literal of another kind")
                         }
                         #expect(message.hasPrefix(context), "\(message)")
                         #expect(refusalReason(message) == reason, "\(message), not \(refusal)")

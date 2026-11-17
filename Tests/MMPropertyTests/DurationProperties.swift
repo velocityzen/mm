@@ -788,4 +788,33 @@
         }
     }
 
+    extension DurationGenerators {
+        /// Text a span reads from: its canonical text, the same span in
+        /// seconds alone with all 18 digits of its fraction, or the
+        /// canonical text after zero days.
+        static func spellings(of span: Int128) -> Gen<String> {
+            Gen { tc in
+                let canonical = canonicalDurationText(of: span)
+                switch try tc.draw(Gen<Int>.int(in: 0...2)) {
+                    case 0:
+                        return canonical
+                    case 1:
+                        let (seconds, fraction) = span.magnitude.quotientAndRemainder(
+                            dividingBy: attosecondsInASecond
+                        )
+                        let digits = String(String(attosecondsInASecond + fraction).dropFirst())
+                        return (span < 0 ? "-" : "") + "PT\(seconds).\(digits)S"
+                    default:
+                        let sign = span < 0 ? "-" : ""
+                        return sign + "P0DT" + canonical.dropFirst(sign.count + 2)
+                }
+            }
+        }
+
+        /// Grammatical text of any span, spelled any of those ways.
+        static let grammaticalTexts: Gen<String> = Gen { tc in
+            try tc.draw(spellings(of: try tc.draw(attoseconds)))
+        }
+    }
+
 #endif

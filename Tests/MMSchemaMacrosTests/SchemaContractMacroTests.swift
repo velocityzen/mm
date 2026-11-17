@@ -309,6 +309,10 @@ struct SchemaContractMacroTests {
                 #"Call("find"): field "d" default must be a string literal"#
             ),
             (
+                #"CLI { Field("d", .duration, default: "5 seconds") }; Request { Field("a", .string, cli: .input) }"#,
+                #"Call("find"): field "d" default must be ISO 8601 duration text ("PT30S")"#
+            ),
+            (
                 #"Request { Field("a", .string, cli: .input); Field("options", .optional(.string)) }"#,
                 #"Call("find"): a call with a cli: .input field can't have a request field named "options" — the command's CLI options take that name"#
             ),
@@ -475,7 +479,42 @@ struct SchemaContractMacroTests {
             ),
             (
                 "", #"Field("name", .string, constraints: .range(1...3))"#,
-                #"put.Request: Field("name"): a range applies to int, uint, float or double, not string"#
+                #"put.Request: Field("name"): a range applies to int, uint, float, double or duration, not string"#
+            ),
+            (
+                "", #"Field("wait", .duration, constraints: .range(1...5))"#,
+                #"put.Request: Field("wait"): a range on duration takes duration bounds"#
+            ),
+            (
+                "", #"Field("count", .int, constraints: .range(.seconds(1)...(.seconds(5))))"#,
+                #"put.Request: Field("count"): a range on int takes integer bounds"#
+            ),
+            (
+                "", #"Field("ratio", .double, constraints: .range(.seconds(1)...))"#,
+                #"put.Request: Field("ratio"): a range on double takes numeric bounds"#
+            ),
+            (
+                "",
+                #"Field("wait", .duration, constraints: .range(.seconds(0.5)...(.seconds(5))))"#,
+                #"put.Request: Field("wait"): a bound is a numeric literal or a Duration literal with an integer count (.seconds(30), .milliseconds(250)), not .seconds(0.5) — the macro reads bounds from source"#
+            ),
+            (
+                "", #"Field("wait", .duration, constraints: .range(1...(.seconds(5))))"#,
+                #"put.Request: Field("wait"): a range's ends are both numbers or both durations, not 1...(.seconds(5))"#
+            ),
+            (
+                "",
+                #"Field("wait", .duration, constraints: .range(.seconds(5)...(.milliseconds(1_000))))"#,
+                #"put.Request: Field("wait"): a range's minimum PT5S is more than its maximum PT1S"#
+            ),
+            (
+                "", #"Field("wait", .duration, constraints: .length(...3))"#,
+                #"put.Request: Field("wait"): a length applies to string, bytes, an array or a map, not duration"#
+            ),
+            (
+                #"Alias("Timeout", .duration, constraints: .range(0...10))"#,
+                #"Field("timeout", .reference("Timeout"))"#,
+                #"Alias("Timeout"): a range on duration takes duration bounds"#
             ),
             (
                 "", #"Field("count", .int, constraints: .length(...3))"#,
@@ -561,6 +600,24 @@ struct SchemaContractMacroTests {
             (
                 "", #"Field("tags", .array(.string), default: "x")"#,
                 #"Call("put").Request: field "tags": a field of an array takes no default"#
+            ),
+            (
+                "", #"Field("wait", .duration, default: "30s")"#,
+                #"Call("put").Request: field "wait": the default "30s" is no value of duration"#
+            ),
+            (
+                "", #"Field("wait", .duration, default: 30)"#,
+                #"Call("put").Request: field "wait": the default 30 is no value of duration"#
+            ),
+            (
+                "",
+                #"Field("wait", .duration, constraints: .range(.seconds(1)...), default: "PT0.5S")"#,
+                #"Call("put").Request: field "wait": the default PT0.5S is less than the minimum PT1S"#
+            ),
+            (
+                #"Alias("Timeout", .duration, constraints: .range(...(.seconds(10))))"#,
+                #"Field("timeout", "Timeout", default: "PT1M")"#,
+                #"Call("put").Request: field "timeout" of Timeout: the default PT1M is more than the maximum PT10S"#
             ),
             (
                 "", #"Field("slug", .string, constraints: .pattern("[a-z]+"), default: "A")"#,

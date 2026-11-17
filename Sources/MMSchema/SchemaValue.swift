@@ -93,14 +93,22 @@ extension SchemaValue {
     }
 
     /// Why this canonical value breaks `constraints`, or nil when it keeps
-    /// them or is null.
+    /// them or is null. A duration's canonical value is its text, and only
+    /// a duration takes duration bounds.
     func constraintProblem(_ constraints: TypeSchema.Constraints) -> String? {
         switch self {
             case .null, .bool: nil
             case .int(let value): constraints.violation(of: value)
             case .uint(let value): constraints.violation(of: value)
             case .double(let value): constraints.violation(of: value)
-            case .string(let value): constraints.violation(of: value)
+            case .string(let value):
+                if constraints.hasDurationBound,
+                    case .success(let duration) = MMDuration.parse(value)
+                {
+                    constraints.violation(of: duration)
+                } else {
+                    constraints.violation(of: value)
+                }
             case .bytes(let value): constraints.violation(ofLength: value.count)
             case .array(let items): constraints.violation(ofLength: items.count)
             case .object(let members): constraints.violation(ofLength: members.count)
