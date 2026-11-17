@@ -232,6 +232,59 @@ extension MMPackReader {
             throw error.underKey(key)
         }
     }
+
+    /// Reads a field's value through `readValue`, on a map's first, in-order
+    /// path, and notes in `noted` where the value sits and what reading it
+    /// gave: the value, or the error it failed with.
+    @inlinable
+    public mutating func readNoting<Value>(
+        _ noted: inout MMPackFieldRead<Value>?,
+        _ readValue: (inout Self) throws -> Value
+    ) throws -> Value {
+        let position = self.position
+        do {
+            let value = try readValue(&self)
+            noted = MMPackFieldRead(position: position, result: .success(value))
+            return value
+        } catch {
+            noted = MMPackFieldRead(position: position, result: .failure(error))
+            throw error
+        }
+    }
+
+    /// Reads a field's value at the reader's position through `readValue`,
+    /// on a map's walk-first path; or, when `noted` holds what the first path
+    /// read there, gives that value, or throws the error it failed with,
+    /// and leaves the reader where it is: the walk-first path moves to each
+    /// field, and past the map at its end.
+    @inlinable
+    public mutating func readUnlessNoted<Value>(
+        _ noted: MMPackFieldRead<Value>?,
+        _ readValue: (inout Self) throws -> Value
+    ) throws -> Value {
+        if let noted, noted.position == self.position {
+            return try noted.result.get()
+        }
+        return try readValue(&self)
+    }
+}
+
+/// What a field's read gave on a map's first, in-order path, and where the
+/// value sits. The generated code decodes a map on a second, walk-first path
+/// when its keys come out of order or the first path fails, and takes this
+/// outcome there instead of reading the value again: reading again would
+/// decode a value nested in n such maps up to 2^n times.
+public struct MMPackFieldRead<Value> {
+    @usableFromInline
+    let position: Int
+    @usableFromInline
+    let result: Result<Value, any Error>
+
+    @usableFromInline
+    init(position: Int, result: Result<Value, any Error>) {
+        self.position = position
+        self.result = result
+    }
 }
 
 extension DecodingError {

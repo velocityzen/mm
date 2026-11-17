@@ -2182,6 +2182,13 @@ private func mmPackEncodeFieldMap(
 /// then read each field there. The first path reads exactly the values the
 /// second would, and leaves every failure to it, so a map decodes to the
 /// same value either way and fails with the same error.
+///
+/// The first path notes each field's outcome, the value or the error, and
+/// where the value sits. The second takes a noted outcome for a field whose
+/// first occurrence sits there instead of reading the value again. Reading
+/// again would decode a value nested in n maps that each take the second
+/// path up to 2^n times: a payload of a few hundred bytes, its maps' keys
+/// out of order or a failure at the bottom, would never finish decoding.
 private func mmPackDecodeFieldMap(
     _ keyed: [(field: ParsedField, key: Int)],
     codingKeys: String,
@@ -2191,6 +2198,9 @@ private func mmPackDecodeFieldMap(
     var lines: [String] = []
     let readNextKey = "key = try reader.readMapKey(remaining: &remaining, depth: depth + 1)"
     lines.append("let start = reader.position")
+    for (field, _) in keyed {
+        lines.append("var \(field.name)Read: MMPackFieldRead<\(swiftType(wireField(field).type))>?")
+    }
     lines.append("inOrder: do {")
     lines.append("    var remaining = try reader.readMapHeader(depth: depth)")
     lines.append("    var \(readNextKey)")
@@ -2198,7 +2208,8 @@ private func mmPackDecodeFieldMap(
         let value = "\(field.name)Value"
         // A field with a wire default reads as the optional the wire holds.
         let wire = wireField(field)
-        let read = mmPackReadField(wire, codingKeys: codingKeys)
+        let read =
+            "try reader.readNoting(&\(field.name)Read) { reader in \(mmPackReadField(wire, codingKeys: codingKeys)) }"
         if case .optional = wire.type {
             lines.append("    let \(value): \(swiftType(wire.type))")
             lines.append("    if case .int(\(key))? = key {")
@@ -2259,7 +2270,8 @@ private func mmPackDecodeFieldMap(
         let position = "\(field.name)AtKey ?? \(field.name)AtName"
         let wire = wireField(field)
         if case .optional = wire.type {
-            let read = mmPackReadField(wire, codingKeys: codingKeys)
+            let read =
+                "try reader.readUnlessNoted(\(field.name)Read) { reader in \(mmPackReadField(wire, codingKeys: codingKeys)) }"
             lines.append("if let position = \(position) {")
             lines.append("    reader.seek(to: position)")
             if let wireDefault = field.wireDefault {
@@ -2277,7 +2289,7 @@ private func mmPackDecodeFieldMap(
         } else {
             lines.append("try reader.seek(toRequiredField: \(position), key: \(key))")
             lines.append(
-                "\(target(index, field)) = \(mmPackReadField(field, codingKeys: codingKeys))"
+                "\(target(index, field)) = try reader.readUnlessNoted(\(field.name)Read) { reader in \(mmPackReadField(field, codingKeys: codingKeys)) }"
             )
         }
     }
