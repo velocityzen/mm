@@ -240,6 +240,11 @@ struct MPGeneratedWriter: MMPackWriter {
     }
 
     @usableFromInline
+    mutating func writeDuration(_ value: MMDuration) {
+        self.buffer.writeMessagePackBinary(bytes: value.encoded())
+    }
+
+    @usableFromInline
     mutating func writeArrayHeader(count: Int) {
         self.buffer.writeMessagePackArrayHeader(count: count)
     }
@@ -344,6 +349,11 @@ struct MPGeneratedReader: MMPackReader {
     @usableFromInline
     mutating func readTimestamp() throws -> MMTimestamp {
         try mpReadTimestamp(from: &self.buffer)
+    }
+
+    @usableFromInline
+    mutating func readDuration() throws -> MMDuration {
+        try mpReadDuration(from: &self.buffer)
     }
 
     @usableFromInline

@@ -210,6 +210,7 @@ public struct MMCLIDynamicRequest: Codable, Sendable {
             case .date: return "date"
             case .datetime: return "datetime"
             case .timestamp: return "timestamp"
+            case .duration: return "duration"
             case .reference(let name): return "reference(\(name))"
             case .unknown: return "unknown"
         }
@@ -278,9 +279,9 @@ private struct DynamicRequestNode: Encodable {
                 }
                 var single = encoder.singleValueContainer()
                 try single.encode(text)
-            // The date kinds take ISO strings from the JSON side and ride
+            // The time kinds take ISO strings from the JSON side and ride
             // the wire as the value types — the pack coder writes their
-            // VPTS binary form. `validated` already proved the grammar.
+            // binary forms. `validated` already proved the grammar.
             case .date:
                 guard
                     case .string(let text) = self.value,
@@ -308,6 +309,15 @@ private struct DynamicRequestNode: Encodable {
                 }
                 var single = encoder.singleValueContainer()
                 try single.encode(timestamp)
+            case .duration:
+                guard
+                    case .string(let text) = self.value,
+                    case .success(let duration) = MMDuration.parse(text)
+                else {
+                    throw self.invalid(encoder, expected: "ISO duration")
+                }
+                var single = encoder.singleValueContainer()
+                try single.encode(duration)
             case .bytes:
                 guard case .bytes(let bytes) = self.value else {
                     throw self.invalid(encoder, expected: "bytes")

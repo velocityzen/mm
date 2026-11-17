@@ -18,6 +18,8 @@ public protocol MMPackWriter {
     mutating func writeDate(_ value: MMDate)
     mutating func writeDateTime(_ value: MMDateTime)
     mutating func writeTimestamp(_ value: MMTimestamp)
+    /// Writes a `bin` holding the duration's binary encoding.
+    mutating func writeDuration(_ value: MMDuration)
     /// Writes the smallest array header for `count`; the caller writes the elements.
     mutating func writeArrayHeader(count: Int)
     /// Writes the smallest map header for `count`; the caller writes the entries.
@@ -60,6 +62,8 @@ public protocol MMPackReader {
     mutating func readDate() throws -> MMDate
     mutating func readDateTime() throws -> MMDateTime
     mutating func readTimestamp() throws -> MMTimestamp
+    /// Reads a `bin` holding a duration's canonical binary encoding.
+    mutating func readDuration() throws -> MMDuration
     mutating func readArrayHeader(depth: Int) throws -> Int
     mutating func readMapHeader(depth: Int) throws -> Int
     /// Reads one map key. `depth` is the key's own level: the map's plus one.

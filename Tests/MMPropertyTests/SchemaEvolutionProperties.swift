@@ -249,6 +249,7 @@
         /// no default.
         static let others: [DefaultedKind] = [
             DefaultedKind(source: ".timestamp", schema: .timestamp, takes: []),
+            DefaultedKind(source: ".duration", schema: .duration, takes: []),
             DefaultedKind(source: ".array(.string)", schema: .array(.string), takes: ["length"]),
             DefaultedKind(
                 source: ".map(key: .string, value: .int)",

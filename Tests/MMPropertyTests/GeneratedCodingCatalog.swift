@@ -80,6 +80,8 @@
                 }
                 Field("photo", .bytes)
                 Field("thumbnail", .optional(.bytes))
+                Field("lead", .duration)
+                Field("grace", .optional(.duration))
             }
             Union("Shipment") {
                 Case("pending")
@@ -303,7 +305,9 @@
                         since: tc.draw(.optional(Self.date))
                     ),
                     photo: tc.draw(self.bytes),
-                    thumbnail: tc.draw(.optional(self.bytes))
+                    thumbnail: tc.draw(.optional(self.bytes)),
+                    lead: tc.draw(DurationGenerators.durations),
+                    grace: tc.draw(.optional(DurationGenerators.durations))
                 )
             }
         }

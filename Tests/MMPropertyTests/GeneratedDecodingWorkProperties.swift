@@ -99,6 +99,11 @@
             return try self.base.readTimestamp()
         }
 
+        mutating func readDuration() throws -> MMDuration {
+            try self.counting()
+            return try self.base.readDuration()
+        }
+
         mutating func readArrayHeader(depth: Int) throws -> Int {
             try self.counting()
             return try self.base.readArrayHeader(depth: depth)

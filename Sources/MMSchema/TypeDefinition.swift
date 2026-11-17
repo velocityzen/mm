@@ -96,7 +96,7 @@ extension TypeSchema {
                         for field in unionCase.fields { names.formUnion(field.value) }
                     }
                 case .bool, .int, .uint, .float, .double, .string, .bytes,
-                    .date, .datetime, .timestamp, .enumeration, .unknown:
+                    .date, .datetime, .timestamp, .duration, .enumeration, .unknown:
                     return []
             }
         }

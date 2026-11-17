@@ -23,7 +23,7 @@ One package, `MatterInMotion`, with five library products and one build-tool plu
 - `MMCLI`: runtime for schema-generated command-line tools (swift-argument-parser): connection options, exit-code mapping, stream drivers, `discover` and raw `call` commands.
 - `MMCLIGeneratorPlugin`: generates a `#schema`'s `CLI(.enabled)` commands into the command-line target, so the shared API module (and the daemon) does not depend on MMCLI or swift-argument-parser.
 
-`MMSchema` has no internal dependencies. `MMWire` depends on `MMSchema` (the VPTS codec for wire time kinds lives there). `MMServer` and `MMClient` depend on both. `MMCLI` depends on `MMClient`. Client-only processes can import `MMSchema`.
+`MMSchema` has no internal dependencies. `MMWire` depends on `MMSchema` (the binary codecs for wire time kinds live there). `MMServer` and `MMClient` depend on both. `MMCLI` depends on `MMClient`. Client-only processes can import `MMSchema`.
 
 ## Design principles
 
@@ -568,7 +568,8 @@ The DocC API reference is built from `Sources/<Target>/<Target>.docc` and hosted
 Long-form guides are DocC articles in the same catalogs (also readable in the repository):
 
 - [Wire protocol specification](Sources/MMWire/MMWire.docc/WireProtocol.md) (MMWire): the normative byte-level spec: framing, hello, envelope, ACL semantics, fingerprint, conformance vectors.
-- [VPTS specification](Sources/MMWire/MMWire.docc/VPTS.md) (MMWire): the variable-precision timestamp codec used by the wire time kinds.
+- [VPTS specification](Sources/MMWire/MMWire.docc/VPTS.md) (MMWire): the variable-precision timestamp codec used by the wire's calendar and clock kinds.
+- [Duration specification](Sources/MMWire/MMWire.docc/Duration.md) (MMWire): the binary form of the wire's duration kind.
 - [Integration guide](Sources/MMServer/MMServer.docc/IntegrationGuide.md) (MMServer): embedding the router and an `EntityACLProvider` in a host daemon.
 - [Remote access](Sources/MMServer/MMServer.docc/RemoteAccess.md) (MMServer): SSH Unix-socket forwarding, socket permissions, systemd/launchd recipes, troubleshooting.
 - [Examples](Examples/README.md): a runnable daemon and client pair covering the whole library.

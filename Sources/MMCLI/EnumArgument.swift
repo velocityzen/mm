@@ -31,6 +31,15 @@ extension MMTimestamp: ExpressibleByArgument {
     }
 }
 
+/// A duration as a typed command argument: ISO 8601 duration text, so a
+/// generated `Field("timeout", .duration)` becomes a `--timeout PT30S`
+/// option.
+extension MMDuration: ExpressibleByArgument {
+    public init?(argument: String) {
+        self.init(argument)
+    }
+}
+
 /// Raw bytes as a typed command argument: base64 text, so a generated
 /// `Field("blob", .bytes)` becomes a `--blob AAEC` option.
 extension MMBytes: ExpressibleByArgument {

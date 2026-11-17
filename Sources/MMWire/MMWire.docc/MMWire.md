@@ -4,7 +4,7 @@ The wire layer: MessagePack coding over `ByteBuffer`, length-prefix framing, the
 
 ## Overview
 
-MMWire implements the lowest layers of the matter-in-motion protocol. It depends only on NIOCore and MMSchema (for the VPTS codec of the wire time kinds).
+MMWire implements the lowest layers of the matter-in-motion protocol. It depends only on NIOCore and MMSchema (for the binary codecs of the wire time kinds).
 
 - **Framing**: `[u32 LE length][payload]` frames, through ``MMFrameDecoder`` and ``MMFrameEncoder``. The length counts only the payload. The decoder checks the size limit (default 16 MiB, see ``MMWireInfo``) before it stores any body byte. ``MMFrameEncodingHandler`` frames outbound payloads without copying an envelope that ``MMEnvelope/encoded(allocator:maxDepth:)`` wrote, since its length prefix is already in front of it.
 - **Hello preamble**: ``MMHello``, a fixed 15-byte structure (matter bytes `MM`, protocol version, schema fingerprint, capability bitset). Each side sends it as its first frame.
@@ -15,7 +15,7 @@ MMWire implements the lowest layers of the matter-in-motion protocol. It depends
 - Structs encode as MessagePack maps with integer keys.
 - The decoder skips unknown keys.
 - `ByteBuffer`-typed fields get zero-copy bin/str slices.
-- The wire time kinds (`MMDate`, `MMDateTime`, `MMTimestamp` from MMSchema) are also special-cased. They travel as MessagePack bin holding a VPTS encoding (<doc:VPTS>), never as their ISO-string `Codable` form.
+- The wire time kinds (`MMDate`, `MMDateTime`, `MMTimestamp` and `MMDuration` from MMSchema) are also special-cased. They travel as MessagePack bin holding a VPTS encoding (<doc:VPTS>), or a duration's binary form (<doc:Duration>), never as their ISO-string `Codable` form.
 
 The types the schema macros generate also carry generated MessagePack code (`MMPackCodable` in MMSchema). For those, the coders' `MMPackEncodable` and `MMPackDecodable` overloads skip `Encoder`, `Decoder`, and their containers, and write the same bytes and accept the same input as the `Codable` path. The one exception is a struct with no fields: its generated code steps over exactly one value, where `Decodable` reads nothing at all. Generic code cannot pick an overload from a type parameter, so ``MMPackEncoder/encoding(_:)`` and ``MMPackDecoder/decoding(_:)`` resolve the path once per type. The server's routes use them for every payload, and the client's streams for their items. Where there is nowhere to keep a resolved coder, ``MMPackEncoder/encodeCheckingForGeneratedCode(_:)`` and ``MMPackDecoder/decodeCheckingForGeneratedCode(_:from:)`` check on each call instead, with one cached conformance lookup and no allocation. The client's unary calls and stream terminals use them.
 
@@ -38,6 +38,7 @@ Failures return a `Result` with one typed error, ``MMWireError``. ``MMErrorCode`
 
 - <doc:WireProtocol>
 - <doc:VPTS>
+- <doc:Duration>
 
 ### Constants and endpoints
 

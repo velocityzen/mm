@@ -9,7 +9,7 @@
 ///   0 `bool`, 1 `int`, 2 `uint`, 3 `float`, 4 `double`, 5 `string`,
 ///   6 `bytes`, 7 `optional`, 8 `array`, 9 `map`, 10 `structure`,
 ///   11 `enumeration`, 12 `reference`, 13 `date`, 14 `datetime`,
-///   15 `timestamp`, 16 `union`, 255 `unknown`.
+///   15 `timestamp`, 16 `union`, 17 `duration`, 255 `unknown`.
 /// - key **1**: first payload — the wrapped schema for `optional`, the element
 ///   schema for `array`, the key schema for `map`, the field list for
 ///   `structure`, the case list for `enumeration` and `union`, the qualified
@@ -42,6 +42,9 @@ public indirect enum TypeSchema: Sendable, Hashable {
     /// An absolute instant — ``MMTimestamp``, a datetime with UTC offset
     /// (`...Z` or `...±HH:MM`) on the wire.
     case timestamp
+    /// A span of elapsed time — ``MMDuration``, exact to the attosecond: on
+    /// the wire, `bin` holding the duration encoding.
+    case duration
     case optional(TypeSchema)
     case array(TypeSchema)
     case map(key: TypeSchema, value: TypeSchema)
@@ -244,7 +247,7 @@ extension TypeSchema {
         let rebuilt: TypeSchema
         switch self {
             case .bool, .int, .uint, .float, .double, .string, .bytes,
-                .date, .datetime, .timestamp, .reference, .unknown:
+                .date, .datetime, .timestamp, .duration, .reference, .unknown:
                 rebuilt = self
             case .optional(let wrapped):
                 rebuilt = .optional(child(wrapped))
@@ -365,6 +368,7 @@ extension TypeSchema: Codable {
             case .datetime: return 14
             case .timestamp: return 15
             case .union: return 16
+            case .duration: return 17
             case .unknown: return 255
         }
     }
@@ -374,7 +378,7 @@ extension TypeSchema: Codable {
         try container.encode(tag, forKey: .tag)
         switch self {
             case .bool, .int, .uint, .float, .double, .string, .bytes,
-                .date, .datetime, .timestamp, .unknown:
+                .date, .datetime, .timestamp, .duration, .unknown:
                 break
             case .optional(let wrapped):
                 try container.encode(wrapped, forKey: .first)
@@ -450,6 +454,7 @@ extension TypeSchema: Codable {
                     (try? container.decode([UnionCase].self, forKey: .first)).map {
                         .union(cases: $0)
                     } ?? .unknown
+            case 17: self = .duration
             default:
                 self = .unknown
         }

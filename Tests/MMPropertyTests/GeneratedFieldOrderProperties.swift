@@ -399,9 +399,9 @@
             [
                 "sku", "quantity", "stock", "price", "weight", "active", "condition", "tags",
                 "note", "grid", "lookup", "serials", "released", "updated", "stamped", "stamp",
-                "owner", "photo", "thumbnail",
+                "owner", "photo", "thumbnail", "lead", "grace",
             ],
-            optional: ["note", "updated", "stamped", "thumbnail"],
+            optional: ["note", "updated", "stamped", "thumbnail", "grace"],
             key: { Catalog.Item.CodingKeys(stringValue: $0)?.rawValue }
         )
 

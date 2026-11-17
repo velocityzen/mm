@@ -85,6 +85,10 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
             case .timestamp:
                 return .string(
                     try decoder.singleValueContainer().decode(MMTimestamp.self).description)
+            case .duration:
+                return .string(
+                    try decoder.singleValueContainer().decode(MMDuration.self).description
+                )
             case .bytes:
                 return .bytes(
                     Self.rawBytes(try decoder.singleValueContainer().decode(ByteBuffer.self)))
@@ -208,6 +212,8 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                 return .string(try container.decode(MMDateTime.self, forKey: key).description)
             case .timestamp:
                 return .string(try container.decode(MMTimestamp.self, forKey: key).description)
+            case .duration:
+                return .string(try container.decode(MMDuration.self, forKey: key).description)
             case .bytes:
                 return .bytes(Self.rawBytes(try container.decode(ByteBuffer.self, forKey: key)))
             case .optional(let wrapped):
@@ -261,6 +267,8 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
                 return .string(try container.decode(MMDateTime.self).description)
             case .timestamp:
                 return .string(try container.decode(MMTimestamp.self).description)
+            case .duration:
+                return .string(try container.decode(MMDuration.self).description)
             case .bytes:
                 return .bytes(Self.rawBytes(try container.decode(ByteBuffer.self)))
             case .optional(let wrapped):

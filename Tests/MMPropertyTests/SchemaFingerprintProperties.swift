@@ -317,7 +317,7 @@
         static let leaves: Gen<TypeSchema> = .oneOf(
             .element(of: [
                 .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp,
-                .unknown,
+                .duration, .unknown,
             ]),
             names.map { .reference($0) }
         )

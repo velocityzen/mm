@@ -6,13 +6,15 @@ import NIOCore
 func mpHasBinaryShortcut<T>(_ type: T.Type) -> Bool {
     type == ByteBuffer.self || type == MMBytes.self || type == MMPackRawValue.self
         || type == MMDate.self || type == MMDateTime.self || type == MMTimestamp.self
+        || type == MMDuration.self
 }
 
 /// `ByteBuffer` and ``MMBytes`` values encode as MessagePack `bin`, and the wire time kinds ride
-/// as `bin` holding a VPTS encoding (the VPTS article in this catalog) — a
-/// coder-level short-circuit, so the time types' own `Codable` (canonical ISO
-/// strings) keeps serving JSON coders, display, and tests, while the wire gets
-/// the compact, byte-sortable binary form. An ``MMPackRawValue`` writes its
+/// as `bin` holding a VPTS encoding (the VPTS article in this catalog), or a
+/// duration's binary encoding (the duration article) — a coder-level
+/// short-circuit, so the time types' own `Codable` (canonical ISO strings)
+/// keeps serving JSON coders, display, and tests, while the wire gets the
+/// compact binary form. An ``MMPackRawValue`` writes its
 /// bytes as they are. Returns false, writing nothing, for every other type.
 func mpWriteBinaryShortcut<T: Encodable>(_ value: T, into buffer: inout ByteBuffer) -> Bool {
     // Guarded force casts: each identity check proves T (the standard Codable
@@ -29,6 +31,8 @@ func mpWriteBinaryShortcut<T: Encodable>(_ value: T, into buffer: inout ByteBuff
         buffer.writeMessagePackBinary(bytes: MMVPTS(value as! MMDateTime).encoded())
     } else if T.self == MMTimestamp.self {
         buffer.writeMessagePackBinary(bytes: MMVPTS(value as! MMTimestamp).encoded())
+    } else if T.self == MMDuration.self {
+        buffer.writeMessagePackBinary(bytes: (value as! MMDuration).encoded())
     } else {
         return false
     }
@@ -40,7 +44,8 @@ func mpWriteBinaryShortcut<T: Encodable>(_ value: T, into buffer: inout ByteBuff
 /// Keyed containers encode as maps with integer keys taken from `CodingKeys.intValue`;
 /// keys without an `intValue` fall back to string keys. `ByteBuffer` values encode as
 /// `bin`; the wire time kinds (`MMDate`, `MMDateTime`, `MMTimestamp`) encode as `bin`
-/// holding their VPTS form. A `Dictionary` keyed by an integer type or by a
+/// holding their VPTS form, and an `MMDuration` as `bin` holding its binary
+/// form. A `Dictionary` keyed by an integer type or by a
 /// `String`- or integer-backed enum encodes as a map keyed by each key's own
 /// encoding, where `Codable` would write an array of keys and values; a key
 /// must fit `Int64`.

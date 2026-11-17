@@ -103,6 +103,8 @@ private enum Catalog: MethodNamespace {
             }
             Field("photo", .bytes)
             Field("thumbnail", .optional(.bytes))
+            Field("lead", .duration)
+            Field("grace", .optional(.duration))
         }
         Union("Shipment") {
             Case("pending")

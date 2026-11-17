@@ -18,6 +18,7 @@ struct TypeSchemaFoldTests {
                 case .date: return "date"
                 case .datetime: return "datetime"
                 case .timestamp: return "timestamp"
+                case .duration: return "duration"
                 case .optional(let wrapped): return "\(wrapped)?"
                 case .array(let element): return "[\(element)]"
                 case .map(let key, let value): return "[\(key): \(value)]"

@@ -169,6 +169,12 @@ extension SchemaValue {
                         path, expected: "ISO timestamp (YYYY-MM-DDTHH:MM:SS[.fff]Z|±HH:MM)")
                 }
                 return .success(self)
+            case .duration:
+                guard case .string(let text) = self, case .success = MMDuration.parse(text)
+                else {
+                    return self.mismatch(path, expected: "ISO duration (PT1H30M)")
+                }
+                return .success(self)
             case .bytes:
                 switch self {
                     case .bytes:
@@ -526,6 +532,7 @@ extension SchemaValue {
             case .date: return "a date"
             case .datetime: return "a datetime"
             case .timestamp: return "a timestamp"
+            case .duration: return "a duration"
             case .optional: return "an optional"
             case .array: return "an array"
             case .map: return "a map"

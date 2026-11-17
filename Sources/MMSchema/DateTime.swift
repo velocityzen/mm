@@ -9,11 +9,13 @@
 /// - ``MMTimestamp`` — a datetime **with a UTC offset**
 ///   (`2026-07-21T14:30:00+02:00`, `Z` for UTC): an absolute instant.
 ///
-/// On the wire all three are MessagePack strings in canonical ISO 8601 /
-/// RFC 3339 form (grammar in the wire specification, section 6.4); the
-/// schema tags them `.date` / `.datetime` / `.timestamp`, so peers and
-/// tooling know the semantics — a CLI can localize them, a diff knows a
-/// date is not a string.
+/// On the wire all three are MessagePack `bin` holding a VPTS encoding
+/// (``MMVPTS``); their `Codable` form, which JSON projections use, is
+/// canonical ISO 8601 / RFC 3339 text (the wire specification, section
+/// 8.3). The schema tags them `.date` / `.datetime` / `.timestamp`, so
+/// peers and tooling know the semantics — a CLI can localize them, a diff
+/// knows a date is not a string. Elapsed time, which has no calendar, is
+/// ``MMDuration``, the `.duration` kind.
 ///
 /// Everything here is dependency-free by MMSchema's house rule (no
 /// Foundation): parsing, formatting, and the civil-calendar math are

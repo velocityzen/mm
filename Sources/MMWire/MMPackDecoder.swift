@@ -1,13 +1,14 @@
 import MMSchema
 import NIOCore
 
-/// The decode twin of `mpWriteBinaryShortcut(_:into:)`: the wire time kinds arrive as
+/// The decode twin of `mpWriteBinaryShortcut(_:into:)`: the calendar kinds arrive as
 /// MessagePack `bin` holding a VPTS encoding, decoded and constrained per
 /// kind — a date field only accepts date precision, a datetime a full wall
 /// clock without offset, a timestamp one with. The spec's null timestamp is
 /// rejected wherever a value is required (payload optionality is MessagePack
-/// nil, never VPTS null). Returns nil when `type` is not a wire time kind.
-func vptsValue<T>(
+/// nil, never VPTS null). A duration arrives as `bin` holding its canonical
+/// binary encoding. Returns nil when `type` is not a wire time kind.
+func timeKindValue<T>(
     _ type: T.Type, from buffer: inout ByteBuffer
 ) throws -> T? {
     // Guarded force casts: each identity check proves T (the standard
@@ -20,6 +21,9 @@ func vptsValue<T>(
     }
     if type == MMTimestamp.self {
         return (try mpReadTimestamp(from: &buffer) as! T)
+    }
+    if type == MMDuration.self {
+        return (try mpReadDuration(from: &buffer) as! T)
     }
     return nil
 }
@@ -75,6 +79,17 @@ func mpReadTimestamp(from buffer: inout ByteBuffer) throws -> MMTimestamp {
         throw MMWireError.decodingFailed(description: "VPTS is not a datetime with offset")
     }
     return value
+}
+
+/// Reads a `bin` holding a duration's canonical binary encoding.
+func mpReadDuration(from buffer: inout ByteBuffer) throws -> MMDuration {
+    let bin = try buffer.readMessagePackBinary().get()
+    switch MMDuration.decode(bin.readableBytesView) {
+        case .success(let value):
+            return value
+        case .failure(let failure):
+            throw MMWireError.decodingFailed(description: "invalid duration: \(failure)")
+    }
 }
 
 /// The standard-library scalars schema fields use, read straight from the
@@ -270,7 +285,7 @@ final class MPDecodingState {
         if type == MMPackRawValue.self {
             return (try mpReadRawValue(from: &buffer, depth: depth, cap: cap) as! T)
         }
-        if let value = try vptsValue(type, from: &buffer) {
+        if let value = try timeKindValue(type, from: &buffer) {
             return value
         }
         return try mpReadScalar(type, from: &buffer)

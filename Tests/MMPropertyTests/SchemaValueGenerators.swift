@@ -320,7 +320,10 @@
         }
 
         var leaves: [TypeSchema] {
-            [.bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp]
+            [
+                .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp,
+                .duration,
+            ]
                 + (policy.unknownSlots ? [.unknown] : [])
         }
 
@@ -587,6 +590,8 @@
                     return .string(try dateText(tc, as: .dateTime))
                 case .timestamp:
                     return .string(try dateText(tc, as: .timestamp))
+                case .duration:
+                    return .string(try tc.draw(DurationGenerators.durations).description)
                 case .array(let element):
                     guard depth > 0, try table.holdsAValue(element) else { return .array([]) }
                     let count = try SchemaDrawing.count(tc, in: 0...policy.maxItems)
@@ -758,6 +763,7 @@
                 case (.date, _): labels.insert("a date")
                 case (.datetime, _): labels.insert("a datetime")
                 case (.timestamp, _): labels.insert("a timestamp")
+                case (.duration, _): labels.insert("a duration")
                 case (.array(let element), .array(let items)):
                     if items.isEmpty {
                         let fits = (try? table.holdsAValue(element)) ?? true

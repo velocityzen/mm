@@ -554,6 +554,8 @@ indirect enum ParsedType {
     /// The calendar/clock kinds: generated properties use the MMSchema
     /// value types (`MMDate`, `MMDateTime`, `MMTimestamp`).
     case date, datetime, timestamp
+    /// A span of elapsed time: generated properties use `MMDuration`.
+    case duration
     case optional(ParsedType)
     case array(ParsedType)
     case map(key: ParsedType, value: ParsedType)
@@ -916,7 +918,7 @@ private func validateFieldDefault(
             guard case .string = flagDefault else {
                 throw mismatch("a string literal (the option takes JSON text)")
             }
-        case .optional, .array, .bytes:
+        case .optional, .array, .bytes, .duration:
             throw SchemaMacroError(
                 description:
                     "Call(\"\(call.name)\"): field \"\(field.name)\" default: is not supported for this field type"
@@ -975,7 +977,7 @@ private func validate(types: [ParsedTypeDecl], calls: [ParsedCall]) throws -> Se
     func check(_ type: ParsedType, context: String) throws {
         switch type {
             case .bool, .int, .uint, .float, .double, .string, .bytes,
-                .date, .datetime, .timestamp, .external:
+                .date, .datetime, .timestamp, .duration, .external:
                 break
             case .optional(let wrapped):
                 try check(wrapped, context: context)
@@ -1778,6 +1780,7 @@ func parseType(_ expr: ExprSyntax, context: String) throws -> ParsedType {
             case "date": return .date
             case "datetime": return .datetime
             case "timestamp": return .timestamp
+            case "duration": return .duration
             case "bytes": return .bytes
             case "unknown":
                 throw SchemaMacroError(
@@ -1869,6 +1872,7 @@ func swiftType(_ type: ParsedType) -> String {
         case .date: return "MMDate"
         case .datetime: return "MMDateTime"
         case .timestamp: return "MMTimestamp"
+        case .duration: return "MMDuration"
         case .optional(let wrapped): return "\(swiftType(wrapped))?"
         case .array(let element): return "[\(swiftType(element))]"
         case .map(let key, let value): return "[\(swiftType(key)): \(swiftType(value))]"
@@ -1893,6 +1897,7 @@ private func schemaLiteral(_ type: ParsedType, namespace: String) throws -> Stri
         case .date: return ".date"
         case .datetime: return ".datetime"
         case .timestamp: return ".timestamp"
+        case .duration: return ".duration"
         case .optional(let wrapped):
             return ".optional(\(try schemaLiteral(wrapped, namespace: namespace)))"
         case .array(let element):
@@ -2313,7 +2318,8 @@ private func mmPackReadField(_ field: ParsedField, codingKeys: String) -> String
 /// read through theirs, and a named type's fields can hold either.
 private func mmPackReadReachesDecodable(_ type: ParsedType) -> Bool {
     switch type {
-        case .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp:
+        case .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp,
+            .duration:
             return false
         case .optional(let wrapped), .array(let wrapped):
             return mmPackReadReachesDecodable(wrapped)
@@ -2341,7 +2347,8 @@ private func mmPackEnumMembers(_ name: String) -> [String] {
 /// their own generated code or through `Encodable` can.
 private func mmPackWriteThrows(_ type: ParsedType) -> Bool {
     switch type {
-        case .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp:
+        case .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp,
+            .duration:
             return false
         case .optional(let wrapped), .array(let wrapped):
             return mmPackWriteThrows(wrapped)
@@ -2366,6 +2373,7 @@ func mmPackWrite(_ type: ParsedType, value: String) -> String {
         case .date: return "writer.writeDate(\(value))"
         case .datetime: return "writer.writeDateTime(\(value))"
         case .timestamp: return "writer.writeTimestamp(\(value))"
+        case .duration: return "writer.writeDuration(\(value))"
         case .optional(let wrapped):
             return
                 "\(marker)writer.writeOptional(\(value)) { writer, value in \(mmPackWrite(wrapped, value: "value")) }"
@@ -2395,6 +2403,7 @@ func mmPackRead(_ type: ParsedType, level: Int) -> String {
         case .date: return "try reader.readDate()"
         case .datetime: return "try reader.readDateTime()"
         case .timestamp: return "try reader.readTimestamp()"
+        case .duration: return "try reader.readDuration()"
         case .optional(let wrapped):
             return "try reader.readOptional { reader in \(mmPackRead(wrapped, level: level)) }"
         case .array(let element):
@@ -3035,7 +3044,7 @@ private func commandFieldForm(
     func isDirect(_ type: ParsedType) -> Bool {
         switch type {
             case .bool, .int, .uint, .float, .double, .string, .bytes,
-                .date, .datetime, .timestamp:
+                .date, .datetime, .timestamp, .duration:
                 return true
             case .reference(let name):
                 return argumentTypeNames.contains(name)

@@ -81,6 +81,10 @@ struct SchemaGuidedWalk {
                 return self.read(path, expected: "timestamp") { buffer in
                     Self.catching { _ = try mpReadTimestamp(from: &buffer) }
                 }
+            case .duration:
+                return self.read(path, expected: "duration") { buffer in
+                    Self.catching { _ = try mpReadDuration(from: &buffer) }
+                }
             case .array(let element):
                 return self.array(of: element, path: path, depth: depth)
             case .map(_, let value):

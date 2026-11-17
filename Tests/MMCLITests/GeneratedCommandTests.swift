@@ -32,6 +32,7 @@ enum Ledger: MethodNamespace {
                 Field("tint", .optional(.string), cli: .option("color", short: .auto))
                 Field("format", .optional(.string), default: "json")
                 Field("when", .optional(.timestamp), default: .now)
+                Field("wait", .optional(.duration))
                 Field("exclude", .array(.string))
                 Field("only", .optional(.array(.string)))
             }
@@ -355,6 +356,20 @@ struct GeneratedCommandTests {
         #expect(stamped.dateTime.date.year >= 2026)
     }
 
+    @Test("a duration option takes ISO 8601 text and refuses anything else")
+    func durationOption() throws {
+        let base = ["--socket", "/tmp/ledger.sock", "x", "ledger.main", "--kind", "credit"]
+        #expect(try Ledger.AppendCommand.parse(base).wait == nil)
+        let command = try Ledger.AppendCommand.parse(base + ["--wait", "P1DT0.000001S"])
+        #expect(command.wait == MMDuration(.seconds(86_400) + .microseconds(1)))
+        // A negative duration starts with a dash, so it follows an equals sign.
+        let negative = try Ledger.AppendCommand.parse(base + ["--wait=-PT1H30.25S"])
+        #expect(negative.wait == MMDuration(.seconds(-3_630) - .milliseconds(250)))
+        #expect(throws: (any Error).self) {
+            try Ledger.AppendCommand.parse(base + ["--wait", "90m"])
+        }
+    }
+
     @Test("short: .auto derives the short from the long name, renamed or not")
     func derivedShorts() throws {
         let command = try Ledger.AppendCommand.parse([
@@ -449,6 +464,7 @@ struct GeneratedCommandTests {
                     Field("tint", .optional(.string))
                     Field("format", .optional(.string), default: "json")
                     Field("when", .optional(.timestamp), default: .now)
+                    Field("wait", .optional(.duration))
                     Field("exclude", .array(.string))
                     Field("only", .optional(.array(.string)))
                 }

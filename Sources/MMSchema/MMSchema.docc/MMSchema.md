@@ -68,6 +68,8 @@ The core types never read the clock themselves.
 
 On the MessagePack wire, all three use VPTS binary, the variable-precision timestamp codec. ``MMVPTS`` is its reference implementation (spec: the VPTS article under MMWire). Their `Codable` form is the canonical ISO string, which JSON projections and display use.
 
+Elapsed time is a kind of its own too: `.duration` (``MMDuration``), a signed span exact to the attosecond. It holds a Swift `Duration` and converts both ways without loss, so `MMDuration(later - earlier)` records the span between two timestamps. It has no calendar: a day is 86,400 seconds, and there are no years or months. Its `Codable` form is ISO 8601 duration text (`PT1H30M`, `-PT0.5S`). On the wire it is a compact binary form of 1 to 18 bytes (spec: the duration article under MMWire).
+
 Authorization works like a filesystem:
 
 - ``EntityName`` is a validated dotted path.
@@ -216,6 +218,7 @@ Every server also serves the ``Builtins``:
 - ``MMTimestamp``
 - ``MMDateComponent``
 - ``MMVPTS``
+- ``MMDuration``
 
 ### Authorization
 
@@ -237,3 +240,4 @@ Every server also serves the ``Builtins``:
 - ``InvalidEntityNameReason``
 - ``MMDateTimeParseFailure``
 - ``MMVPTSDecodeFailure``
+- ``MMDurationDecodeFailure``
