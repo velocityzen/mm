@@ -182,17 +182,31 @@
         /// stream's end as one more nil element when `Element` is optional,
         /// fails here and nowhere else. The credit properties catch a reader
         /// that skips its consumption accounting or its grant.
+        ///
+        /// Every claim is judged once 1,000 cases have passed. A 100-case
+        /// run's share of each swings far around its mean, and none keeps
+        /// to a fifth of every such run: each of five kinds is a fifth of
+        /// the cases, a nil comes only with the two optional kinds, and even
+        /// with the count weighted to its ends, no elements comes up in
+        /// about a fifth of the cases and a full window in a third.
         @Test
         func elementsCrossTheStreamsAsTheyWereSent() async throws {
             let window = Int(MMStreamFlowControl.initialWindow)
+            let kindClaims = StreamElementKind.allCases.map { ("\($0.rawValue) elements", 1_000) }
             try await property(
-                reaching: StreamElementKind.allCases.map { "\($0.rawValue) elements" } + [
-                    "a nil element", "a nil response", "no elements", "a full window",
-                ],
-                reachingAfter: ["a nil element last": 1_000]
+                reachingAfter: [
+                    "no elements": 1_000, "a full window": 1_000, "a nil element": 1_000,
+                    "a nil response": 1_000, "a nil element last": 1_000,
+                ].merging(kindClaims) { $1 }
             ) { tc in
                 let kind = try #draw(.element(of: StreamElementKind.allCases), from: tc)
-                let count = try #draw(.int(in: 0...window), from: tc)
+                // No elements and a full window are where the stream ends at
+                // once and where the sender uses every credit, so about half
+                // the counts are one of the two, and the rest any count.
+                let count = try #draw(
+                    .oneOf(.element(of: [0, window]), .int(in: 0...window)),
+                    from: tc
+                )
                 try tc.event("\(kind.rawValue) elements")
                 if count == 0 { try tc.event("no elements") }
                 if count == window { try tc.event("a full window") }
