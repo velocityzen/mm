@@ -410,20 +410,26 @@
             .map { .union(cases: $0) }
         }
 
-        static let schemas: Gen<TypeSchema> = .recursive(maxDepth: 4, maxLeaves: 8, leaf: leaves) {
-            schema in
-            .oneOf(
-                schema.map { .optional($0) },
-                schema.map { .array($0) },
-                Hegel.zip(schema, schema).map { .map(key: $0, value: $1) },
-                Gen<[TypeSchema.Field]>.array(of: fields(schema), count: 0...4).map {
-                    .structure(fields: $0)
-                },
-                Gen<[TypeSchema.EnumCase]>.array(of: enumCases, count: 0...4).map {
-                    .enumeration(cases: $0)
-                },
-                unions(schema)
-            )
+        static let schemas: Gen<TypeSchema> = Self.schemas(maxLeaves: 8)
+
+        /// Schemas nested at most four deep with at most `maxLeaves` leaves.
+        /// The engine steers each schema toward a size drawn up to the
+        /// budget, so a larger budget makes more nodes per case.
+        static func schemas(maxLeaves: Int) -> Gen<TypeSchema> {
+            .recursive(maxDepth: 4, maxLeaves: maxLeaves, leaf: leaves) { schema in
+                .oneOf(
+                    schema.map { .optional($0) },
+                    schema.map { .array($0) },
+                    Hegel.zip(schema, schema).map { .map(key: $0, value: $1) },
+                    Gen<[TypeSchema.Field]>.array(of: fields(schema), count: 0...4).map {
+                        .structure(fields: $0)
+                    },
+                    Gen<[TypeSchema.EnumCase]>.array(of: enumCases, count: 0...4).map {
+                        .enumeration(cases: $0)
+                    },
+                    unions(schema)
+                )
+            }
         }
 
         static let accesses: Gen<AccessMode> = Gen<UInt8>.oneOf(.integer(in: 0...7), .integer())
@@ -467,13 +473,17 @@
             )
         }
 
-        static let definitions: Gen<TypeDefinition> = Gen { tc in
-            TypeDefinition(
-                name: try tc.draw(names),
-                schema: try tc.draw(schemas),
-                description: try tc.draw(descriptions),
-                deprecation: try tc.draw(descriptions)
-            )
+        static let definitions: Gen<TypeDefinition> = Self.definitions(of: schemas)
+
+        static func definitions(of schemas: Gen<TypeSchema>) -> Gen<TypeDefinition> {
+            Gen { tc in
+                TypeDefinition(
+                    name: try tc.draw(names),
+                    schema: try tc.draw(schemas),
+                    description: try tc.draw(descriptions),
+                    deprecation: try tc.draw(descriptions)
+                )
+            }
         }
 
         /// Up to six signatures and four definitions: enough for order and

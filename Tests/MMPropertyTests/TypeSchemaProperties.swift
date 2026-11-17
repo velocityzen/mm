@@ -9,6 +9,12 @@
 
     @Suite("TypeSchema properties", .hegel, .offTheCooperativePool)
     struct TypeSchemaProperties {
+        /// Schemas with room for every node kind: the coding properties
+        /// claim each of a dozen scalar kinds, which a budget of eight
+        /// leaves spreads too thin to reach 3% of cases each.
+        static let wideSchemas = FingerprintGenerators.schemas(maxLeaves: 24)
+        static let wideDefinitions = FingerprintGenerators.definitions(of: wideSchemas)
+
         /// Any schema encodes as `TypeSchema`'s documentation lays out its
         /// wire form: a map with the case tag from the documented table at
         /// key 0, the first payload at key 1 and the second at key 2, and
@@ -45,7 +51,7 @@
                     "a deprecated field": 1_000, "a deprecated case": 1_000,
                 ]
             ) { tc in
-                let schema = try #draw(FingerprintGenerators.schemas, from: tc)
+                let schema = try #draw(Self.wideSchemas, from: tc)
                 for label in kindLabels(of: schema).sorted() {
                     try tc.event(label)
                 }
@@ -90,7 +96,7 @@
                     "a deprecated definition": 1_000,
                 ]
             ) { tc in
-                let definition = try #draw(FingerprintGenerators.definitions, from: tc)
+                let definition = try #draw(Self.wideDefinitions, from: tc)
                 if definition.deprecation != nil { try tc.event("a deprecated definition") }
                 for label in kindLabels(of: definition.schema).sorted() {
                     try tc.event(label)

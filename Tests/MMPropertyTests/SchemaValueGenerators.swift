@@ -74,6 +74,39 @@
         case optional, array, map, structure, enumeration, union
     }
 
+    /// A shape a test case can lean on, for the slots an unfocused policy
+    /// reaches in only a few percent of cases.
+    enum SchemaValueFocus: Sendable, CaseIterable {
+        /// Maps or arrays the only composites but optionals, every field
+        /// present, and room to nest and to hold several items: map keys,
+        /// which the round trip rewrites and sorts, and array items, null
+        /// and unknown ones among them.
+        case maps, arrays
+        /// Several definitions, most positions referring to one, and
+        /// optional slots mostly filled, so reference chains and a
+        /// definition met inside itself come up.
+        case references
+    }
+
+    extension SchemaValuePolicy {
+        mutating func focus(on focus: SchemaValueFocus) {
+            switch focus {
+                case .maps, .arrays:
+                    composites = [focus == .maps ? .map : .array, .optional]
+                    optionalFieldRate = 0
+                    schemaDepth = max(schemaDepth, 2)
+                    valueDepth = max(valueDepth, 3)
+                    maxItems = max(maxItems, 3)
+                case .references:
+                    definitionCount = max(definitionCount, 2)
+                    referenceRate = 0.75
+                    optionalFieldRate = max(optionalFieldRate, 0.5)
+                    fillRate = max(fillRate, 0.5)
+                    valueDepth = max(valueDepth, 3)
+            }
+        }
+    }
+
     /// A generator that broke its own contract: a reference it made did not
     /// resolve, or a valid date failed to build.
     struct GeneratorFault: Error, CustomStringConvertible {
@@ -132,6 +165,13 @@
 
         static func int64s(edgeRate: Double) -> Gen<Int64> {
             edged(int64Edges, .integer(), rate: edgeRate)
+        }
+
+        /// An `.int` slot's value: one from `int64s(edgeRate:)`, or as often
+        /// an integer a double holds exactly, as JSON input mostly brings,
+        /// which a loose form may give as a double.
+        static func intSlotValues(edgeRate: Double) -> Gen<Int64> {
+            .oneOf(int64s(edgeRate: edgeRate), .integer(in: -(1 << 53)...(1 << 53)))
         }
 
         static func uint64s(edgeRate: Double) -> Gen<UInt64> {
@@ -215,7 +255,7 @@
                     optionalFieldRate: try tc.draw(.element(of: [0.0, 0.5, 1.0])),
                     // Each count is then drawn from zero up, so empty
                     // structures, arrays and maps still come up.
-                    maxMembers: try tc.draw(.int(in: 1...5)),
+                    maxMembers: try tc.draw(.int(in: 1...8)),
                     valueDepth: try tc.draw(.int(in: 1...5)),
                     maxItems: try tc.draw(.int(in: 1...4)),
                     fillRate: try tc.draw(.element(of: [0.0, 0.5, 1.0])),
@@ -561,7 +601,7 @@
                     return .bool(try tc.draw(.bool()))
                 case .int:
                     return .int(
-                        try tc.draw(SchemaValueGenerators.int64s(edgeRate: policy.edgeRate))
+                        try tc.draw(SchemaValueGenerators.intSlotValues(edgeRate: policy.edgeRate))
                     )
                 case .uint:
                     return .uint(

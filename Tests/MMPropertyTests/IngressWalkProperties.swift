@@ -55,8 +55,10 @@
                 else { throw GeneratorFault(description: "the root is not a structure") }
                 // One or two more fields, mostly of one kind drawn for the
                 // case and sometimes optional or of a named type, among the
-                // drawn ones: every kind is often the one corrupted.
-                let focus = try #draw(.element(of: extraKinds), from: tc)
+                // drawn ones: every kind is often the one corrupted. The
+                // kind is drawn evenly over the kinds the walk names.
+                let focusGroup = try #draw(.element(of: extraKindsByExpectedKind), from: tc)
+                let focus = try #draw(.element(of: focusGroup), from: tc)
                 var extras: [Int] = []
                 for extra in 0..<(try #draw(.int(in: 1...2), from: tc)) {
                     let name = "extra \(extra)"
@@ -87,7 +89,6 @@
                 let present = fields.indices.filter { index in
                     members.contains { $0.name == fields[index].name }
                 }
-                guard try #draw(.bool(probability: 0.85), from: tc) else { return }
                 let corrupted =
                     try #draw(.bool(probability: 0.8), from: tc)
                     ? try #draw(.element(of: extras), from: tc) : try #draw(.element(of: present), from: tc)
@@ -115,14 +116,17 @@
         }
     }
 
-    /// The kinds of the fields added: every scalar kind, an enumeration
-    /// among them, an array and a map.
-    private let extraKinds: [TypeSchema] = [
-        .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp,
-        .duration, .uuid,
-        .enumeration(cases: [TypeSchema.EnumCase(name: "on"), TypeSchema.EnumCase(name: "off")]),
-        .array(.int), .map(key: .string, value: .int),
+    /// The kinds of the fields added, grouped by the kind the walk expects
+    /// of them: every scalar kind, an enumeration among the strings, an
+    /// array and a map.
+    private let extraKindsByExpectedKind: [[TypeSchema]] = [
+        [.bool], [.int], [.uint], [.float, .double],
+        [.string, .enumeration(cases: [.init(name: "on"), .init(name: "off")])],
+        [.bytes], [.date], [.datetime], [.timestamp], [.duration], [.uuid],
+        [.array(.int)], [.map(key: .string, value: .int)],
     ]
+
+    private let extraKinds: [TypeSchema] = extraKindsByExpectedKind.flatMap { $0 }
 
     /// The bytes the CLI's dynamic request writes for `value`.
     private func encoded(

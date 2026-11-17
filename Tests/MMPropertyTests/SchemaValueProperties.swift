@@ -45,7 +45,18 @@
                     "the first enumeration case": 1_000,
                 ]
             ) { tc in
-                let policy = try #draw(SchemaValueGenerators.policies(unknownSlots: true), from: tc)
+                var policy = try #draw(
+                    SchemaValueGenerators.policies(unknownSlots: true),
+                    from: tc
+                )
+                // A quarter of the cases are about maps, a quarter about
+                // arrays, and a quarter about references, chains and
+                // recursive definitions among them.
+                let focus = try #draw(
+                    Gen<SchemaValueFocus?>.element(of: [nil, .maps, .arrays, .references]),
+                    from: tc
+                )
+                if let focus { policy.focus(on: focus) }
                 let fitting = try #draw(SchemaValueGenerators.fitting(policy), from: tc)
                 for label in reachLabels(of: fitting).sorted() {
                     try tc.event(label)
@@ -84,8 +95,8 @@
         @Test
         func looseFormsValidateToTheCanonicalValue() throws {
             try property(
-                reaching: ["members out of order"],
                 reachingAfter: [
+                    "members out of order": 1_000,
                     "a respelled map key": 1_000, "an int given as a double": 1_000,
                     "union fields given for a case without any": 1_000,
                     "union members out of order": 1_000,

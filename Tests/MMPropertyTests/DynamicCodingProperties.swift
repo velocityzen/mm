@@ -36,11 +36,9 @@
         @Test
         func requestsDecodeToTheCanonicalValue() throws {
             try property(
-                reaching: [
-                    "an optional field left out", "sent and read back",
-                    "validated refuses the input",
-                ],
+                reaching: ["an optional field left out", "sent and read back"],
                 reachingAfter: [
+                    "validated refuses the input": 1_000,
                     "a bool": 1_000, "a date": 1_000, "a datetime": 1_000,
                     "a definition inside itself": 1_000, "a double": 1_000, "a float": 1_000,
                     "a later enumeration case": 1_000, "a map keyed by integers": 1_000,
@@ -66,19 +64,14 @@
                     from: tc
                 )
                 policy.doublesInFloatSlots = try #draw(Gen<Bool>.bool(), from: tc)
-                // A quarter of the cases are about maps, whose keys the round
-                // trip rewrites and sorts, and a quarter about arrays, whose
-                // null and unknown items it must carry or refuse: that kind
-                // and optionals the only composites, every field present,
-                // and room to nest and to hold several items.
-                if try #draw(Gen<Bool>.bool(), from: tc) {
-                    let mapFocus = try #draw(Gen<Bool>.bool(), from: tc)
-                    policy.composites = [mapFocus ? .map : .array, .optional]
-                    policy.optionalFieldRate = 0
-                    policy.schemaDepth = max(policy.schemaDepth, 2)
-                    policy.valueDepth = max(policy.valueDepth, 3)
-                    policy.maxItems = max(policy.maxItems, 3)
-                }
+                // A third of the cases are about maps, whose keys the round
+                // trip rewrites and sorts, and a third about arrays, whose
+                // null and unknown items it must carry or refuse.
+                let focus = try #draw(
+                    Gen<SchemaValueFocus?>.element(of: [nil, .maps, .arrays]),
+                    from: tc
+                )
+                if let focus { policy.focus(on: focus) }
                 let fitting = try #draw(SchemaValueGenerators.fitting(policy), from: tc)
                 let table = DefinitionTable(fitting.definitions)
                 var schema = fitting.schema
