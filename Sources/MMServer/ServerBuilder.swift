@@ -181,7 +181,7 @@ public func Types(_ container: any TypeNamespace.Type) -> ServerPart {
 /// its call's own task (`@concurrent`), off any actor.
 public func On<Request: Codable & Sendable, Response: Codable & Sendable>(
     _ method: Method<Request, Response>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body: @escaping @Sendable @concurrent (MMContext, Request) async -> Result<Response, MMError>
 ) -> Route {
     Handle(method, accepts) { request, context in
@@ -196,7 +196,7 @@ public func On<
     Response: Codable & Sendable
 >(
     _ method: ServerStreamMethod<Request, Element, Response>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body:
         @escaping @Sendable @concurrent (MMContext, Request, MMResponseSink<Element>) async ->
         Result<Response, MMError>
@@ -213,7 +213,7 @@ public func On<
     Response: Codable & Sendable
 >(
     _ method: ClientStreamMethod<Request, Element, Response>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body:
         @escaping @Sendable @concurrent (MMContext, Request, MMRequestStream<Element>) async ->
         Result<Response, MMError>
@@ -231,7 +231,7 @@ public func On<
     Response: Codable & Sendable
 >(
     _ method: BidirectionalStreamMethod<Request, RequestElement, ResponseElement, Response>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body:
         @escaping @Sendable @concurrent (
             MMContext, Request, MMRequestStream<RequestElement>,

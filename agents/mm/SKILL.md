@@ -59,8 +59,9 @@ public let journalContract: SchemaDeclaration = Journal.contract
 Rules that keep the wire stable:
 
 - A method has four independent, combinable parts: `Request`, `RequestStream`, `ResponseStream`, `Response`. Unary has no stream parts. No `Request` means an empty payload.
-- `Call("@")` is the namespace **root call**: wire name `search`, not `search.run`. Generated members use `root` (`Search.root`, `RootRequest`, `RootCommand`). The CLI runs it as the group's default subcommand (`tool search`). One per schema. Discovery filters it by execute on its own name-entity, like its dotted siblings. With `Accepts("search")`, callers can omit the entity.
+- `Call("@")` is the namespace **root call**: wire name `search`, not `search.run`. Generated members use `root` (`Search.root`, `RootRequest`, `RootCommand`). The CLI runs it as the group's default subcommand (`tool search`). One per schema. Discovery filters it by execute on its own name-entity, like its dotted siblings. With `Target("search")`, callers can omit the entity.
 - The target entity travels in the **open envelope**, never the payload. Never add an `entity` request field for routing. Handlers read `context.entity`. Clients pass `on:`.
+- `Target("journal.*")` declares the entities calls target, as patterns: at the top of `#schema` for every call, or inside a `Call` to replace the namespace's. Patterns: `"system.log"` exact, `"journal.*"` strict descendants at any depth (not `journal` itself; add `"journal"` for it), `"tenants.*.journal"` where `*` is exactly one segment, `.all` every entity but root, `.root` the whole tree. `#schema` checks them at compile time and refuses `""` (write `.root`). A target is contract: discovery serves it, the fingerprint hashes it, a changed target is drift. The generated CLI shows it in the entity's help, completes its literal prefix, and refuses an entity outside it before connecting; a target of one exact entity makes the positional optional. Server routes take it, so handlers write `On(Journal.read) { ... }` with no `Accepts`.
 - Field keys are declaration-order integers. To evolve a schema, pin keys (`Field(3, "note", .string)`) and make new fields `.optional(...)` or give them a `default:`. Peers skip unknown keys, so old and new peers interoperate. The protocol version stays 1: evolve with optional or defaulted fields, not versions.
   - `default:` on a field that is not optional is a **wire default**: the field travels as an optional, the generated property holds the bare value, an absent key or `nil` reads as the default, and the field is always written. The literal must fit the field's kind (bool, integer, floating, string, an enum case name, or a duration's ISO 8601 text) and keep its constraints. The fingerprint covers it.
   - Removing a field: never reuse its key or name. Declare `Reserved(2, "author")` in its place; later pinned fields cannot take them, and auto keys skip them.
@@ -172,7 +173,8 @@ Server facts to design around:
 - Handlers return `Result<Response, MMError>`. Codes 1 to 63 are reserved for the protocol. Application errors start at 64.
 - Every server registers the builtins `server.schema` (discovery, filtered by the caller's traversal rights) and `server.entity`.
 - Cross-connection fan-out (one connection's append feeding another's `follow` stream) is application code. For the safe registry pattern, see `Examples/Daemon/FollowerHub.swift`: synchronous `onTermination`, idempotent removal, never finish under the lock.
-- Root-targeted requests (empty entity) are denied unless the route accepts them: `On(method, Accepts(.root, .all)) { ... }`.
+- Root-targeted requests (empty entity) are denied unless the call's `Target` includes `.root`, or, for a call without a target, the route accepts it: `On(method, Accepts(.root, .all)) { ... }`.
+- A route without `Accepts` takes its call's declared `Target`. An `Accepts` narrows it (`On(Journal.read, Accepts("journal.notes"))`) and must fall within it: one outside it stops the daemon at startup. Never widen a target with `Accepts`; change the contract's `Target`.
 - Dynamic authorization (SQLite, for example): implement `EntityACLProvider` and pass `ACLProvider(provider)`. The builder tree is shorthand for `InMemoryACLProvider`.
 - Isolation: mm's library targets build with `NonisolatedNonsendingByDefault`, so its async APIs run on the caller's actor. Handlers, `EntityACLProvider` methods, and `withStream`'s `each` are `@concurrent`: they run in tasks of their own, off any actor.
 - Startup order is bracket composition: the server's acquire returns once the socket listens, so with `BracketAsyncDo().bind { server.mapError(...) }.bind { address in ... }` a dependent starts after the bind and stops before the drain. Unify error types with `mapError`. The yielded `SocketAddress` reports ephemeral TCP ports.
@@ -278,7 +280,7 @@ A top-level `CLI(.enabled)` entry in the schema block generates one swift-argume
   - A `default:` on a non-optional field is a wire default (see above): its option is optional and takes the default when absent.
 - The overlay is presentation-only. It is stored on `MethodDeclaration`, never forwarded to `MethodSignature`, so it cannot affect discovery, fingerprints, or compatibility.
 - Every command gets the shared connection options (`--socket`/`--tcp`, timeouts, `--output json|json-pretty|raw`), an optional `<entity>` positional (after any single-value positional fields), and sysexits-style exit codes (denied → 77, usage → 64, transport → 69, SIGINT → 130).
-- The entity positional (`journal.notes`) never comes from the schema. The schema declares verbs and payload shapes. Entities are the daemon's runtime tree, declared server-side with ACLs (compare a syscall table with file paths). Never list entities in a contract. Never drop the entity argument from a command. It is optional at the call site: omitting it sends a root target. The server infers the target only if the route's `Accepts` names exactly one concrete entity. Other routes deny it.
+- The entity positional (`journal.notes`) never comes from the schema. The schema declares verbs, payload shapes, and, with `Target`, the patterns a call's entities fit. Entities are the daemon's runtime tree, declared server-side with ACLs (compare a syscall table with file paths). Never list a daemon's runtime entities in a contract; declare the pattern they share. Never drop the entity argument from a command. It is optional at the call site: omitting it sends a root target, or the target's one entity when the `Target` names exactly one concrete entity, which the help shows. The server infers the target the same way, from the target or the route's `Accepts`. Other routes deny it.
 - Server-stream commands print elements as JSON lines (SIGINT = graceful STOP, second SIGINT = CANCEL). Client-stream commands read stdin lines (plain lines for single-string-field elements, otherwise JSON; EOF = END). Bidirectional does both.
 - `MMCLI` also ships `MMCLIDiscover` ("discover") and `MMCLIRawCall` ("call": any method by wire name, `--params` JSON, schema-driven) to mount beside generated groups.
 - Verification is automatic. Each generated command diffs its own namespace against the server before dispatch. Drift exits 76. `--no-verify` skips it for one invocation. Denied discovery skips it with a note (call rights do not imply read on the namespace entity).
@@ -304,12 +306,13 @@ A top-level `CLI(.enabled)` entry in the schema block generates one swift-argume
 - Entities are dotted paths in a tree. Dispatch needs `.execute` on **every ancestor** of the target (like directory x bits), then the method's declared class on the target.
 - The first matching class wins, as in POSIX. An owner match uses only owner bits, even if group or other bits would grant more.
 - A missing ACL record means `permissionDenied`. Existence never leaks. If discovery shows fewer methods than the server defines, that is traversal filtering, not a bug.
-- Grants are per entity and per mode, never per method. A mode bit admits every method of that access class. In multi-family daemons, declare each route's targets:
-  - `On(Journal.read, Accepts("journal.*")) { ... }`: subtree.
-  - `Accepts("system.log")`: exact entity.
-  - `Accepts("tenants.*.journal.*")`: a `*` segment matches exactly one segment. A trailing `.*` matches any depth.
-  - `Accepts(.root, .all)`: root opt-in.
-  - Unaccepted targets are denied before any ACL lookup. A route naming exactly one concrete entity also accepts entity-less calls (the server infers the target).
+- Grants are per entity and per mode, never per method. A mode bit admits every method of that access class. In multi-family daemons, declare each call's targets in its contract with `Target`, which its routes take:
+  - `Target("journal.*")`: subtree.
+  - `Target("system.log")`: exact entity.
+  - `Target("tenants.*.journal.*")`: a `*` segment matches exactly one segment. A trailing `.*` matches any depth.
+  - `Target(.root, .all)`: root opt-in.
+  - `On(Journal.read, Accepts("journal.notes")) { ... }` narrows a call's target on one route, never widens it; for a call without a target, `Accepts` takes the same patterns.
+  - Unaccepted targets are denied before any ACL lookup. A target or route naming exactly one concrete entity also accepts entity-less calls (the server infers the target).
 - Authorization runs before any payload byte is decoded.
 - Metrics: the library emits swift-metrics instruments with stable `mm_server_*`/`mm_client_*` labels. Never rename them. It bootstraps no backend and opens no port. The host calls `MetricsSystem.bootstrap(...)` once, or all metrics are no-ops. The label list is in the IntegrationGuide's Observability section.
 

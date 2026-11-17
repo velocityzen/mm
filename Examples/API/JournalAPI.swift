@@ -41,6 +41,11 @@ import MMSchema
 /// `Type` declares a named type. Each call gets one flat enum
 /// (`Journal.AppendError`): handlers return its cases, clients switch on
 /// them, and the generated CLI exits with each case's `exitCode`.
+/// `Target("journal.*")` at the top level declares the entities every call
+/// targets: journals, never other nouns. It is contract too: discovery
+/// serves it, the daemon's routes take it without repeating it, and the
+/// generated CLI shows it in help, completes `journal.`, and refuses an
+/// entity outside it before connecting.
 /// Every `description:` below is served by `server.schema` — discovery is
 /// self-documenting — while staying out of the fingerprint and all
 /// compatibility checks: doc edits are never schema drift.
@@ -50,6 +55,7 @@ public enum Journal: MethodNamespace {
         description: "Append-only journals: write lines, read them back, follow changes live."
     ) {
         CLI(.enabled)
+        Target("journal.*")
         Enum("Priority", description: "How urgent a line is") {
             Case("normal")
             Case("urgent", description: "Surfaces immediately to followers")

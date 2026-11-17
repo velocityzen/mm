@@ -34,6 +34,8 @@ public struct MethodWithErrors<Base: Sendable, Failure: MMDeclaredError>: Sendab
     public let name: String
     /// The rwx class this verb needs on its target entity.
     public let access: AccessMode
+    /// The entities the call declares it targets; nil when it declares none.
+    public let target: [EntityPattern]?
     private let baseSignature: @Sendable () -> Result<MethodSignature, SchemaError>
     private let baseProbedSignature: @Sendable () -> Result<MethodSignature, SchemaError>
 
@@ -41,12 +43,14 @@ public struct MethodWithErrors<Base: Sendable, Failure: MMDeclaredError>: Sendab
         base: Base,
         name: String,
         access: AccessMode,
+        target: [EntityPattern]?,
         signature: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
         probedSignature: @escaping @Sendable () -> Result<MethodSignature, SchemaError>
     ) {
         self.base = base
         self.name = name
         self.access = access
+        self.target = target
         self.baseSignature = signature
         self.baseProbedSignature = probedSignature
     }
@@ -60,6 +64,7 @@ public struct MethodWithErrors<Base: Sendable, Failure: MMDeclaredError>: Sendab
             base: base,
             name: base.name,
             access: base.access,
+            target: base.target,
             signature: { base.signature() },
             probedSignature: { base.probedSignature() }
         )
@@ -74,6 +79,7 @@ public struct MethodWithErrors<Base: Sendable, Failure: MMDeclaredError>: Sendab
             base: base,
             name: base.name,
             access: base.access,
+            target: base.target,
             signature: { base.signature() },
             probedSignature: { base.probedSignature() }
         )
@@ -88,6 +94,7 @@ public struct MethodWithErrors<Base: Sendable, Failure: MMDeclaredError>: Sendab
             base: base,
             name: base.name,
             access: base.access,
+            target: base.target,
             signature: { base.signature() },
             probedSignature: { base.probedSignature() }
         )
@@ -102,6 +109,7 @@ public struct MethodWithErrors<Base: Sendable, Failure: MMDeclaredError>: Sendab
             base: base,
             name: base.name,
             access: base.access,
+            target: base.target,
             signature: { base.signature() },
             probedSignature: { base.probedSignature() }
         )
@@ -133,6 +141,7 @@ extension AnyMethod {
         self.init(
             name: method.name,
             access: method.access,
+            target: method.target,
             signature: { method.signature() },
             probedSignature: { method.probedSignature() }
         )

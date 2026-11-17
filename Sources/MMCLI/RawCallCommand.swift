@@ -12,7 +12,10 @@ import MMSchema
 ///
 /// Streaming methods are refused (their element pumps need a generated
 /// command); unknown or unreachable methods exit 64 with a pointer to
-/// `discover`.
+/// `discover`. A method whose signature declares a target checks the entity
+/// against it before the call, as a generated command does before
+/// connecting, and an omitted entity is the target's one entity when it
+/// names exactly one.
 public struct MMCLIRawCall: AsyncParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "call",
@@ -25,7 +28,8 @@ public struct MMCLIRawCall: AsyncParsableCommand {
     public var method: String
 
     @Argument(
-        help: "Target entity (dotted path); omit when the daemon's route accepts exactly one entity"
+        help:
+            "Target entity (dotted path); omit when the method's target, or the daemon's route, names exactly one entity"
     )
     public var entity: String?
 
@@ -38,8 +42,9 @@ public struct MMCLIRawCall: AsyncParsableCommand {
         // Locals only inside the call closure: it is @Sendable, and
         // referencing a property would capture non-Sendable self.
         let methodName = method
-        let entityArgument = entity ?? ""
-        let target = try MMCLIFailure.entity(entityArgument)
+        let givenEntity = entity
+        let entityArgument = givenEntity ?? ""
+        let undeclaredTarget = try MMCLIFailure.entity(entityArgument)
         let json: MMCLIDynamicTree
         do {
             json = try MMCLIDynamicTree.parse(jsonText: params)
@@ -67,6 +72,23 @@ public struct MMCLIRawCall: AsyncParsableCommand {
                 MMCLIOutput.note("streaming methods need a generated CLI command")
                 throw ExitCode(64)
             }
+            // The declared target, from discovery: refused here rather than
+            // denied by the server, with the target named.
+            let (callEntity, target): (String, EntityName)
+            if let declared = signature.target {
+                do {
+                    (callEntity, target) = try MMCLIFailure.entity(
+                        givenEntity,
+                        method: methodName,
+                        target: declared
+                    )
+                } catch let error as ValidationError {
+                    MMCLIOutput.note(error.message)
+                    throw ExitCode(64)
+                }
+            } else {
+                (callEntity, target) = (entityArgument, undeclaredTarget)
+            }
             let request = try MMCLIDynamicRequest(
                 schema: signature.request,
                 definitions: schema.types,
@@ -87,7 +109,7 @@ public struct MMCLIRawCall: AsyncParsableCommand {
                     )
                 },
                 method: methodName,
-                entity: entityArgument
+                entity: callEntity
             )
             return response.tree
         }

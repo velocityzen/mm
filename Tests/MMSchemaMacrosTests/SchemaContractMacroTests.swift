@@ -207,7 +207,7 @@ struct SchemaContractMacroTests {
             diagnostics: [
                 DiagnosticSpec(
                     message:
-                        "#schema supports only Call, Enum, Union, Type, Alias, Error, Errors, CLI and field group declarations at the top level (the macro form is the DSL's static subset — no conditionals)",
+                        "#schema supports only Call, Enum, Union, Type, Alias, Error, Errors, Target, CLI and field group declarations at the top level (the macro form is the DSL's static subset — no conditionals)",
                     line: 1, column: 1)
             ],
             macros: macros
@@ -864,6 +864,67 @@ struct SchemaContractMacroTests {
                         Request {
                             \(fields)
                         }
+                    }
+                }
+                """
+            assertMacroExpansion(
+                source,
+                expandedSource: source,
+                diagnostics: [DiagnosticSpec(message: message, line: 1, column: 1)],
+                macros: macros
+            )
+        }
+    }
+
+    @Test("diagnostics: Target patterns are checked at expansion")
+    func targetDiagnostics() {
+        // Each case: the block's top-level entries, the ping call's own
+        // entries, and the diagnosis.
+        let cases: [(top: String, own: String, message: String)] = [
+            (
+                #"Target("jour*")"#, "",
+                #"#schema Target: Target pattern "jour*" is not valid: only a whole segment may be a wildcard"#
+            ),
+            (
+                "", #"Target("Journal")"#,
+                #"Call("ping"): Target pattern "Journal" is not valid: a segment holds a character outside a-z, 0-9, _ and -"#
+            ),
+            (
+                "", #"Target(.entity("a..b"))"#,
+                #"Call("ping"): Target pattern "a..b" is not valid: a segment is empty"#
+            ),
+            (
+                #"Target("")"#, "",
+                #"#schema Target: Target pattern "" is not valid: write .root to target the whole tree"#
+            ),
+            (
+                "Target()", "",
+                "#schema Target: Target() with no patterns would refuse every entity — declare at least one"
+            ),
+            (
+                "Target(pattern)", "",
+                #"#schema Target: a Target pattern is a string literal, .root, .all or .entity("..."), got pattern"#
+            ),
+            (
+                #"Target(on: "a")"#, "",
+                #"#schema Target: Target takes unlabeled patterns, got on: "a""#
+            ),
+            (
+                #"Target("a"); Target("b")"#, "",
+                "#schema declares Target twice — one states the calls' default"
+            ),
+            (
+                "", #"Target("a"); Target("b")"#,
+                #"Call("ping"): Target declared twice"#
+            ),
+        ]
+        for (top, own, message) in cases {
+            let source = """
+                #schema("box") {
+                    \(top.replacingOccurrences(of: "; ", with: "\n"))
+                    Call("ping") {
+                        Access(.read)
+                        \(own.replacingOccurrences(of: "; ", with: "\n"))
                     }
                 }
                 """

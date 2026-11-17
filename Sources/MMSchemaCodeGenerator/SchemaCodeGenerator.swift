@@ -455,6 +455,11 @@ struct ParsedCall {
     var cliOptions: [ParsedField]?
     /// The call's own `Errors { ... }` part, as parsed.
     var ownErrors: [ParsedErrorCase] = []
+    /// The call's own `Target(...)`, normalized; nil when it declares none.
+    var ownTarget: [TargetPattern]?
+    /// The call's target: its own, else the namespace's; nil when neither
+    /// declares one.
+    var target: [TargetPattern]?
     /// The call's full error set, resolved: the namespace's errors, then its
     /// own. Empty for a call that cannot fail with a declared error.
     var errors: [ResolvedErrorCase] = []
@@ -592,6 +597,7 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
     var cliMode: ParsedCLIMode?
     var namedErrors: [ParsedNamedError] = []
     var namespaceErrors: [ParsedErrorCase]?
+    var namespaceTarget: [TargetPattern]?
     var seen: Set<String> = []
     var groups = FieldGroupExpansion()
     for item in closure.statements {
@@ -606,7 +612,7 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
         else {
             throw SchemaMacroError(
                 description:
-                    "#schema supports only Call, Enum, Union, Type, Alias, Error, Errors, CLI and field group declarations at the top level (the macro form is the DSL's static subset — no conditionals)"
+                    "#schema supports only Call, Enum, Union, Type, Alias, Error, Errors, Target, CLI and field group declarations at the top level (the macro form is the DSL's static subset — no conditionals)"
             )
         }
         switch callee {
@@ -636,15 +642,26 @@ private func parseContract(namespace: String, closure: ClosureExprSyntax) throws
                 namespaceErrors = try parseErrors(call, context: "#schema Errors")
             case "Error":
                 namedErrors.append(try parseNamedError(call))
+            case "Target":
+                guard namespaceTarget == nil else {
+                    throw SchemaMacroError(
+                        description:
+                            "#schema declares Target twice — one states the calls' default"
+                    )
+                }
+                namespaceTarget = try parseTarget(call, context: "#schema Target")
             default:
                 throw SchemaMacroError(
                     description:
-                        "#schema supports only Call, Enum, Union, Type, Alias, Error, Errors, CLI and field group declarations at the top level (got \(callee))"
+                        "#schema supports only Call, Enum, Union, Type, Alias, Error, Errors, Target, CLI and field group declarations at the top level (got \(callee))"
                 )
         }
     }
     guard !calls.isEmpty else {
         throw SchemaMacroError(description: "#schema declares no calls")
+    }
+    for index in calls.indices {
+        calls[index].target = calls[index].ownTarget ?? namespaceTarget
     }
     let generatedNames = try validate(types: types, calls: calls)
     let resolver = WireDefaultResolver(types: types)
@@ -1219,6 +1236,7 @@ private func parseCall(_ call: FunctionCallExprSyntax) throws -> ParsedCall {
     var sawRequest = false
     var sawResponse = false
     var sawErrors = false
+    var sawTarget = false
     for item in body.statements {
         guard let part = item.item.as(FunctionCallExprSyntax.self),
             let partName = calleeName(part)
@@ -1233,6 +1251,12 @@ private func parseCall(_ call: FunctionCallExprSyntax) throws -> ParsedCall {
                 }
                 sawAccess = true
                 result.accessSource = try parseAccess(part, callName: name)
+            case "Target":
+                guard !sawTarget else {
+                    throw SchemaMacroError(description: "Call(\"\(name)\"): Target declared twice")
+                }
+                sawTarget = true
+                result.ownTarget = try parseTarget(part, context: "Call(\"\(name)\")")
             case "Request":
                 try applyFieldsPart(
                     part, partName: partName, callName: name, into: &result,
@@ -3261,7 +3285,8 @@ private func descriptor(
 ) -> String {
     let name = wireName(namespace: namespace, call: call)
     let documentation =
-        (documentationArgument(for: call).map { ",\n    documentation: \($0)" } ?? "")
+        targetArgument(for: call)
+        + (documentationArgument(for: call).map { ",\n    documentation: \($0)" } ?? "")
         + descriptorCheckArguments(
             for: call,
             constrained: constrained,
@@ -3487,10 +3512,7 @@ private func commandDeclaration(
     lines.append("    public static let configuration = CommandConfiguration(")
     lines.append("        \(configuration.joined(separator: ",\n        ")))")
     lines.append("    @OptionGroup public var connection: MMCLIOptions")
-    let entityHelp = """
-        help: "Target entity (dotted path); omit when the daemon's route \
-        accepts exactly one entity"
-        """
+    let entityHelp = "help: \(quoted(entityHelpText(call.target)))" + entityCompletion(call.target)
     let entityProperty = "    @Argument(\(entityHelp)) public var entity: String?"
     let entityOption = "    @Option(name: .customLong(\"entity\"), \(entityHelp)) public var entity: String?"
 
@@ -3619,8 +3641,17 @@ private func commandDeclaration(
     )
     // Locals only inside the call closure: it is @Sendable, and referencing a
     // property would capture non-Sendable self.
-    lines.append("        let entityArgument = entity ?? \"\"")
-    lines.append("        let target = try MMCLIFailure.entity(entityArgument)")
+    if let target = call.target {
+        // A declared target: the early check refuses an entity outside it
+        // before connecting, and an omitted entity is the target's one
+        // entity when it names exactly one.
+        lines.append(
+            "        let (entityArgument, target) = try MMCLIFailure.entity(entity, method: \"\(wireName)\", target: [\(target.map(\.expression).joined(separator: ", "))])"
+        )
+    } else {
+        lines.append("        let entityArgument = entity ?? \"\"")
+        lines.append("        let target = try MMCLIFailure.entity(entityArgument)")
+    }
     for prelude in preludes {
         lines.append("        \(prelude)")
     }

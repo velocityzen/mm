@@ -408,29 +408,37 @@ Caching notes, most important first:
 - **Know the ACL semantics you serve.** The first matching class wins: a peer classified as owner is judged by owner bits alone, even if group or other bits would grant. uid 0 is not special. Traversal requires `x` on every ancestor prefix. The router enforces all of this through `EntityACL.permitted`; the provider only stores and fetches.
 - The static `ACLProvider { ... }` table is an `InMemoryACLProvider` (a dictionary behind a mutex). Its `invalidate` is a documented no-op, because it never caches.
 
-### Grants are per entity and per mode: declare what a route accepts when that is too broad
+### Grants are per entity and per mode: declare what a call targets when that is too broad
 
 A mode bit on an entity gates **every** method of that access class, as a file's read bit gates every program that opens the file. There are no per-method grants: you cannot let a peer call `server.entity` on a target but not `journal.read`. Methods (verbs) and entities (nouns) are independent by design, so without further declaration the router authorizes `journal.read` on `server` if the peer can read it.
 
-That is right for a daemon with one method family over its own subtree. With **several** families over one entity tree (the example has `journal` and the builtin `server`), a grant made for one family admits the same-class verbs of every family. When that is too broad, declare the targets a route accepts with `Accepts`, the optional second argument of `On`/`Handle`. Every route in the example's `JournalHandlers` keeps journal verbs on journal nouns:
+That is right for a daemon with one method family over its own subtree. With **several** families over one entity tree (the example has `journal` and the builtin `server`), a grant made for one family admits the same-class verbs of every family. When that is too broad, declare the entities a call targets with `Target` in its contract. The example's contract declares it once, at the top, for every journal call, which keeps journal verbs on journal nouns:
 
 ```swift
-On(Journal.read, Accepts("journal.*")) { auth, request in
-    .success(ReadResponse(lines: await store.read(auth.entity)))
+#schema("journal", description: "...") {
+    CLI(.enabled)
+    Target("journal.*")
+    // Calls, types, errors.
 }
 ```
 
-Patterns combine: any match admits the target. The grammar:
+A `Target` inside a `Call` replaces the namespace's for that call. The runtime DSL takes the same `Target(...)` part, and `#schema` checks each pattern at compile time. A declared target is contract: discovery serves it (`MethodSignature` key 4), the fingerprint hashes it, and a changed target is drift. Clients check it before they call: the generated CLI shows it in the entity's help, completes its literal prefix (`journal.`), and refuses an entity outside it before it connects, naming the pattern. `mm call` does the same from discovery, and `mm discover` shows each call's target.
+
+The routes then repeat nothing. A route without `Accepts` takes its call's declared target, so the example's `JournalHandlers` write `On(Journal.read) { ... }`.
+
+Patterns combine: any match admits the target. The grammar, shared by `Target` and `Accepts`:
 
 - A pattern is dot-separated segments, each a literal or `*`. `*` matches exactly one segment: `"*.notes"` admits `journal.notes`, not `journal.team.notes`.
 - A **trailing** `.*` matches one or more further segments at any depth. So `"journal.*"` means strict descendants (as in a glob): `journal.notes`, `journal.system`, and anything below them, but not `journal`. Also list `"journal"` when the namespace entity is itself a target.
 - A bare name matches exactly that entity: `Accepts("journal.notes")`.
-- `"*"` / `.all` has no prefix and matches any depth: any non-root entity. This is the default.
+- `"*"` / `.all` has no prefix and matches any depth: any non-root entity. A route whose call declares no target, and that has no `Accepts`, accepts this.
 - `.root` admits root-targeted dispatches. It is the only way to accept them, because root has no ACL. Reserve it for methods with documented tree-wide behavior whose handlers enforce their own authorization (as the builtin `server.schema` does).
 
-The router checks `Accepts` right after the target parses, before any ACL lookup. An unaccepted target gets the same wire error as a denial, so a caller cannot tell "outside this method's targets" from "no access". `Accepts` is routing policy, not contract: never fingerprinted, never served by discovery. Entity-agnostic methods (the builtin `server.entity`, a backup verb for any subtree) keep the default.
+A deployment can narrow a call's target with `Accepts`, the optional second argument of `On`/`Handle`: `On(Journal.read, Accepts("journal.notes")) { ... }` serves one journal of the contract's `"journal.*"`. An `Accepts` may narrow the target, never widen it. Every one of its patterns must fall within one of the target's, and the router checks this when it is built: `Accepts("journal", "journal.*")` on a `"journal.*"` call stops the daemon at startup, because `journal` is outside `"journal.*"`. For a call with no declared target, `Accepts` alone decides. `Accepts` is routing policy, not contract: never fingerprinted, never served by discovery. Entity-agnostic methods (the builtin `server.entity`, a backup verb for any subtree) declare no target and keep the default.
 
-When `Accepts` names **exactly one** concrete entity (one pattern, no wildcards, like `Accepts("journal.notes")`), a request **without an entity** targets it. The client omits `on:` (which defaults to root), or the CLI omits the `<entity>` positional. The server infers the target and runs the usual traversal and target ACL checks on it. Wider patterns, like the example's `"journal.*"`, infer nothing; such a request is denied like any unaccepted target, so omission is never ambiguous. Inference is server-side only: clients never see `Accepts`, and omitting the entity on the wrong daemon just returns a denial.
+The router checks what a route accepts right after the target parses, before any ACL lookup. An unaccepted target gets the same wire error as a denial, so a caller cannot tell "outside this method's targets" from "no access".
+
+When what a route accepts names **exactly one** concrete entity (one pattern, no wildcards, like `Target("journal.notes")` or `Accepts("journal.notes")`), a request **without an entity** targets it. The client omits `on:` (which defaults to root), or the CLI omits the `<entity>` positional. The server infers the target and runs the usual traversal and target ACL checks on it. Wider patterns, like the example's `"journal.*"`, infer nothing; such a request is denied like any unaccepted target, so omission is never ambiguous. A declared sole-entity target lets clients see this too: the generated CLI's help shows the inferred entity, and the positional is optional. An `Accepts` alone stays server-side: omitting the entity on the wrong daemon just returns a denial.
 
 ## 3. Declaring the server as a resource
 
@@ -473,13 +481,13 @@ struct JournalHandlers: RouteGroup {
     let store: JournalStore
 
     @RouterBuilder var routes: [Route] {
-        On(Journal.append, Accepts("journal.*")) { auth, request in
+        On(Journal.append) { auth, request in
             // The store broadcasts the change to every follower of this
             // journal (any connection) as part of the append.
             let count = await store.append(request.line, to: auth.entity)
             return .success(AppendResponse(count: count))
         }
-        On(Journal.read, Accepts("journal.*")) { auth, request in
+        On(Journal.read) { auth, request in
             .success(ReadResponse(lines: await store.read(auth.entity)))
         }
         // follow, import, and sync: §5.
@@ -578,7 +586,7 @@ Server push is an ordinary method with a `ResponseStream`, not a side channel. I
 The example's `journal.follow` handler relays a follower's change events and returns the count as the terminal. A journal can be quiet for arbitrarily long, and a relay parked on a quiet source sees STOP only at its next send. So the handler also watches `sink.stopRequested()` from a structured sibling, which unfollows and ends the relay promptly:
 
 ```swift
-On(Journal.follow, Accepts("journal.*")) { auth, request, sink in
+On(Journal.follow) { auth, request, sink in
     let (token, changes) = store.follow(auth.entity)
     var delivered = 0
     await withTaskGroup(of: Void.self) { watcher in
@@ -608,7 +616,7 @@ Unregistering is idempotent, because both edges may fire. Protect the store's fo
 Client streaming is the reverse. Iterate `elements` to consume request items (consuming grants the client more credit). The end of the sequence *is* the client's graceful END:
 
 ```swift
-On(Journal.import, Accepts("journal.*")) { auth, request, elements in
+On(Journal.import) { auth, request, elements in
     var imported = 0
     for await element in elements {
         _ = await store.append(element.line, to: auth.entity)
@@ -624,7 +632,7 @@ On(Journal.import, Accepts("journal.*")) { auth, request, elements in
 A bidirectional handler does both on one call. The example's `journal.sync` appends each inbound line and echoes the resulting `ChangeEvent` back through the call's own sink:
 
 ```swift
-On(Journal.sync, Accepts("journal.*")) { auth, request, elements, sink in
+On(Journal.sync) { auth, request, elements, sink in
     var synced = 0
     loop: for await element in elements {
         let count = await store.append(element.line, to: auth.entity)

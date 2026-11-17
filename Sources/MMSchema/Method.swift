@@ -10,6 +10,10 @@ public struct Method<Request: Codable & Sendable, Response: Codable & Sendable>:
     public let name: String
     /// The rwx class this verb needs on its target entity.
     public let access: AccessMode
+    /// The entities the call may target, declared by its contract
+    /// (`Target(...)`); nil when the contract declares none, which leaves
+    /// it to what the server accepts.
+    public let target: [EntityPattern]?
     /// Documentation overlaid onto ``signature()`` and served by discovery.
     public let documentation: MethodDocumentation
     /// The constraint check on the request; nil when nothing in it is
@@ -19,11 +23,13 @@ public struct Method<Request: Codable & Sendable, Response: Codable & Sendable>:
     public init(
         name: String,
         access: AccessMode,
+        target: [EntityPattern]? = nil,
         documentation: MethodDocumentation = .init(),
         requestCheck: MMConstraintCheck<Request>? = nil
     ) {
         self.name = name
         self.access = access
+        self.target = target.map(EntityPattern.normalized)
         self.documentation = documentation
         self.requestCheck = requestCheck
     }
@@ -37,7 +43,8 @@ public struct Method<Request: Codable & Sendable, Response: Codable & Sendable>:
                         name: name,
                         access: access,
                         request: request,
-                        response: response
+                        response: response,
+                        target: target
                     )
                 )
             }
@@ -53,7 +60,8 @@ public struct Method<Request: Codable & Sendable, Response: Codable & Sendable>:
                     name: name,
                     access: access,
                     request: request,
-                    response: response
+                    response: response,
+                    target: target
                 )
             }
         }
@@ -113,10 +121,17 @@ public struct MethodDocumentation: Sendable, Hashable {
 /// any combination of the four parts); every optional slot encodes nothing on
 /// the wire when absent (synthesized `encodeIfPresent`) and unknown keys are
 /// skipped on decode — the standard wire-evolution contract. The errors a
-/// call declares sit in the 30s, after both directions.
+/// call declares sit in the 30s, after both directions. The entities a call
+/// declares it targets sit with the method itself, at key 4.
 public struct MethodSignature: Sendable, Hashable, Codable {
     public var name: String
     public var access: AccessMode
+    /// The entity patterns the call declares it targets (`Target(...)`), in
+    /// ``EntityPattern/normalized(_:)`` form, or nil when it declares none:
+    /// then the call targets whatever the server accepts. Contract, not
+    /// documentation: hashed into the fingerprint when declared, and a
+    /// changed target is drift.
+    public var target: [EntityPattern]?
     /// Human-readable documentation of the method, served by discovery. The
     /// five doc slots (keys 2, 11, 13, 21, 23) are never part of the
     /// fingerprint or of compatibility comparisons.
@@ -160,10 +175,12 @@ public struct MethodSignature: Sendable, Hashable, Codable {
         responseDescription: String? = nil,
         requestStreamDescription: String? = nil,
         responseStreamDescription: String? = nil,
-        deprecation: String? = nil
+        deprecation: String? = nil,
+        target: [EntityPattern]? = nil
     ) {
         self.name = name
         self.access = access
+        self.target = target.map(EntityPattern.normalized)
         self.deprecation = deprecation
         self.request = request
         self.response = response
@@ -182,6 +199,7 @@ public struct MethodSignature: Sendable, Hashable, Codable {
         case access = 1
         case description = 2
         case deprecation = 3
+        case target = 4
         case request = 10
         case requestDescription = 11
         case requestStream = 12
@@ -206,7 +224,70 @@ extension MethodSignature {
             response: self.response.strippingDescriptions,
             requestStream: self.requestStream?.strippingDescriptions,
             responseStream: self.responseStream?.strippingDescriptions,
-            errors: self.errors?.strippingDescriptions
+            errors: self.errors?.strippingDescriptions,
+            target: self.target
+        )
+    }
+
+    /// The same signature with `target` declared, or with none for nil.
+    func targeting(_ target: [EntityPattern]?) -> MethodSignature {
+        var targeted = self
+        targeted.target = target.map(EntityPattern.normalized)
+        return targeted
+    }
+}
+
+extension MethodSignature {
+    /// Decodes every key as the synthesized decoder would, except the
+    /// target: one that does not read (a pattern this peer's grammar
+    /// refuses) decodes as absent, a looser contract rather than an
+    /// unreadable one, as with constraints and defaults. The target comes
+    /// back normalized, whatever order the peer sent.
+    public init(from decoder: any Decoder) throws {
+        // Keys in `CodingKeys` order, as the synthesized decoder reads them:
+        // the schema probe records fields in read order.
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let name = try container.decode(String.self, forKey: .name)
+        let access = try container.decode(AccessMode.self, forKey: .access)
+        let description = try container.decodeIfPresent(String.self, forKey: .description)
+        let deprecation = try container.decodeIfPresent(String.self, forKey: .deprecation)
+        let target = (try? container.decodeIfPresent([EntityPattern].self, forKey: .target)) ?? nil
+        let request = try container.decode(TypeSchema.self, forKey: .request)
+        let requestDescription = try container.decodeIfPresent(
+            String.self,
+            forKey: .requestDescription
+        )
+        let requestStream = try container.decodeIfPresent(TypeSchema.self, forKey: .requestStream)
+        let requestStreamDescription = try container.decodeIfPresent(
+            String.self,
+            forKey: .requestStreamDescription
+        )
+        let response = try container.decode(TypeSchema.self, forKey: .response)
+        let responseDescription = try container.decodeIfPresent(
+            String.self,
+            forKey: .responseDescription
+        )
+        let responseStream = try container.decodeIfPresent(TypeSchema.self, forKey: .responseStream)
+        let responseStreamDescription = try container.decodeIfPresent(
+            String.self,
+            forKey: .responseStreamDescription
+        )
+        let errors = try container.decodeIfPresent(TypeSchema.self, forKey: .errors)
+        self.init(
+            name: name,
+            access: access,
+            request: request,
+            response: response,
+            requestStream: requestStream,
+            responseStream: responseStream,
+            errors: errors,
+            description: description,
+            requestDescription: requestDescription,
+            responseDescription: responseDescription,
+            requestStreamDescription: requestStreamDescription,
+            responseStreamDescription: responseStreamDescription,
+            deprecation: deprecation,
+            target: target
         )
     }
 }
@@ -216,12 +297,15 @@ extension MethodSignature {
 public struct AnyMethod: Sendable {
     public let name: String
     public let access: AccessMode
+    /// The entities the call declares it targets; nil when it declares none.
+    public let target: [EntityPattern]?
     private let _signature: @Sendable () -> Result<MethodSignature, SchemaError>
     private let _probedSignature: @Sendable () -> Result<MethodSignature, SchemaError>
 
     public init<Request, Response>(_ method: Method<Request, Response>) {
         self.name = method.name
         self.access = method.access
+        self.target = method.target
         self._signature = { method.signature() }
         self._probedSignature = { method.probedSignature() }
     }
@@ -232,11 +316,13 @@ public struct AnyMethod: Sendable {
     init(
         name: String,
         access: AccessMode,
+        target: [EntityPattern]?,
         signature: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
         probedSignature: @escaping @Sendable () -> Result<MethodSignature, SchemaError>
     ) {
         self.name = name
         self.access = access
+        self.target = target
         self._signature = signature
         self._probedSignature = probedSignature
     }

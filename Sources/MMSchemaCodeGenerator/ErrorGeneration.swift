@@ -797,7 +797,9 @@ func exitCodeConformances(for contract: ParsedContract, enclosingType: String) -
 /// generated type of the same name in the namespace cannot shadow them.
 private let dslCallees: Set<String> = [
     "Access", "Alias", "CLI", "Call", "Case", "Enum", "Error", "Errors", "Field", "FieldGroup",
-    "Fields", "Request", "RequestStream", "Reserved", "Response", "ResponseStream", "Type", "Union",
+    "Fields", "Request", "RequestStream", "Reserved", "Response", "ResponseStream", "Target",
+    "Type",
+    "Union",
 ]
 
 /// The statements' source with every DSL callee written as

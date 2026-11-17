@@ -21,10 +21,15 @@
 
     /// The set as the wire carries it, with no order and no descriptions:
     /// each signature's and each definition's MessagePack form with its
-    /// descriptions stripped, sorted. Two sets with the same form describe
-    /// the same schema, byte for byte in every name; any other two differ.
+    /// descriptions stripped and its target's patterns once each, in order,
+    /// sorted. Two sets with the same form describe the same schema, byte
+    /// for byte in every name; any other two differ.
     func wireForm(_ set: SchemaSet) throws -> [[[UInt8]]] {
-        let signatures = try set.signatures.map { try packedBytes($0.strippingDescriptions) }
+        let signatures = try set.signatures.map {
+            var stripped = $0.strippingDescriptions
+            stripped.target = stripped.target.map(EntityPattern.normalized)
+            return try packedBytes(stripped)
+        }
         let types = try set.types.map { try packedBytes($0.strippingDescriptions) }
         return [
             signatures.sorted { $0.lexicographicallyPrecedes($1) },
@@ -85,7 +90,8 @@
             responseDescription: text,
             requestStreamDescription: text,
             responseStreamDescription: text,
-            deprecation: text
+            deprecation: text,
+            target: signature.target
         )
     }
 
@@ -217,6 +223,24 @@
         case definitionDropped = "a definition dropped"
 
         var needsDefinition: Bool { self == .definitionRenamed || self == .definitionDropped }
+    }
+
+    /// One change to a signature's declared target.
+    enum TargetChange: String, CaseIterable, Sendable {
+        case declared = "a target declared"
+        case undeclared = "a target undeclared"
+        case patternAdded = "a target pattern added"
+        case patternDropped = "a target pattern dropped"
+        case patternReplaced = "a target pattern replaced"
+
+        /// Whether the change can be made to a signature with this target.
+        func applies(to target: [EntityPattern]?) -> Bool {
+            switch self {
+                case .declared: target == nil
+                case .undeclared, .patternAdded: target != nil
+                case .patternDropped, .patternReplaced: target?.isEmpty == false
+            }
+        }
     }
 
     /// Where a schema sits in a set.
@@ -416,6 +440,14 @@
         /// A call's declared errors: a union, as `Errors` blocks resolve to.
         static let errors: Gen<TypeSchema> = unions(schemas)
 
+        /// A call's declared target, half the time: up to three patterns,
+        /// or none, which the wire carries though no contract declares it.
+        static let targetPatterns: Gen<[EntityPattern]> = .array(
+            of: EntityPatternGenerators.patterns,
+            count: 0...3
+        )
+        static let targets: Gen<[EntityPattern]?> = .optional(targetPatterns)
+
         static let signatures: Gen<MethodSignature> = Gen { tc in
             MethodSignature(
                 name: try tc.draw(names),
@@ -430,7 +462,8 @@
                 responseDescription: try tc.draw(descriptions),
                 requestStreamDescription: try tc.draw(descriptions),
                 responseStreamDescription: try tc.draw(descriptions),
-                deprecation: try tc.draw(descriptions)
+                deprecation: try tc.draw(descriptions),
+                target: try tc.draw(targets)
             )
         }
 
@@ -462,11 +495,20 @@
         }
 
         /// The set reordered, with every description set to one drawn text
-        /// or removed.
+        /// or removed, and each target's patterns reordered, some doubled.
         static func restated(_ set: SchemaSet, _ tc: TestCase) throws -> SchemaSet {
             let text = try tc.draw(descriptions)
+            let signatures = try set.signatures.map { signature in
+                var described = describing(signature, text)
+                if let target = signature.target {
+                    let doubled = try target.filter { _ in try tc.draw(.bool(probability: 0.3)) }
+                    // Set in place, past the initializer's normalizing.
+                    described.target = try shuffled(target + doubled, tc)
+                }
+                return described
+            }
             return SchemaSet(
-                signatures: try shuffled(set.signatures.map { describing($0, text) }, tc),
+                signatures: try shuffled(signatures, tc),
                 types: try shuffled(
                     set.types.map {
                         TypeDefinition(
@@ -630,6 +672,45 @@
             return (set, change.rawValue)
         }
 
+        /// The set with one change to one signature's target. Every kind of
+        /// change the set allows is drawn as often as the others, and made
+        /// to a signature drawn from those it applies to. Each change is set
+        /// in place, past the initializer's normalizing.
+        static func retargeted(_ set: SchemaSet, _ tc: TestCase) throws -> (SchemaSet, String) {
+            var set = set
+            let changes = TargetChange.allCases.filter { change in
+                set.signatures.contains { change.applies(to: $0.target) }
+            }
+            let change = try tc.draw(Gen<TargetChange>.element(of: changes))
+            let candidates = set.signatures.indices.filter {
+                change.applies(to: set.signatures[$0].target)
+            }
+            let index = candidates[try pick(candidates.count, tc)]
+            var target = set.signatures[index].target ?? []
+            switch change {
+                case .declared:
+                    set.signatures[index].target = try tc.draw(targetPatterns)
+                    return (set, change.rawValue)
+                case .undeclared:
+                    set.signatures[index].target = nil
+                    return (set, change.rawValue)
+                case .patternAdded:
+                    target.insert(
+                        try tc.draw(EntityPatternGenerators.patterns),
+                        at: try tc.draw(Gen<Int>.int(in: 0...target.count))
+                    )
+                case .patternDropped:
+                    target.remove(at: try pick(target.count, tc))
+                case .patternReplaced:
+                    // Often a near relative: a literal widened, a segment
+                    // more, trailing depth toggled.
+                    let at = try pick(target.count, tc)
+                    target[at] = try EntityPatternGenerators.related(target[at], tc).pattern
+            }
+            set.signatures[index].target = target
+            return (set, change.rawValue)
+        }
+
         static func pick(_ count: Int, _ tc: TestCase) throws -> Int {
             try tc.draw(Gen<Int>.int(in: 0...(count - 1)))
         }
@@ -644,21 +725,22 @@
 
     @Suite("SchemaFingerprint properties", .hegel, .offTheCooperativePool)
     struct SchemaFingerprintProperties {
-        /// Reordering the signatures and the type definitions, and
-        /// rewriting or removing every description and deprecation, leaves
-        /// the fingerprint as it was, duplicate method names and field
-        /// defaults included.
+        /// Reordering the signatures and the type definitions, rewriting or
+        /// removing every description and deprecation, and reordering or
+        /// doubling a target's patterns leaves the fingerprint as it was,
+        /// duplicate method names and field defaults included.
         ///
         /// Mutation check: dropping the tie-break on the full encoding, so
         /// two methods of one name stay in the order they came in, hashing
-        /// an enum case's description, or hashing a field's deprecation,
-        /// fails here.
+        /// an enum case's description, hashing a field's deprecation, or
+        /// hashing a target's patterns in the order they came in, fails
+        /// here.
         @Test
         func fingerprintIgnoresOrderAndDescriptions() throws {
             try property(
                 reachingAfter: [
                     "duplicate method names": 1_000, "a field default": 1_000,
-                    "a deprecation": 1_000,
+                    "a deprecation": 1_000, "a target of several patterns": 1_000,
                 ]
             ) { tc in
                 let set = try #draw(FingerprintGenerators.sets(signatureCount: 0...6), from: tc)
@@ -683,6 +765,9 @@
                     || set.types.contains(where: { $0.deprecation != nil })
                 {
                     try tc.event("a deprecation")
+                }
+                if set.signatures.contains(where: { ($0.target?.count ?? 0) >= 2 }) {
+                    try tc.event("a target of several patterns")
                 }
                 #expect(restated.fingerprint == set.fingerprint)
             }
@@ -745,6 +830,33 @@
             ) { tc in
                 let set = try #draw(FingerprintGenerators.sets(signatureCount: 1...6), from: tc)
                 let (changed, label) = try FingerprintGenerators.changed(set, tc)
+                let restated = try FingerprintGenerators.restated(changed, tc)
+                let same = try wireForm(set) == wireForm(restated)
+                try tc.event(label)
+                try tc.event(same ? "nothing changed on the wire" : "the wire form changed")
+                #expect((restated.fingerprint == set.fingerprint) == same, "\(label)")
+            }
+        }
+
+        /// Two sets fingerprint the same exactly when their wire forms, with
+        /// no order and no descriptions, are the same: a call's target
+        /// declared or undeclared, or a pattern added to it, dropped from
+        /// it or replaced in it, changes the fingerprint unless it changes
+        /// nothing on the wire, as a pattern doubled or a target reordered
+        /// does not.
+        ///
+        /// Mutation check: hashing a target's pattern count but not its
+        /// patterns, or hashing an empty target as no target, fails here.
+        @Test
+        func fingerprintSeesEveryTargetChange() throws {
+            try property(
+                reaching: ["the wire form changed"],
+                reachingAfter: Dictionary(
+                    uniqueKeysWithValues: TargetChange.allCases.map { ($0.rawValue, 1_000) }
+                ).merging(["nothing changed on the wire": 1_000]) { $1 }
+            ) { tc in
+                let set = try #draw(FingerprintGenerators.sets(signatureCount: 1...6), from: tc)
+                let (changed, label) = try FingerprintGenerators.retargeted(set, tc)
                 let restated = try FingerprintGenerators.restated(changed, tc)
                 let same = try wireForm(set) == wireForm(restated)
                 try tc.event(label)

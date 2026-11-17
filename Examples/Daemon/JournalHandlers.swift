@@ -13,7 +13,7 @@ struct JournalHandlers: RouteGroup {
     let store: JournalStore
 
     @RouterBuilder var routes: [Route] {
-        On(Journal.append, Accepts("journal.*")) { auth, request in
+        On(Journal.append) { auth, request in
             if let refusal = JournalStore.refusal(for: auth.entity) {
                 return .failure(.init(refusal))
             }
@@ -28,12 +28,12 @@ struct JournalHandlers: RouteGroup {
                 .map { AppendResponse(count: $0) }
                 .mapError(Journal.AppendError.full)
         }
-        // `Accepts("journal.*")` (on every route in this group): grants are
-        // per-entity-per-mode, never per-method, so without it any entity
-        // the ACL admits for writing could become a "journal". The pattern
-        // keeps journal verbs on journal nouns — an out-of-scope target is
-        // denied before the ACL is even consulted.
-        On(Journal.read, Accepts("journal.*")) { auth, request in
+        // The contract's `Target("journal.*")` (every route in this group
+        // takes it): grants are per-entity-per-mode, never per-method, so
+        // without it any entity the ACL admits for writing could become a
+        // "journal". The pattern keeps journal verbs on journal nouns — an
+        // out-of-scope target is denied before the ACL is even consulted.
+        On(Journal.read) { auth, request in
             if let refusal = JournalStore.refusal(for: auth.entity) {
                 return .failure(.init(refusal))
             }
@@ -49,7 +49,7 @@ struct JournalHandlers: RouteGroup {
         // idempotent (both edges may fire); if this task dies before either,
         // the stream's termination handler unregisters instead (see
         // FollowerHub).
-        On(Journal.follow, Accepts("journal.*")) { auth, request, sink in
+        On(Journal.follow) { auth, request, sink in
             if let refusal = JournalStore.refusal(for: auth.entity) {
                 return .failure(.init(refusal))
             }
@@ -79,7 +79,7 @@ struct JournalHandlers: RouteGroup {
         // broadcasts to followers), and answer with how many this call
         // imported plus the journal's total. The `elements` sequence ending
         // is the client's graceful END.
-        On(Journal.import, Accepts("journal.*")) { auth, request, elements in
+        On(Journal.import) { auth, request, elements in
             if let refusal = JournalStore.refusal(for: auth.entity) {
                 return .failure(.init(refusal))
             }
@@ -97,7 +97,7 @@ struct JournalHandlers: RouteGroup {
         // followers) and echo the resulting ChangeEvent straight back through
         // this call's own credit-gated response sink. The request stream
         // ending is the client's END; the shared terminal totals what landed.
-        On(Journal.sync, Accepts("journal.*")) { auth, request, elements, sink in
+        On(Journal.sync) { auth, request, elements, sink in
             if let refusal = JournalStore.refusal(for: auth.entity) {
                 return .failure(.init(refusal))
             }

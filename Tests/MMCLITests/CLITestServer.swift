@@ -81,6 +81,13 @@ struct CLIStreamSummary: Codable, Hashable, Sendable {
 
 enum CLITestMethods {
     static let echo = Method<CLIEchoRequest, CLIEchoResponse>(name: "echo.run", access: .write)
+    /// Echoes, on the one entity its declared target names. A namespace of
+    /// its own, so `echo`'s contract stays the one call.
+    static let peek = Method<CLIEchoRequest, CLIEchoResponse>(
+        name: "peek.run",
+        access: .read,
+        target: ["peek"]
+    )
     /// Streams `count` items (values `0..<count`), then a success summary.
     static let follow = ServerStreamMethod<CLIFollowRequest, CLIStreamItem, CLIStreamSummary>(
         name: "box.follow", access: .read
@@ -112,15 +119,16 @@ func cliTestEntity(_ raw: String) -> EntityName {
     }
 }
 
-/// The ACL world: `box` and `echo` fully ours; `locked` owned by us with no
-/// bits at all — the denial fixture (first matching class wins, and the
-/// owner class grants nothing).
+/// The ACL world: `box`, `echo` and `peek` fully ours; `locked` owned by us
+/// with no bits at all — the denial fixture (first matching class wins,
+/// and the owner class grants nothing).
 private func cliTestACLs() -> [EntityName: EntityACL] {
     let uid = getuid()
     let gid = getgid()
     return [
         cliTestEntity("box"): EntityACL(owner: uid, group: gid, mode: 0o700),
         cliTestEntity("echo"): EntityACL(owner: uid, group: gid, mode: 0o700),
+        cliTestEntity("peek"): EntityACL(owner: uid, group: gid, mode: 0o700),
         cliTestEntity("locked"): EntityACL(owner: uid, group: gid, mode: 0o000),
         // The builtins' method-name prefixes: x here makes server.schema and
         // server.entity visible in this peer's filtered discovery response.
@@ -139,6 +147,9 @@ private func makeCLITestService(socketPath: String) -> ServerRuntime {
         logger: logger
     ) {
         Handle(CLITestMethods.echo) { request, _ in
+            .success(CLIEchoResponse(value: request.value, note: request.note))
+        }
+        Handle(CLITestMethods.peek) { request, _ in
             .success(CLIEchoResponse(value: request.value, note: request.note))
         }
         Handle(CLITestMethods.follow) { request, sink, _ in

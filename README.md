@@ -286,7 +286,7 @@ $ mm journal add journal.system --line "nope"
 denied: journal.append on journal.system            # exit code 77
 ```
 
-**What `journal.notes` is, and why it is not in the schema.** Every call applies a verb to a noun. The schema declares verbs and payloads: `journal.append` needs `-w-` on its target and carries `{line}`. The nouns are **entities**: the runtime tree the daemon manages, declared server-side with ACLs (`Entity("journal") { Entity("notes"); Entity("system", owner: 0, mode: 0o700) }`, see [Authorization model](#authorization-model)). Compare syscalls and file paths: `/etc/passwd` is not in the syscall table, but `cat` needs a path. Adding or removing entities does not change the schema or the fingerprint. The same verb can be denied on another entity, as `journal.system` shows. In `mm journal add journal.notes`, the first `journal` is the command group (the method namespace). The entity path uses the same prefix only by convention (discovery filters methods by their prefix entity).
+**What `journal.notes` is, and why it is not in the schema.** Every call applies a verb to a noun. The schema declares verbs and payloads: `journal.append` needs `-w-` on its target and carries `{line}`. The nouns are **entities**: the runtime tree the daemon manages, declared server-side with ACLs (`Entity("journal") { Entity("notes"); Entity("system", owner: 0, mode: 0o700) }`, see [Authorization model](#authorization-model)). Compare syscalls and file paths: `/etc/passwd` is not in the syscall table, but `cat` needs a path. Adding or removing entities does not change the schema or the fingerprint. A contract can still say which nouns a verb takes, as a pattern, never as the entities themselves: the example's `Target("journal.*")` (see [Authorization model](#authorization-model)) keeps journal verbs on journals, and the CLI refuses an entity like `notes` before connecting, naming `journal.*`. The same verb can be denied on another entity, as `journal.system` shows. In `mm journal add journal.notes`, the first `journal` is the command group (the method namespace). The entity path uses the same prefix only by convention (discovery filters methods by their prefix entity).
 
 Every command takes the entity as an optional positional, after any required or optional single-value positional fields (ArgumentParser fills positionals greedily, so `retry <id>` binds the id). Request fields default to `--field-name` options. Positional style is opt-in: `Field("line", .string, cli: .argument)` gives `mm journal add "hello" journal.notes`, as in the runnable example in `Examples/`.
 
@@ -505,14 +505,16 @@ Entities are dotted paths (`box.item`) in a tree. Each has an `EntityACL`, like 
 - Peer identity comes from kernel credentials on Unix sockets. In v1, TCP peers are `anonymous` and match only the _other_ class. uid 0 is not special.
 - **The first matching class wins.** If the owner matches, only owner bits count, even if group or other bits grant more.
 - Dispatch needs `.execute` on **every ancestor prefix** of the target, outermost first (like directory x bits). Then it needs the method's access class (r, w, or x) on the target.
-- An entity with no ACL record gives `permissionDenied`, so existence is never revealed. Calls on the root are denied unless the route accepts the `.root` pattern.
-- Grants are per entity and mode, never per method (a file's read bit applies to every program). When one tree serves several method families, declare what each route accepts:
-  - `On(Journal.read, Accepts("journal.*")) { ... }`: a subtree.
-  - `Accepts("system.log", "system.audit")`: exact entities.
-  - `Accepts("tenants.*.journal.*")`: `*` matches exactly one segment; a trailing `.*` matches any depth.
-  - `Accepts(.root, .all)`: root plus everything, for tree-wide methods like discovery.
+- An entity with no ACL record gives `permissionDenied`, so existence is never revealed. Calls on the root are denied unless the call's target, or the route, accepts the `.root` pattern.
+- Grants are per entity and mode, never per method (a file's read bit applies to every program). When one tree serves several method families, declare what each call targets with `Target` in its contract, once for a namespace or per call (a call's own replaces the namespace's):
+  - `Target("journal.*")`: a subtree.
+  - `Target("system.log", "system.audit")`: exact entities.
+  - `Target("tenants.*.journal.*")`: `*` matches exactly one segment; a trailing `.*` matches any depth.
+  - `Target(.root, .all)`: root plus everything, for tree-wide methods like discovery.
 
-  Other targets are denied before the ACL check, with the usual denial. A route naming one concrete entity also accepts calls without an entity (no `on:` in the client, no `<entity>` in the CLI). The server uses that entity and authorizes it normally.
+  A target is contract: discovery serves it, the fingerprint hashes it, and a changed target is drift. The generated CLI shows it in help, completes its literal prefix, and refuses an entity outside it before connecting. A route without `Accepts` takes its call's target. `On(Journal.read, Accepts("journal.notes")) { ... }` narrows it for one deployment, never widens it: an `Accepts` outside the target stops the daemon at startup. With no target, `Accepts` alone decides, in the same patterns.
+
+  Other targets are denied before the ACL check, with the usual denial. A target naming one concrete entity also accepts calls without an entity (no `on:` in the client, no `<entity>` in the CLI). The server uses that entity and authorizes it normally.
 
 The target entity is in the open envelope, so no params byte is read until every check passes.
 

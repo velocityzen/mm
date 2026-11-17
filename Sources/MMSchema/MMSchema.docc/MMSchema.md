@@ -79,6 +79,9 @@ Authorization works like a filesystem:
 - ``EntityName`` is a validated dotted path.
 - ``EntityACL`` holds an owner uid, a group gid, and 9 rwx/ugo mode bits. The first matching class wins.
 - ``AccessMode`` is the rwx option set a method declares.
+- ``EntityPattern`` matches entities: `"system.log"` exactly, `"journal.*"` the strict descendants of `journal`, `"tenants.*.journal"` with `*` as exactly one segment, ``EntityPattern/all`` every entity but root, ``EntityPattern/root`` root alone.
+
+A contract declares the entities its calls target with `Target(...)`, in that vocabulary: at the top of a schema for every call, or in a `Call` to replace the namespace's (``Target(_:)``). The target is contract. ``MethodSignature/target`` serves it, the fingerprint covers it, and a server route takes it as what it accepts. `#schema` checks each pattern at compile time.
 
 ``PeerIdentity`` is intentionally not Codable. It comes only from the kernel and never crosses the wire.
 
@@ -234,6 +237,9 @@ Every server also serves the ``Builtins``:
 
 - ``PeerIdentity``
 - ``EntityName``
+- ``EntityPattern``
+- ``Target(_:)``
+- ``TargetDeclaration``
 
 ### Fingerprint
 
@@ -243,6 +249,7 @@ Every server also serves the ``Builtins``:
 
 - ``SchemaError``
 - ``InvalidEntityNameReason``
+- ``InvalidEntityPatternReason``
 - ``MMDateTimeParseFailure``
 - ``MMVPTSDecodeFailure``
 - ``MMDurationDecodeFailure``

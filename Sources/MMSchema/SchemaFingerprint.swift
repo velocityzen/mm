@@ -33,7 +33,10 @@
 ///   property, pinned by the golden test); the distinct tags keep the two
 ///   slots asymmetric. Declared errors follow the same rule: `u8` tag 4 +
 ///   the errors' union schema, emitted only when the call declares any, so
-///   every signature without errors keeps its earlier value.
+///   every signature without errors keeps its earlier value. A declared
+///   target follows them by the same rule: `u8` tag 6, `u32 LE` pattern
+///   count, then each pattern's text as a string, in normalized order, so
+///   every signature without a target keeps its earlier value.
 /// - schema: `u8` case tag (the same tag values as the Codable wire encoding:
 ///   0 bool … 16 union, 255 unknown), then payload —
 ///   `optional`/`array`: child schema; `map`: key then value schema;
@@ -142,6 +145,14 @@ public enum SchemaFingerprint {
         if let errors = signature.errors {
             bytes.append(4)
             append(errors, into: &bytes)
+        }
+        if let target = signature.target {
+            bytes.append(6)
+            let patterns = EntityPattern.normalized(target)
+            appendUInt32(UInt32(patterns.count), into: &bytes)
+            for pattern in patterns {
+                append(pattern.text, into: &bytes)
+            }
         }
     }
 

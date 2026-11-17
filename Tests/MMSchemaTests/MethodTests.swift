@@ -14,6 +14,7 @@ struct MethodTests {
         .init(key: 1, name: "access", type: .uint),
         .init(key: 2, name: "description", type: .optional(.string)),
         .init(key: 3, name: "deprecation", type: .optional(.string)),
+        .init(key: 4, name: "target", type: .optional(.array(.string))),
         .init(key: 10, name: "request", type: TypeSchema.schema),
         .init(key: 11, name: "requestDescription", type: .optional(.string)),
         .init(key: 12, name: "requestStream", type: .optional(TypeSchema.schema)),

@@ -44,6 +44,13 @@ import NIOCore
 /// response is filtered by per-method traversal rights); `server.entity` does
 /// not (root carries no ACL to report, so a root stat is denied like any
 /// absent record).
+///
+/// ## Declared targets
+///
+/// A route without `Accepts` takes its call's declared `Target(...)`. A
+/// route with both must accept only entities within the target: init checks
+/// every `Accepts` pattern falls within a target pattern and refuses to
+/// start otherwise, as it refuses unbound descriptors.
 public struct Router: Sendable {
     /// `SchemaFingerprint.compute` over **all** registered signatures and
     /// type definitions, memoized at init. This is the hello-preamble
@@ -88,13 +95,14 @@ public struct Router: Sendable {
     ///   - routes: The application's routes, built with `Handle`.
     ///
     /// Preconditions (programmer error, daemon startup): duplicate method
-    /// names; unbound namespace descriptors; routes under a namespace prefix
-    /// missing from its `all` list; a method name whose namespace prefix is
-    /// not a valid `EntityName`; a request/response type the schema probe
-    /// cannot walk; duplicate type-definition names; a `.reference` anywhere
-    /// in the registered schemas that no registered definition resolves
-    /// (names are nominal — the table must be complete at startup, not at
-    /// first decode).
+    /// names; a route whose `Accepts` holds a pattern outside its call's
+    /// declared target; unbound namespace descriptors; routes under a
+    /// namespace prefix missing from its `all` list; a method name whose
+    /// namespace prefix is not a valid `EntityName`; a request/response type
+    /// the schema probe cannot walk; duplicate type-definition names; a
+    /// `.reference` anywhere in the registered schemas that no registered
+    /// definition resolves (names are nominal — the table must be complete
+    /// at startup, not at first decode).
     public init(
         namespaces: [any MethodNamespace.Type] = [],
         sharedTypes: [any TypeNamespace.Type] = [],
@@ -111,6 +119,7 @@ public struct Router: Sendable {
         if let duplicate = firstDuplicate(names) {
             preconditionFailure("Router: duplicate route registered for method '\(duplicate)'")
         }
+        Self.requireAcceptsWithinTargets(applicationRoutes)
 
         let (types, typesByName) = Self.assembleTypeTable(
             namespaces: namespaces,
@@ -160,6 +169,22 @@ public struct Router: Sendable {
     }
 
     // MARK: - Boot-validation steps
+
+    /// A route's own `Accepts` must fall within its call's declared target:
+    /// a deployment may narrow the contract's target, never widen it.
+    private static func requireAcceptsWithinTargets(_ routes: [Route]) {
+        for route in routes {
+            guard let outside = route.patternOutsideTarget, let target = route.target else {
+                continue
+            }
+            preconditionFailure(
+                """
+                Router: '\(route.name)' accepts \(outside), outside its declared target \
+                \(EntityPattern.listed(target)) — an Accepts may narrow a call's target, never widen it
+                """
+            )
+        }
+    }
 
     /// The nominal type table: definitions from every declared namespace plus
     /// the shared containers, sorted by name, with a by-name index. Duplicate

@@ -112,4 +112,38 @@ public enum MMCLIFailure {
                 throw ValidationError("invalid entity '\(raw)': \(error)")
         }
     }
+
+    /// The entity a call with a declared target targets, checked before
+    /// connecting. An omitted or empty argument means the target's one
+    /// entity when it names exactly one, as the server infers it, else root.
+    /// An entity the target does not admit, root included, is refused with
+    /// a message naming the target: the server would deny it.
+    public static func entity(
+        _ argument: String?,
+        method: String,
+        target: [EntityPattern]
+    ) throws -> (argument: String, entity: EntityName) {
+        let parsed = try entity(argument ?? "")
+        // The server reads the target as its contract states it, each
+        // pattern once, so a doubled pattern still names one entity.
+        let sole = EntityPattern.soleEntity(of: EntityPattern.normalized(target))
+        let name = parsed.isRoot ? (sole ?? parsed) : parsed
+        if let refusal = targetRefusal(name, method: method, target: target) {
+            throw ValidationError(refusal)
+        }
+        return (name.rawValue, name)
+    }
+
+    /// Why the declared target refuses `entity`, or nil when it admits it.
+    static func targetRefusal(
+        _ entity: EntityName,
+        method: String,
+        target: [EntityPattern]
+    ) -> String? {
+        guard !EntityPattern.admits(target, entity) else { return nil }
+        let listed = EntityPattern.listed(target)
+        return entity.isRoot
+            ? "\(method) needs a target entity within \(listed)"
+            : "entity '\(entity.rawValue)' is outside \(method)'s target \(listed)"
+    }
 }

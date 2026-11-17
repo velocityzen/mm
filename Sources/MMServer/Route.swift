@@ -51,11 +51,17 @@ public struct Route: Sendable {
     public let name: String
     /// The rwx class required on the target entity, from the descriptor.
     public let access: AccessMode
-    /// What targets this route accepts — see ``Accepts``. The default,
-    /// `Accepts(.all)`, is any non-root entity the ACL admits; root always
-    /// requires the explicit `.root` pattern because it carries no ACL to
-    /// authorize against.
+    /// The entities the call's contract declares it targets; nil when the
+    /// contract declares none.
+    public let target: [EntityPattern]?
+    /// What targets this route accepts, see ``Accepts``: the route's own
+    /// `Accepts`, else the declared ``target``, else `Accepts(.all)`, any
+    /// non-root entity the ACL admits. Root always requires the explicit
+    /// `.root` pattern because it carries no ACL to authorize against.
     public let accepts: Accepts
+    /// The route's own `Accepts`, when it declares one: the router checks at
+    /// boot that it falls within the declared ``target``.
+    let explicitAccepts: Accepts?
 
     /// Probes the descriptor's request/response types lazily; memoized per
     /// type by the schema probe cache.
@@ -75,47 +81,77 @@ public struct Route: Sendable {
         if case .stream(let handler) = self.kind { return handler }
         return nil
     }
+
+    init(
+        name: String,
+        access: AccessMode,
+        target: [EntityPattern]?,
+        accepts: Accepts?,
+        signatureThunk: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
+        kind: Kind
+    ) {
+        self.name = name
+        self.access = access
+        self.target = target
+        self.explicitAccepts = accepts
+        self.accepts = accepts ?? target.map { Accepts(patterns: $0) } ?? Accepts(.all)
+        self.signatureThunk = signatureThunk
+        self.kind = kind
+    }
+
+    /// The first pattern of the route's own `Accepts` outside its declared
+    /// target, or nil when the route declares no `Accepts`, its call
+    /// declares no target, or every pattern falls within the target.
+    var patternOutsideTarget: EntityPattern? {
+        guard let explicitAccepts, let target else { return nil }
+        return EntityPattern.firstOutside(explicitAccepts.patterns, target)
+    }
 }
 
-/// What targets a route accepts — one declarative vocabulary for both the
+/// What targets a route accepts: one declarative vocabulary for both the
 /// root opt-in and entity scoping, passed as the second argument of `On` /
-/// `Handle`. The router checks it immediately after the target parses —
-/// **before any ACL lookup** — and answers an unaccepted target with the
+/// `Handle`. The router checks it immediately after the target parses,
+/// **before any ACL lookup**, and answers an unaccepted target with the
 /// same wire error as an authorization denial, so a caller cannot
 /// distinguish "outside this method's world" from "no access", and the ACL
 /// provider is never consulted for it.
 ///
-/// Patterns are variadic; a target is accepted when **any** pattern admits
-/// it:
+/// Patterns are ``EntityPattern``s, variadic; a target is accepted when
+/// **any** pattern admits it:
 ///
-/// - `Accepts(.all)` or `Accepts("*")` — any entity (the default; root still
-///   excluded).
-/// - `Accepts("journal.*")` — strict descendants of `journal`, at any depth.
-///   Glob discipline: the prefix entity itself is NOT included — list it
+/// - `Accepts(.all)` or `Accepts("*")`: any entity, root excluded.
+/// - `Accepts("journal.*")`: strict descendants of `journal`, at any depth.
+///   Glob discipline: the prefix entity itself is NOT included; list it
 ///   explicitly (`Accepts("journal", "journal.*")`) when the namespace
 ///   entity is also a valid target.
-/// - `Accepts("tenants.*.journal")` — a `*` **segment** matches exactly one
+/// - `Accepts("tenants.*.journal")`: a `*` **segment** matches exactly one
 ///   segment: `tenants.acme.journal` yes, `tenants.a.b.journal` no. Only a
 ///   whole segment may be a wildcard (`"jour*"` is invalid), and segment
-///   wildcards compose with the trailing form —
+///   wildcards compose with the trailing form:
 ///   `"tenants.*.journal.*"` is any tenant's journal subtree.
-/// - `Accepts("system.log", "system.audit")` — exactly these entities.
-/// - `Accepts(.root)` — `EntityName.root`. Root carries no ACL, so nothing
+/// - `Accepts("system.log", "system.audit")`: exactly these entities.
+/// - `Accepts(.root)`: `EntityName.root`. Root carries no ACL, so nothing
 ///   else gates a root-targeted dispatch: accept it only for methods with
 ///   documented tree-wide semantics whose handlers enforce their own
 ///   authorization (the builtin `server.schema` does, by filtering its
 ///   response by traversal rights). Combine when the route serves both:
 ///   `Accepts(.root, .all)`.
 ///
-/// One grammar rule underneath: a pattern is dot-separated segments, each a
-/// literal or `*` (exactly one segment); a **trailing** `.*` means one or
-/// more further segments (any depth). Bare `"*"` is that rule's degenerate
-/// case — no prefix, any depth — which is why it means "everything".
+/// ## The declared target
+///
+/// A call's contract may declare the entities it targets with `Target(...)`
+/// in the same vocabulary. Then the target is contract: discovery serves
+/// it, the fingerprint hashes it, and clients check it before they call.
+/// A route without `Accepts` takes its call's declared target, and with
+/// neither a route accepts `.all`. An explicit `Accepts` narrows the
+/// declared target and must fall within it: every pattern within one of
+/// the target's, which the router checks at boot, refusing to start
+/// otherwise. A deployment may narrow a target, never widen it.
 ///
 /// ## Entity inference
 ///
-/// A vocabulary that names **exactly one concrete entity** — one pattern,
-/// all-literal, no trailing depth (`Accepts("system.log")`) — additionally
+/// A vocabulary that names **exactly one concrete entity** (one pattern,
+/// all literal, no trailing depth: `Accepts("system.log")`) additionally
 /// lets callers omit the target: an entity-less request (the wire's root
 /// target, which such a route could never otherwise accept) is inferred to
 /// mean that entity, and traversal plus the target ACL check run on the
@@ -124,161 +160,42 @@ public struct Route: Sendable {
 /// target, so omission never becomes ambiguous.
 ///
 /// Why this exists: ACL grants are per-entity-per-mode, never per-method
-/// (Unix discipline — the read bit on a file gates every program that opens
+/// (Unix discipline: the read bit on a file gates every program that opens
 /// it). In a daemon serving several method families over one entity tree,
 /// `Accepts` keeps a family's verbs on its own nouns even when the ACL would
-/// admit the peer. It is routing policy, not contract: never fingerprinted,
-/// never served by discovery.
+/// admit the peer. `Accepts` itself is routing policy: what the contract
+/// promises is the declared target, never a route's narrowing of it.
 public struct Accepts: Sendable {
-    /// One target pattern; string literals use the grammar in ``Accepts``.
-    /// An invalid pattern is a programmer error caught at construction
-    /// (server boot), not at dispatch.
-    public struct Pattern: Sendable, ExpressibleByStringLiteral {
-        enum Segment: Sendable, Equatable {
-            /// Matches this segment text exactly.
-            case literal(String)
-            /// `*` — matches exactly one segment, whatever its text.
-            case anyOne
-        }
+    /// One target pattern; string literals use the grammar on
+    /// ``EntityPattern``. An invalid pattern is a programmer error caught at
+    /// construction (server boot), not at dispatch.
+    public typealias Pattern = EntityPattern
 
-        enum Kind: Sendable {
-            case root
-            /// The one grammar rule: match `segments` position-for-position;
-            /// with `descendants`, one or more further segments must follow
-            /// (so `[]` + descendants = any non-root entity).
-            case entities(segments: [Segment], descendants: Bool)
-        }
-
-        let kind: Kind
-
-        /// `EntityName.root` as a target.
-        public static let root = Pattern(kind: .root)
-        /// Any non-root entity.
-        public static let all = Pattern(kind: .entities(segments: [], descendants: true))
-
-        /// The explicit spelling of the string grammar:
-        /// `.entity("tenants.*.journal")` ≡ `"tenants.*.journal"`.
-        public static func entity(_ pattern: String) -> Pattern {
-            Pattern(parsing: pattern)
-        }
-
-        public init(stringLiteral value: String) {
-            self.init(parsing: value)
-        }
-
-        private init(kind: Kind) {
-            self.kind = kind
-        }
-
-        private init(parsing pattern: String) {
-            var raw = pattern.split(separator: ".", omittingEmptySubsequences: false)
-            precondition(
-                raw.allSatisfy { !$0.isEmpty },
-                "Accepts pattern \"\(pattern)\" is not valid: empty segment"
-            )
-            var descendants = false
-            if raw.last == "*" {
-                raw.removeLast()
-                descendants = true
-            }
-            let segments = raw.map { segment -> Segment in
-                if segment == "*" {
-                    return .anyOne
-                }
-                // A lone segment is itself a valid entity name; parsing it
-                // enforces the character rules (and rejects `*` mixed into
-                // a segment, like "jour*al").
-                return EntityName.parse(String(segment)).match(
-                    { _ in Segment.literal(String(segment)) },
-                    { error -> Segment in
-                        preconditionFailure(
-                            "Accepts pattern \"\(pattern)\" is not valid: \(error)")
-                    }
-                )
-            }
-            precondition(
-                !segments.isEmpty || descendants,
-                "Accepts pattern \"\(pattern)\" is not valid: empty pattern"
-            )
-            self.kind = .entities(segments: segments, descendants: descendants)
-        }
-    }
-
-    let patterns: [Pattern]
+    let patterns: [EntityPattern]
     /// The single concrete entity this vocabulary names, when it names
-    /// exactly one — the router infers it for entity-less requests (see
+    /// exactly one: the router infers it for entity-less requests (see
     /// ``Accepts`` § Entity inference); nil for any wider vocabulary.
     let soleEntity: EntityName?
+    /// Whether root-targeted dispatches are accepted.
+    let admitsRoot: Bool
 
     public init(_ patterns: Pattern...) {
+        self.init(patterns: patterns)
+    }
+
+    init(patterns: [EntityPattern]) {
         precondition(
             !patterns.isEmpty,
             "Accepts() with no patterns would deny every target — declare at least one"
         )
         self.patterns = patterns
-        self.soleEntity = Self.soleEntity(of: patterns)
+        self.soleEntity = EntityPattern.soleEntity(of: patterns)
+        self.admitsRoot = patterns.contains(.root)
     }
 
-    private static func soleEntity(of patterns: [Pattern]) -> EntityName? {
-        guard
-            patterns.count == 1,
-            case .entities(let segments, descendants: false) = patterns[0].kind,
-            !segments.isEmpty
-        else {
-            return nil
-        }
-        var literals: [String] = []
-        for segment in segments {
-            guard case .literal(let text) = segment else { return nil }
-            literals.append(text)
-        }
-        // Reassembling validated segments cannot fail.
-        return EntityName.parse(literals.joined(separator: ".")).getOrElse { error in
-            preconditionFailure("Accepts sole-entity reassembly failed: \(error)")
-        }
-    }
-
-    /// Whether root-targeted dispatches are accepted.
-    var admitsRoot: Bool {
-        self.patterns.contains { pattern in
-            if case .root = pattern.kind { return true }
-            return false
-        }
-    }
-
-    /// Whether the (non-root) `entity` is accepted. Runs on every dispatch,
-    /// so it compares the name's bytes in place instead of splitting it.
+    /// Whether the (non-root) `entity` is accepted.
     func admits(_ entity: EntityName) -> Bool {
-        let name = entity.rawValue.utf8
-        let entitySegmentCount = name.count(where: { $0 == UInt8(ascii: ".") }) + 1
-        return self.patterns.contains { pattern in
-            switch pattern.kind {
-                case .root:
-                    return false
-
-                case .entities(let segments, let descendants):
-                    guard
-                        descendants
-                            ? entitySegmentCount > segments.count
-                            : entitySegmentCount == segments.count
-                    else {
-                        return false
-                    }
-
-                    var start = name.startIndex
-                    for segment in segments {
-                        let end = name[start...].firstIndex(of: UInt8(ascii: ".")) ?? name.endIndex
-                        if case .literal(let text) = segment,
-                            !text.utf8.elementsEqual(name[start..<end])
-                        {
-                            return false
-                        }
-                        start = end == name.endIndex ? end : name.index(after: end)
-                    }
-
-                    return true
-            }
-        }
+        EntityPattern.admits(self.patterns, entity)
     }
 }
 
@@ -301,7 +218,8 @@ public struct Accepts: Sendable {
 /// The optional second argument declares what targets the route accepts —
 /// `Accepts("journal.*")`, `Accepts(.root)`, exact entities — replacing both
 /// a separate root opt-in and any ad-hoc handler-side scoping; see
-/// ``Accepts``. The default accepts any non-root entity the ACL admits.
+/// ``Accepts``. Without it the route accepts the call's declared target, or
+/// any non-root entity the ACL admits when the call declares none.
 ///
 /// Every handler shape runs in its call's own task (`@concurrent`), off any
 /// actor.
@@ -312,7 +230,7 @@ public struct Accepts: Sendable {
 @inlinable
 public func Handle<Request: Codable & Sendable, Response: Codable & Sendable>(
     _ method: Method<Request, Response>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body: @escaping @Sendable @concurrent (Request, MMContext) async -> Result<Response, MMError>
 ) -> Route {
     unaryRoute(
@@ -329,7 +247,7 @@ public func Handle<Request: Codable & Sendable, Response: Codable & Sendable>(
 @usableFromInline
 func unaryRoute<Request: Codable & Sendable, Response: Codable & Sendable>(
     _ method: Method<Request, Response>,
-    _ accepts: Accepts,
+    _ accepts: Accepts?,
     signature: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
     decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
     encodeResponse: @escaping @Sendable (Response) -> Result<ByteBuffer, MMWireError>,
@@ -339,6 +257,7 @@ func unaryRoute<Request: Codable & Sendable, Response: Codable & Sendable>(
     return Route(
         name: method.name,
         access: method.access,
+        target: method.target,
         accepts: accepts,
         signatureThunk: signature,
         kind: .unary { params, context in
@@ -393,7 +312,8 @@ private func streamTerminal<Response: Codable & Sendable>(
 private func streamRoute<Request: Codable & Sendable>(
     name: String,
     access: AccessMode,
-    accepts: Accepts,
+    target: [EntityPattern]?,
+    accepts: Accepts?,
     signatureThunk: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
     decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, IngressRejection>,
     startup:
@@ -404,6 +324,7 @@ private func streamRoute<Request: Codable & Sendable>(
     Route(
         name: name,
         access: access,
+        target: target,
         accepts: accepts,
         signatureThunk: signatureThunk,
         kind: .stream { params, context, msgid, seams, metrics in
@@ -459,7 +380,7 @@ public func Handle<
     Response: Codable & Sendable
 >(
     _ method: ServerStreamMethod<Request, Element, Response>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body:
         @escaping @Sendable @concurrent (Request, MMResponseSink<Element>, MMContext) async ->
         Result<Response, MMError>
@@ -483,7 +404,7 @@ func serverStreamRoute<
     Response: Codable & Sendable
 >(
     _ method: ServerStreamMethod<Request, Element, Response>,
-    _ accepts: Accepts,
+    _ accepts: Accepts?,
     signature: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
     decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
     encodeElement: @escaping @Sendable (Element) -> Result<ByteBuffer, MMWireError>,
@@ -495,6 +416,7 @@ func serverStreamRoute<
     streamRoute(
         name: method.name,
         access: method.access,
+        target: method.target,
         accepts: accepts,
         signatureThunk: signature,
         decodeRequest: checkedDecoding(decodeRequest, method.requestCheck)
@@ -527,7 +449,7 @@ public func Handle<
     Response: Codable & Sendable
 >(
     _ method: ClientStreamMethod<Request, Element, Response>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body:
         @escaping @Sendable @concurrent (Request, MMRequestStream<Element>, MMContext) async ->
         Result<Response, MMError>
@@ -551,7 +473,7 @@ func clientStreamRoute<
     Response: Codable & Sendable
 >(
     _ method: ClientStreamMethod<Request, Element, Response>,
-    _ accepts: Accepts,
+    _ accepts: Accepts?,
     signature: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
     decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
     decodeElement: @escaping @Sendable (ByteBuffer) -> Result<Element, MMWireError>,
@@ -564,6 +486,7 @@ func clientStreamRoute<
     return streamRoute(
         name: method.name,
         access: method.access,
+        target: method.target,
         accepts: accepts,
         signatureThunk: signature,
         decodeRequest: checkedDecoding(decodeRequest, method.requestCheck)
@@ -600,7 +523,7 @@ public func Handle<
     Response: Codable & Sendable
 >(
     _ method: BidirectionalStreamMethod<Request, RequestElement, ResponseElement, Response>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body:
         @escaping @Sendable @concurrent (
             Request, MMRequestStream<RequestElement>, MMResponseSink<ResponseElement>, MMContext
@@ -627,7 +550,7 @@ func bidirectionalStreamRoute<
     Response: Codable & Sendable
 >(
     _ method: BidirectionalStreamMethod<Request, RequestElement, ResponseElement, Response>,
-    _ accepts: Accepts,
+    _ accepts: Accepts?,
     signature: @escaping @Sendable () -> Result<MethodSignature, SchemaError>,
     decodeRequest: @escaping @Sendable (ByteBuffer) -> Result<Request, MMWireError>,
     decodeRequestElement: @escaping @Sendable (ByteBuffer) -> Result<RequestElement, MMWireError>,
@@ -642,6 +565,7 @@ func bidirectionalStreamRoute<
     return streamRoute(
         name: method.name,
         access: method.access,
+        target: method.target,
         accepts: accepts,
         signatureThunk: signature,
         decodeRequest: checkedDecoding(decodeRequest, method.requestCheck)

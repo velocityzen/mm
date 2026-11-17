@@ -462,6 +462,7 @@ The methods list is scoped by the request's entity and filtered by the requestin
 | 1 | access | u8: raw access bits (section 7.3); unknown bits preserved |
 | 2 | description | string, **optional**: human-readable method documentation |
 | 3 | deprecation | string, **optional**: why the method is deprecated; present only for a deprecated method, and possibly empty |
+| 4 | target | array of string, **optional**: the entity patterns the method's contract declares it targets, each once, sorted byte-wise over its UTF-8 text. Absent when the contract declares none, which means the method targets whatever the server accepts |
 | 10 | request | TypeSchema: opening-request shape |
 | 11 | requestDescription | string, **optional** |
 | 12 | requestStream | TypeSchema, **optional**: element shape the client may stream (present only for methods with a request stream) |
@@ -471,6 +472,8 @@ The methods list is scoped by the request's entity and filtered by the requestin
 | 22 | responseStream | TypeSchema, **optional**: element shape the server may stream before the terminal (present only for methods with a response stream) |
 | 23 | responseStreamDescription | string, **optional** |
 | 30 | errors | TypeSchema, **optional**: the errors the method declares, as a `union` (section 8.3) with one case per error, named by its wire case name and carrying its fields (section 6.2). Present only for methods that declare errors. Case descriptions are documentation, like the description slots. |
+
+**Target patterns.** Each pattern in key 4 is text: dot-separated segments, each an entity-name segment (`a-z`, `0-9`, `_`, `-`; section 7.1) or `*`, which matches exactly one segment. A **trailing** `*` matches one or more further segments, at any depth, and not the prefix entity itself: `journal.*` matches `journal.entries` and `journal.a.b`, not `journal`. A bare `*` matches every entity except root. A pattern with no wildcard matches exactly that entity. The empty string matches root, and only root: no other pattern matches it. A server answers a request whose entity is outside the method's patterns with the same error as an authorization denial (section 7.4). A reader that cannot read a pattern, for example one from a later grammar, reads the whole target as absent and keeps the rest of the signature, as it does with an unreadable constraint or default. The target is part of the contract: it is hashed into the fingerprint (section 9.1), and a changed target is schema drift.
 
 An unset optional slot is absent (its key is omitted). Readers skip unknown keys, per the evolution rule. A method may have any combination of the four parts (request, response, requestStream, responseStream). The five description slots (keys 2, 11, 13, 21, 23) and the deprecation (key 3) are documentation only: discovery serves them, but they are **never** hashed into the fingerprint and never used in compatibility comparisons. A documentation edit is not schema drift.
 
@@ -637,7 +640,7 @@ A simple tagged, length-prefixed byte encoding, intentionally **not** MessagePac
 
 **string** := `u32 LE` byte count, then the UTF-8 bytes.
 
-**signature** := name (string) ‖ access (`u8`, the raw rwx bits) ‖ request schema ‖ response schema ‖ *stream entries, emitted only when present*: `u8` tag `1` then the request-stream element schema; `u8` tag `2` then the response-stream element schema ‖ *errors entry, emitted only when present*: `u8` tag `4` then the errors schema (the `union` of key 30). A method with no streams emits neither stream entry, so a set of only unary methods hashes to the same value as before streaming was added (the pinned value of 9.4 is unchanged). The different tags keep the request stream, response stream, and errors slots distinguishable. A method without declared errors emits no errors entry, so its signature hashes as it did before errors were added.
+**signature** := name (string) ‖ access (`u8`, the raw rwx bits) ‖ request schema ‖ response schema ‖ *stream entries, emitted only when present*: `u8` tag `1` then the request-stream element schema; `u8` tag `2` then the response-stream element schema ‖ *errors entry, emitted only when present*: `u8` tag `4` then the errors schema (the `union` of key 30). A method with no streams emits neither stream entry, so a set of only unary methods hashes to the same value as before streaming was added (the pinned value of 9.4 is unchanged). The different tags keep the request stream, response stream, and errors slots distinguishable. A method without declared errors emits no errors entry, so its signature hashes as it did before errors were added. ‖ *target entry, emitted only when key 4 is present*: `u8` tag `6`, then the `u32 LE` pattern count, then each pattern's text (a string), each pattern once, sorted byte-wise over its text, as key 4 carries them. A method without a declared target emits no target entry, so its signature hashes as it did before targets were added.
 
 **schema** := `u8` case tag (the same values as the wire tag table in 8.3: 0 bool, 1 int, 2 uint, 3 float, 4 double, 5 string, 6 bytes, 7 optional, 8 array, 9 map, 10 structure, 11 enumeration, 12 reference, 13 date, 14 datetime, 15 timestamp, 16 union, 17 duration, 18 uuid, 255 unknown), then payload:
 
@@ -730,15 +733,22 @@ Pinned fingerprint for a **duration** set, which tests duration bounds (bound ta
 
 The bounds' binary forms: PT0.5S is `10 01 f4`, PT10S `01 0a`, PT1S `01 01`, PT5M `02 01 2c`.
 
+Pinned fingerprint for a set with **declared targets**, which tests the tag-6 target entry, root's empty text, and a target declared out of order with a pattern doubled (verified independently against a model written from section 9.1): the set below MUST fingerprint to **`0x06f882ca87118d54`**. Without the two targets, the same signatures fingerprint to `0x8119e270150b84eb`.
+
+- Signature: `journal.read`, access read (4), request `structure[]`, response `structure[{0, "count", uint}]`, target declared as `journal.*`, `journal`, root, `journal`, hashed as `""`, `journal`, `journal.*`.
+- Signature: `tenants.list`, access read (4), request `structure[]`, response `structure[]`, target `tenants.*.journal`.
+
+The first target entry is `06 03000000 00000000 07000000 6a6f75726e616c 09000000 6a6f75726e616c2e2a`.
+
 ### 9.5 Builtin canonical signatures
 
-The builtins (section 8) are in the fingerprinted set, so a real server's fingerprint can be reproduced only with their exact canonical signatures, given here.
+The builtins (section 8) are in the fingerprinted set, so a real server's fingerprint can be reproduced only with their exact canonical signatures, given here. Neither builtin declares a target (key 4 absent), so neither emits a target entry.
 
 `server.entity` is exactly the signature of section 9.3.
 
 `server.schema`: name `server.schema`, access read (4), request `structure[]` (empty, the same as the `server.entity` request, because targets are in the envelope), response `structure[{0, "fingerprint", uint}, {1, "methods", array(MethodSignature)}, {2, "types", optional(array(TypeDefinition))}, {3, "namespaces", optional(array(NamespaceSignature))}]`.
 
-- `MethodSignature` hashes as `structure[{0, "name", string}, {1, "access", uint}, {2, "description", optional(string)}, {3, "deprecation", optional(string)}, {10, "request", TypeSchema}, {11, "requestDescription", optional(string)}, {12, "requestStream", optional(TypeSchema)}, {13, "requestStreamDescription", optional(string)}, {20, "response", TypeSchema}, {21, "responseDescription", optional(string)}, {22, "responseStream", optional(TypeSchema)}, {23, "responseStreamDescription", optional(string)}, {30, "errors", optional(TypeSchema)}]`. In the *type*, the stream, description, deprecation, and errors slots are always-present optional fields. In the wire encoding of a concrete signature, an absent slot omits its key.
+- `MethodSignature` hashes as `structure[{0, "name", string}, {1, "access", uint}, {2, "description", optional(string)}, {3, "deprecation", optional(string)}, {4, "target", optional(array(string))}, {10, "request", TypeSchema}, {11, "requestDescription", optional(string)}, {12, "requestStream", optional(TypeSchema)}, {13, "requestStreamDescription", optional(string)}, {20, "response", TypeSchema}, {21, "responseDescription", optional(string)}, {22, "responseStream", optional(TypeSchema)}, {23, "responseStreamDescription", optional(string)}, {30, "errors", optional(TypeSchema)}]`. In the *type*, the stream, description, deprecation, target, and errors slots are always-present optional fields. In the wire encoding of a concrete signature, an absent slot omits its key.
 - `TypeDefinition` hashes as `structure[{0, "name", string}, {1, "schema", TypeSchema}, {2, "description", optional(string)}, {3, "constraints", optional(Constraints)}, {4, "deprecation", optional(string)}]`.
 - `Constraints` hashes as `structure[{0, "minimum", optional(unknown)}, {1, "maximum", optional(unknown)}, {2, "minimumLength", optional(int)}, {3, "maximumLength", optional(int)}, {4, "pattern", optional(string)}]`. A bound is `unknown` because it is an integer or a floating number, whichever the value is.
 - `NamespaceSignature` hashes as `structure[{0, "name", string}, {1, "description", string}]`.

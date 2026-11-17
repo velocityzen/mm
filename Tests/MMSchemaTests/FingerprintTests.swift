@@ -374,6 +374,41 @@ struct FingerprintTests {
         )
     }
 
+    // MARK: Declared targets
+
+    static let targetedSignatures = [
+        MethodSignature(
+            name: "journal.read",
+            access: .read,
+            request: .structure(fields: []),
+            response: .structure(fields: [.init(key: 0, name: "count", type: .uint)]),
+            target: ["journal.*", "journal", .root, "journal"]
+        ),
+        MethodSignature(
+            name: "tenants.list",
+            access: .read,
+            request: .structure(fields: []),
+            response: .structure(fields: []),
+            target: ["tenants.*.journal"]
+        ),
+    ]
+
+    @Test("golden pinned value for a set with declared targets")
+    func goldenTargetsValue() {
+        // Independently computed (a Python model of section 9.1 with the
+        // tag-6 target entry). Exercises the entry, root's empty text, and
+        // a target declared out of order with a pattern doubled, which
+        // hashes as each pattern once in byte order. A change here is a
+        // wire-protocol break.
+        #expect(SchemaFingerprint.compute(Self.targetedSignatures) == 0x06f8_82ca_8711_8d54)
+        let untargeted = Self.targetedSignatures.map { signature in
+            var bare = signature
+            bare.target = nil
+            return bare
+        }
+        #expect(SchemaFingerprint.compute(untargeted) == 0x8119_e270_150b_84eb)
+    }
+
     @Test("FNV-1a reference vectors")
     func fnvReference() {
         // Published FNV-1a 64 test vectors.

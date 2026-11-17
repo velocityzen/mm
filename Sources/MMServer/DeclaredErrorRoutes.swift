@@ -16,7 +16,7 @@ public func Handle<
     Failure: MMDeclaredError
 >(
     _ method: MethodWithErrors<Method<Request, Response>, Failure>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body: @escaping @Sendable @concurrent (Request, MMContext) async -> Result<Response, Failure>
 ) -> Route {
     unaryRoute(
@@ -40,7 +40,7 @@ public func Handle<
     Failure: MMDeclaredError
 >(
     _ method: MethodWithErrors<ServerStreamMethod<Request, Element, Response>, Failure>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body:
         @escaping @Sendable @concurrent (Request, MMResponseSink<Element>, MMContext) async ->
         Result<Response, Failure>
@@ -67,7 +67,7 @@ public func Handle<
     Failure: MMDeclaredError
 >(
     _ method: MethodWithErrors<ClientStreamMethod<Request, Element, Response>, Failure>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body:
         @escaping @Sendable @concurrent (Request, MMRequestStream<Element>, MMContext) async ->
         Result<Response, Failure>
@@ -97,7 +97,7 @@ public func Handle<
     _ method: MethodWithErrors<
         BidirectionalStreamMethod<Request, RequestElement, ResponseElement, Response>, Failure
     >,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body:
         @escaping @Sendable @concurrent (
             Request, MMRequestStream<RequestElement>, MMResponseSink<ResponseElement>, MMContext
@@ -134,7 +134,7 @@ public func On<
     Failure: MMDeclaredError
 >(
     _ method: MethodWithErrors<Method<Request, Response>, Failure>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body: @escaping @Sendable @concurrent (MMContext, Request) async -> Result<Response, Failure>
 ) -> Route {
     Handle(method, accepts) { request, context in
@@ -151,7 +151,7 @@ public func On<
     Failure: MMDeclaredError
 >(
     _ method: MethodWithErrors<ServerStreamMethod<Request, Element, Response>, Failure>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body:
         @escaping @Sendable @concurrent (MMContext, Request, MMResponseSink<Element>) async ->
         Result<Response, Failure>
@@ -170,7 +170,7 @@ public func On<
     Failure: MMDeclaredError
 >(
     _ method: MethodWithErrors<ClientStreamMethod<Request, Element, Response>, Failure>,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body:
         @escaping @Sendable @concurrent (MMContext, Request, MMRequestStream<Element>) async ->
         Result<Response, Failure>
@@ -192,7 +192,7 @@ public func On<
     _ method: MethodWithErrors<
         BidirectionalStreamMethod<Request, RequestElement, ResponseElement, Response>, Failure
     >,
-    _ accepts: Accepts = Accepts(.all),
+    _ accepts: Accepts? = nil,
     _ body:
         @escaping @Sendable @concurrent (
             MMContext, Request, MMRequestStream<RequestElement>,

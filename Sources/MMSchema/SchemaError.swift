@@ -16,6 +16,20 @@ public enum SchemaError: Error, Sendable, Hashable {
     /// Fix: conform the type to ``SchemaDescribable``.
     /// The payload is the fully qualified name of the failing type.
     case probeFailed(String)
+    /// The string is not a valid entity pattern (``EntityPattern``). Carries
+    /// the offending string and the first rule it violated.
+    case invalidEntityPattern(String, InvalidEntityPatternReason)
+}
+
+/// The specific rule an entity-pattern string violated.
+public enum InvalidEntityPatternReason: Sendable, Hashable {
+    /// A segment between dots is empty: leading dot, trailing dot, or `..`.
+    case emptySegment
+    /// A segment holds a character outside `a-z`, `0-9`, `_`, `-`.
+    case invalidCharacter
+    /// A `*` shares its segment with other characters (`"jour*"`): only a
+    /// whole segment may be a wildcard.
+    case partialWildcard
 }
 
 /// The specific validation rule an entity-name string violated.

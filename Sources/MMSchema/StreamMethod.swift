@@ -27,6 +27,10 @@ public struct ServerStreamMethod<
     public let name: String
     /// The rwx class this verb needs on its target entity.
     public let access: AccessMode
+    /// The entities the call may target, declared by its contract
+    /// (`Target(...)`); nil when the contract declares none, which leaves
+    /// it to what the server accepts.
+    public let target: [EntityPattern]?
     /// Documentation overlaid onto ``signature()`` and served by discovery.
     public let documentation: MethodDocumentation
     /// The constraint check on the request; nil when nothing in it is
@@ -36,11 +40,13 @@ public struct ServerStreamMethod<
     public init(
         name: String,
         access: AccessMode,
+        target: [EntityPattern]? = nil,
         documentation: MethodDocumentation = .init(),
         requestCheck: MMConstraintCheck<Request>? = nil
     ) {
         self.name = name
         self.access = access
+        self.target = target.map(EntityPattern.normalized)
         self.documentation = documentation
         self.requestCheck = requestCheck
     }
@@ -48,13 +54,15 @@ public struct ServerStreamMethod<
     /// Probes `Request`, `Element`, and `Response` and assembles the wire-facing
     /// signature, with `Element` in the response-stream slot.
     public func signature() -> Result<MethodSignature, SchemaError> {
-        assemble(schemaOf: { TypeSchema.of($0) }).map { documentation.applied(to: $0) }
+        assemble(schemaOf: { TypeSchema.of($0) }).map {
+            documentation.applied(to: $0).targeting(target)
+        }
     }
 
     /// The decoder-behavior signature (``TypeSchema/probed(_:)``, no
     /// documentation overlay) — what `verify(against:)` compares.
     func probedSignature() -> Result<MethodSignature, SchemaError> {
-        assemble(schemaOf: { TypeSchema.probed($0) })
+        assemble(schemaOf: { TypeSchema.probed($0) }).map { $0.targeting(target) }
     }
 
     private func assemble(
@@ -112,6 +120,10 @@ public struct ClientStreamMethod<
     public let name: String
     /// The rwx class this verb needs on its target entity.
     public let access: AccessMode
+    /// The entities the call may target, declared by its contract
+    /// (`Target(...)`); nil when the contract declares none, which leaves
+    /// it to what the server accepts.
+    public let target: [EntityPattern]?
     /// Documentation overlaid onto ``signature()`` and served by discovery.
     public let documentation: MethodDocumentation
     /// The constraint check on the request; nil when nothing in it is
@@ -124,12 +136,14 @@ public struct ClientStreamMethod<
     public init(
         name: String,
         access: AccessMode,
+        target: [EntityPattern]? = nil,
         documentation: MethodDocumentation = .init(),
         requestCheck: MMConstraintCheck<Request>? = nil,
         elementCheck: MMConstraintCheck<Element>? = nil
     ) {
         self.name = name
         self.access = access
+        self.target = target.map(EntityPattern.normalized)
         self.documentation = documentation
         self.requestCheck = requestCheck
         self.elementCheck = elementCheck
@@ -138,13 +152,15 @@ public struct ClientStreamMethod<
     /// Probes `Request`, `Element`, and `Response` and assembles the wire-facing
     /// signature, with `Element` in the request-stream slot.
     public func signature() -> Result<MethodSignature, SchemaError> {
-        assemble(schemaOf: { TypeSchema.of($0) }).map { documentation.applied(to: $0) }
+        assemble(schemaOf: { TypeSchema.of($0) }).map {
+            documentation.applied(to: $0).targeting(target)
+        }
     }
 
     /// The decoder-behavior signature (``TypeSchema/probed(_:)``, no
     /// documentation overlay) — what `verify(against:)` compares.
     func probedSignature() -> Result<MethodSignature, SchemaError> {
-        assemble(schemaOf: { TypeSchema.probed($0) })
+        assemble(schemaOf: { TypeSchema.probed($0) }).map { $0.targeting(target) }
     }
 
     private func assemble(
@@ -172,6 +188,10 @@ public struct BidirectionalStreamMethod<
     public let name: String
     /// The rwx class this verb needs on its target entity.
     public let access: AccessMode
+    /// The entities the call may target, declared by its contract
+    /// (`Target(...)`); nil when the contract declares none, which leaves
+    /// it to what the server accepts.
+    public let target: [EntityPattern]?
     /// Documentation overlaid onto ``signature()`` and served by discovery.
     public let documentation: MethodDocumentation
     /// The constraint check on the request; nil when nothing in it is
@@ -184,12 +204,14 @@ public struct BidirectionalStreamMethod<
     public init(
         name: String,
         access: AccessMode,
+        target: [EntityPattern]? = nil,
         documentation: MethodDocumentation = .init(),
         requestCheck: MMConstraintCheck<Request>? = nil,
         requestElementCheck: MMConstraintCheck<RequestElement>? = nil
     ) {
         self.name = name
         self.access = access
+        self.target = target.map(EntityPattern.normalized)
         self.documentation = documentation
         self.requestCheck = requestCheck
         self.requestElementCheck = requestElementCheck
@@ -198,13 +220,15 @@ public struct BidirectionalStreamMethod<
     /// Probes all four types and assembles the wire-facing signature with both
     /// stream slots filled.
     public func signature() -> Result<MethodSignature, SchemaError> {
-        assemble(schemaOf: { TypeSchema.of($0) }).map { documentation.applied(to: $0) }
+        assemble(schemaOf: { TypeSchema.of($0) }).map {
+            documentation.applied(to: $0).targeting(target)
+        }
     }
 
     /// The decoder-behavior signature (``TypeSchema/probed(_:)``, no
     /// documentation overlay) — what `verify(against:)` compares.
     func probedSignature() -> Result<MethodSignature, SchemaError> {
-        assemble(schemaOf: { TypeSchema.probed($0) })
+        assemble(schemaOf: { TypeSchema.probed($0) }).map { $0.targeting(target) }
     }
 
     private func assemble(
@@ -236,6 +260,7 @@ extension AnyMethod {
         self.init(
             name: method.name,
             access: method.access,
+            target: method.target,
             signature: { method.signature() },
             probedSignature: { method.probedSignature() }
         )
@@ -247,6 +272,7 @@ extension AnyMethod {
         self.init(
             name: method.name,
             access: method.access,
+            target: method.target,
             signature: { method.signature() },
             probedSignature: { method.probedSignature() }
         )
@@ -258,6 +284,7 @@ extension AnyMethod {
         self.init(
             name: method.name,
             access: method.access,
+            target: method.target,
             signature: { method.signature() },
             probedSignature: { method.probedSignature() }
         )

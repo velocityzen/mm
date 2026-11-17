@@ -172,7 +172,8 @@ public struct SchemaDeclaration: Sendable, Hashable {
     }
 
     /// Every mismatch between one declared method and its implementation:
-    /// presence, then access, then the four payload slots, then the errors.
+    /// presence, then access and target, then the four payload slots, then
+    /// the errors.
     private func mismatches(
         for declaredSignature: MethodSignature,
         implemented: [String: Implementation],
@@ -188,7 +189,13 @@ public struct SchemaDeclaration: Sendable, Hashable {
             : [
                 "\(declared.name): access is \(actual.probed.access.rawValue), contract says \(declared.access.rawValue)"
             ]
-        return access
+        let target: [String] =
+            actual.probed.target == declared.target
+            ? []
+            : [
+                "\(declared.name): target is \(actual.probed.target.map(EntityPattern.listed) ?? "undeclared"), contract says \(declared.target.map(EntityPattern.listed) ?? "undeclared")"
+            ]
+        return access + target
             + slotMismatches(
                 name: declared.name,
                 slot: "request",
@@ -448,6 +455,9 @@ public struct MethodDeclaration: Sendable, Hashable {
     /// The call's own `Errors { ... }` cases, before the enclosing schema
     /// resolves them and adds the namespace's.
     public let errors: [ErrorCaseDeclaration]
+    /// The call's own `Target(...)`, normalized; nil when it declares none
+    /// and takes the enclosing schema's.
+    public let target: [EntityPattern]?
 }
 
 /// One declared named type, produced by ``Enum(_:description:deprecated:_:)``,
@@ -1104,11 +1114,12 @@ public enum SchemaFieldsBuilder: MMListBuilding {
 }
 
 /// One element inside a ``Call(_:description:deprecated:_:)`` block: `Access`,
-/// `Request`, `RequestStream`, `Response`, `ResponseStream`, `Errors` or the
-/// presentation-only `CLI`.
+/// `Target`, `Request`, `RequestStream`, `Response`, `ResponseStream`,
+/// `Errors` or the presentation-only `CLI`.
 public struct MethodPart: Sendable {
     enum Kind {
         case access(AccessMode)
+        case target([EntityPattern])
         case request(TypeSchema, description: String?)
         case requestStream(TypeSchema, description: String?)
         case response(TypeSchema, description: String?)
@@ -1136,6 +1147,33 @@ public func Access(_ mode: AccessMode) -> MethodPart {
 /// Block form, matching the declaration style: `Access { .write }`.
 public func Access(_ mode: () -> AccessMode) -> MethodPart {
     MethodPart(kind: .access(mode()))
+}
+
+/// The entities a call may target, as ``EntityPattern``s: `.root`, `.all`,
+/// and patterns (`"journal.*"`, `"tenants.*.journal"`, exact entities), the
+/// vocabulary a server route's `Accepts` uses. Patterns are declared, never
+/// instances, so adding entities changes nothing in the contract.
+///
+/// Inside a `Call` it is the call's target; at the top of a `Schema` block
+/// it is the default for the block's calls, and a call's own `Target`
+/// replaces it. A call with no target, declared or inherited, targets
+/// whatever the server accepts.
+///
+/// The target enters the contract: discovery serves it, the fingerprint
+/// hashes it, and changing it is drift. A server route without `Accepts`
+/// takes it, and an explicit `Accepts` must fall within it. A target that
+/// names exactly one entity (`Target("ledger")`) lets a caller omit it.
+public func Target(_ patterns: EntityPattern...) -> TargetDeclaration {
+    precondition(
+        !patterns.isEmpty,
+        "Target() with no patterns would refuse every entity — declare at least one"
+    )
+    return TargetDeclaration(patterns: EntityPattern.normalized(patterns))
+}
+
+/// A ``Target(_:)`` part: the patterns, normalized.
+public struct TargetDeclaration: Sendable, Hashable {
+    let patterns: [EntityPattern]
 }
 
 /// The request payload's declared fields, keyed from 0 like every other part
@@ -1309,6 +1347,11 @@ public enum MethodDeclarationBuilder: MMListBuilding {
     public static func buildExpression(_ errors: ErrorsDeclaration) -> [MethodPart] {
         [MethodPart(kind: .errors(errors.cases))]
     }
+
+    /// The call's own `Target(...)`.
+    public static func buildExpression(_ target: TargetDeclaration) -> [MethodPart] {
+        [MethodPart(kind: .target(target.patterns))]
+    }
 }
 
 /// Declares one method of a ``Schema(_:_:)`` contract by its local name; the
@@ -1327,6 +1370,7 @@ public func Call(
     @MethodDeclarationBuilder _ parts: () -> [MethodPart]
 ) -> MethodDeclaration {
     var access: AccessMode?
+    var target: [EntityPattern]?
     var request: (payload: TypeSchema, description: String?)?
     var requestStream: (element: TypeSchema, description: String?)?
     var response: (payload: TypeSchema, description: String?)?
@@ -1343,6 +1387,8 @@ public func Call(
         switch part.kind {
             case .access(let mode):
                 setOnce(&access, mode, "Access")
+            case .target(let patterns):
+                setOnce(&target, patterns, "Target")
             case .request(let payload, let partDescription):
                 setOnce(&request, (payload, partDescription), "Request")
             case .requestStream(let element, let partDescription):
@@ -1376,7 +1422,8 @@ public func Call(
         responseStreamDescription: responseStream?.description,
         deprecation: deprecation,
         cli: cli,
-        errors: errors ?? []
+        errors: errors ?? [],
+        target: target
     )
 }
 
@@ -1391,6 +1438,9 @@ public struct SchemaEntry: Sendable {
         case namedError(NamedErrorDeclaration)
         /// The namespace's errors: every call in the block can return them.
         case errors([ErrorCaseDeclaration])
+        /// The namespace's target: the default for every call in the block
+        /// that declares none.
+        case target([EntityPattern])
         /// The schema-level CLI mode — presentation-only; the runtime
         /// declaration ignores it (the `#schema` macro is its one consumer).
         case cli(SchemaCLIMode)
@@ -1414,6 +1464,9 @@ public enum SchemaDeclarationBuilder: MMListBuilding {
     }
     public static func buildExpression(_ errors: ErrorsDeclaration) -> [SchemaEntry] {
         [SchemaEntry(kind: .errors(errors.cases))]
+    }
+    public static func buildExpression(_ target: TargetDeclaration) -> [SchemaEntry] {
+        [SchemaEntry(kind: .target(target.patterns))]
     }
     public static func buildExpression(_ entry: SchemaEntry) -> [SchemaEntry] {
         [entry]
@@ -1467,6 +1520,13 @@ public func Schema(
         namespaceErrorBlocks.first ?? [],
         context: "Schema \"\(prefix.rawValue)\" Errors"
     )
+    let namespaceTargets = entries.compactMap { entry -> [EntityPattern]? in
+        if case .target(let patterns) = entry.kind { patterns } else { nil }
+    }
+    precondition(
+        namespaceTargets.count <= 1,
+        "Schema \"\(prefix.rawValue)\" declares Target twice — one states the calls' default"
+    )
     // `Call("@")` is the namespace root call: the method IS the namespace
     // (`search`, not `search.@`). At most one per schema — a second folds to
     // the same wire name and trips the duplicate check below.
@@ -1506,7 +1566,8 @@ public func Schema(
             responseDescription: method.responseDescription,
             requestStreamDescription: method.requestStreamDescription,
             responseStreamDescription: method.responseStreamDescription,
-            deprecation: method.deprecation
+            deprecation: method.deprecation,
+            target: method.target ?? namespaceTargets.first
         )
     }
     return SchemaDeclaration(
