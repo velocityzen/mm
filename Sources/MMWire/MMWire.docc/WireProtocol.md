@@ -772,7 +772,7 @@ Cancellation (as opposed to graceful shutdown) closes connections immediately.
 **Client behavior on connection death.** When the inbound loop ends (EOF, transport error, protocol violation, local close, or cancellation):
 
 - every pending call fails with a connection-closed (or transport) error;
-- the connection's observable state makes its single transition `connected` → `closed(reason:)`;
+- the connection's observable state makes its single transition `connected` → `closed(reason:retry:)`, where the retry hint says whether connecting again can help: at once when the peer went away (EOF or a lost connection), never after a protocol violation, an oversized frame or a local close;
 - state-update streams yield that final state and finish;
 - live response streams end after their buffered elements drain, and their terminal resolves to a transport error.
 

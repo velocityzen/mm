@@ -33,7 +33,7 @@ One package, `MatterInMotion`, with five library products and one build-tool plu
 - **Bounded everything.** Frame length, connections, in-flight calls, and per-direction stream windows are capped. Counts from the wire never size allocations. A slow consumer pauses the producer, so memory does not grow.
 - **Termination is graceful and typed.** See [Streaming](#streaming).
 - **Evolution without version bumps.** The protocol version is 1 and stays 1. See [Versioning](#versioning).
-- **Resources, not services.** The server and the client connection are brackets: acquire starts one, dispose stops it, and whatever runs in between is owned by that scope. The host composes them with its own resources and owns the lifecycle. No GCD, no free-floating tasks, no automatic reconnection. The application sets the retry policy, using `stateUpdates()`.
+- **Resources, not services.** The server and the client connection are brackets: acquire starts one, dispose stops it, and whatever runs in between is owned by that scope. The host composes them with its own resources and owns the lifecycle. No GCD, no free-floating tasks, no automatic reconnection. The application sets the retry policy, using `stateUpdates()` and the retry hint every close carries.
 - **Caller isolation.** Like the fp-swift packages, the library targets build with `NonisolatedNonsendingByDefault`: async APIs run on the caller's actor, so a `@MainActor` app uses the client without sending anything across. What mm runs in tasks of its own (handlers, ACL providers, `withStream`'s `each`) is `@concurrent`.
 
 ## Quick start
@@ -225,7 +225,7 @@ let outcome = await echo { connection in
 }
 ```
 
-Daemons compose the client into their own bracket, next to their other resources, exactly like the server. The library never reconnects: a closed connection stays closed. The application owns retry policy, using `stateUpdates()`.
+Daemons compose the client into their own bracket, next to their other resources, exactly like the server. The library never reconnects: a closed connection stays closed. The application owns retry policy, using `stateUpdates()`: every close carries a retry hint (`.now`, `.later` or `.never`) so the policy never parses error text.
 
 ### CLI
 

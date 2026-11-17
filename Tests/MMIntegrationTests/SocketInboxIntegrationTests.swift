@@ -97,7 +97,12 @@ struct SocketInboxIntegrationTests {
             let client = MMClient(endpoint: .fd(pair.client))
             let reply = await client { connection in
                 await connection.call(whoAmI, on: target, WhoAmIRequest(nonce: 7))
-                    .mapError { MMClientError.transport(description: "\($0)") }
+                    .mapError {
+                        MMClientError.transport(
+                            cause: .other(errorNumber: nil),
+                            description: "\($0)"
+                        )
+                    }
             }
             return .success(reply)
         }

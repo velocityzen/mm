@@ -88,6 +88,8 @@ struct HelloTests {
         try await harness.channel.writeInbound(framed([0x4d, 0x4d, 0x01]))
         let outcome = await establish(harness)
         #expect(failure(outcome) == .badHello)
+        // The same server answers a new connection the same way.
+        #expect(failure(outcome)?.retryHint == .never)
         try await withDeadline { try await harness.channel.closeFuture.get() }
     }
 
@@ -98,8 +100,13 @@ struct HelloTests {
         let outcome = await establish(harness)
         #expect(
             failure(outcome)
-                == .transport(description: "connection closed before server hello")
+                == .transport(
+                    cause: .closedBeforeHello,
+                    description: "connection closed before server hello"
+                )
         )
+        // A server starting or draining: back off and connect again.
+        #expect(failure(outcome)?.retryHint == .later)
     }
 
     @Test("fingerprint mismatch sets fingerprintMatched false and does NOT close")
@@ -175,7 +182,10 @@ struct HelloTests {
         let outcome = try #require(result.withLockedValue { $0 })
         #expect(
             failure(outcome)
-                == .transport(description: "connection closed before server hello")
+                == .transport(
+                    cause: .closedBeforeHello,
+                    description: "connection closed before server hello"
+                )
         )
         try await withDeadline { try await harness.channel.closeFuture.get() }
     }
@@ -202,7 +212,10 @@ struct HelloTests {
         let outcome = try #require(result.withLockedValue { $0 })
         #expect(
             failure(outcome)
-                == .transport(description: "connection closed before server hello")
+                == .transport(
+                    cause: .closedBeforeHello,
+                    description: "connection closed before server hello"
+                )
         )
         try await withDeadline { try await harness.channel.closeFuture.get() }
     }

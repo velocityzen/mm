@@ -124,7 +124,7 @@ struct StreamTests {
         }
         // The live stream's terminal fails on the connection death.
         #expect(terminalResult.withLockedValue { $0 } == .failure(.connectionClosed))
-        guard case .closed(.some(.protocolViolation)) = connection.state else {
+        guard case .closed(.some(.protocolViolation), .never) = connection.state else {
             Issue.record("expected closed(protocolViolation), got \(connection.state)")
             return
         }
@@ -635,7 +635,7 @@ struct StreamTests {
                 )
                 return
             }
-            guard case .closed(.some(.protocolViolation)) = connection.state else {
+            guard case .closed(.some(.protocolViolation), .never) = connection.state else {
                 Issue.record("expected closed(protocolViolation), got \(connection.state)")
                 return
             }

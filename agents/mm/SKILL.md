@@ -257,7 +257,7 @@ case .failure(let error): ...
 }
 ```
 
-A hello fingerprint mismatch never disconnects. Treat it as a signal to run discovery and degrade deliberately. There is no reconnection, by design: a closed connection stays closed. Watch `stateUpdates()` (`.connected` → `.closed(reason:)`). The application owns retry policy.
+A hello fingerprint mismatch never disconnects. Treat it as a signal to run discovery and degrade deliberately. There is no reconnection, by design: a closed connection stays closed. Watch `stateUpdates()` (`.connected` → `.closed(reason:retry:)`). The application owns retry policy; the close's `MMRetryHint` (and `MMClientError.retryHint` for a failed connect) says whether connecting again can help: `.now` (the server went away), `.later` (refused, socket missing, closed before the hello: back off), `.never` (permission denied, bad hello, unsupported version, protocol violation, or the application closed it).
 
 ## Generating a CLI from the contract
 

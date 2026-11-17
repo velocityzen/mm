@@ -106,8 +106,9 @@ struct ClientIntegrationTests {
                     return
                 }
                 // Dispose closed AND joined: post-return the state is
-                // deterministically .closed (clean — a local close).
-                #expect(connection.state == .closed(reason: nil))
+                // deterministically .closed (clean — a local close, which
+                // the application asked for, so no retry).
+                #expect(connection.state == .closed(reason: nil, retry: .never))
             }
         }
     }
@@ -417,8 +418,9 @@ struct ClientIntegrationTests {
                         TestMethods.slow, on: entity("box.item"),
                         TargetRequest(entity: entity("box.item"), ))
                     // A local reaper close is a clean end, per the
-                    // configuration contract.
-                    #expect(connection.state == .closed(reason: nil))
+                    // configuration contract, and the application may
+                    // connect again whenever it needs to.
+                    #expect(connection.state == .closed(reason: nil, retry: .now))
                     return reply
                 }
                 // Release the parked handler so the server drain never waits.
@@ -500,7 +502,7 @@ struct ClientIntegrationTests {
                             TestMethods.echo, on: entity("box.item"),
                             EchoRequest(entity: entity("box.item"), value: 1))
                         #expect(outcome == .failure(.connectionClosed))
-                        #expect(connection.state == .closed(reason: nil))
+                        #expect(connection.state == .closed(reason: nil, retry: .never))
                     }
                 }
             }
@@ -530,7 +532,8 @@ struct ClientIntegrationTests {
                     server.slowGate.fire(())
                     try await calls.waitForAll()
                     // The server drained and closed; the client observes it
-                    // as a clean close, not an error.
+                    // as a clean close, not an error, that hints an immediate
+                    // retry: a socket-activated daemon starts again on it.
                     let terminal = try await withDeadline { () -> ClientState? in
                         var states = connection.stateUpdates().makeAsyncIterator()
                         while let state = await states.next() {
@@ -538,7 +541,7 @@ struct ClientIntegrationTests {
                         }
                         return nil
                     }
-                    #expect(terminal == .closed(reason: nil))
+                    #expect(terminal == .closed(reason: nil, retry: .now))
                 }
             }
             try await served

@@ -14,7 +14,10 @@ enum HelloFailure: Error {
             case .badHello:
                 return .badHello
             case .closedBeforeHello:
-                return .transport(description: "connection closed before server hello")
+                return .transport(
+                    cause: .closedBeforeHello,
+                    description: "connection closed before server hello"
+                )
         }
     }
 }

@@ -14,10 +14,11 @@ public enum MMClientError: Error, Equatable, Sendable {
     /// speak. v1 is the first protocol version, so this fires exactly when the
     /// server advertises version 0.
     case versionUnsupported(serverVersion: UInt8)
-    /// The transport failed: connect refused, socket error, mid-stream frame
-    /// error. Coarse by design — infrastructure failures are for logs, not
-    /// `switch`.
-    case transport(description: String)
+    /// The transport failed: connect refused, socket missing, a close before
+    /// the hello, a connection lost mid-stream. `cause` is the typed reason a
+    /// retry policy branches on (see ``retryHint``); `description` is the
+    /// underlying error's text, for logs.
+    case transport(cause: MMTransportCause, description: String)
     /// The server violated the protocol (a frame that does not decode as an
     /// envelope). The connection is closed.
     case protocolViolation(description: String)
@@ -100,7 +101,7 @@ extension MMClientError: CustomStringConvertible {
                 return "server hello was malformed"
             case .versionUnsupported(let serverVersion):
                 return "server protocol version \(serverVersion) is unsupported"
-            case .transport(let description):
+            case .transport(_, let description):
                 return "transport failure: \(description)"
             case .protocolViolation(let description):
                 return "protocol violation: \(description)"
@@ -174,12 +175,18 @@ extension MMCallError {
 
 /// The connection's lifecycle state. Exactly one transition ever happens:
 /// `connected` → `closed`. Reconnection is out of scope for v1 — a closed
-/// connection stays closed and retry policy belongs to the application.
+/// connection stays closed and retry policy belongs to the application,
+/// informed by the close's ``MMRetryHint``.
 public enum ClientState: Sendable, Equatable {
     /// The hello exchange completed and the connection is usable.
     case connected
-    /// The connection is gone. `reason` is `nil` for a clean close (EOF or a
-    /// the bracket's dispose) and carries the lifecycle error
-    /// otherwise.
-    case closed(reason: MMClientError?)
+    /// The connection is gone. `reason` is `nil` for a clean close (the
+    /// server closed it, this client's idle timeout reaped it, or the
+    /// application closed it) and carries the lifecycle error otherwise.
+    /// `retry` says whether connecting again can help: the reason's
+    /// ``MMClientError/retryHint``; for a clean close, ``MMRetryHint/now``
+    /// when the server or the idle timeout ended it and ``MMRetryHint/never``
+    /// when the application did (the bracket's dispose, or the cancellation
+    /// of the task running the connection).
+    case closed(reason: MMClientError?, retry: MMRetryHint)
 }

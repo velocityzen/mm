@@ -695,7 +695,52 @@ The builder takes exactly one `Configuration(endpoint:...)` (the endpoint plus t
 
 Custom choreography (stream drainers in sibling tasks, staged teardown) goes *inside* the bracket body as structured children (`async let`, a local group, `withStream`). The bracket still owns the lifecycle around it.
 
-There is no connection outside a bracket, so there is nothing to leak: no loop to forget and no close to miss. When the connection dies (EOF, transport error, protocol violation, or the bracket's dispose), pending calls fail with `MMCallError.connectionClosed` and `state` becomes `.closed(reason:)`. Dispose has no drain: a body that wants its responses awaits them before returning. v1 does not reconnect, by design: a closed connection stays closed. Retry policy is application logic, driven by `stateUpdates()`.
+There is no connection outside a bracket, so there is nothing to leak: no loop to forget and no close to miss. When the connection dies (EOF, transport error, protocol violation, or the bracket's dispose), pending calls fail with `MMCallError.connectionClosed` and `state` becomes `.closed(reason:retry:)`. Dispose has no drain: a body that wants its responses awaits them before returning. v1 does not reconnect, by design: a closed connection stays closed. Retry policy is application logic, driven by `stateUpdates()`.
+
+**Retrying is driven by the close's hint.** Every close carries an `MMRetryHint`, so a policy never parses error text:
+
+- `.now`: the server went away from an established connection (it exited, drained or crashed, or the client's idle timeout reaped the connection). Connect again at once; a socket-activated daemon starts on that connect.
+- `.later`: nothing listens yet (`.refused`), the socket is not there yet (`.socketMissing`), or the server closed before its hello (`.closedBeforeHello`, which includes a server over its connection cap). Back off and try again.
+- `.never`: the same attempt fails the same way (`.permissionDenied`, a bad hello, an unsupported version, a protocol violation, an oversized frame, an address that can never work), or the application closed the connection itself.
+
+A failed connect, or a connection that died with an error, fails the bracket with an `MMClientError`; its `retryHint` comes from the typed `MMTransportCause` beside the log text. A clean close (the server's EOF) leaves the bracket successful, so a body that runs until the connection ends reads the hint from the final state. A daemon that follows the journal for as long as it runs:
+
+```swift
+/// Follows the journal until the connection closes, then says whether
+/// connecting again can help.
+func followUntilClosed(
+    _ connection: MMClientConnection
+) async -> Result<MMRetryHint, MMClientError> {
+    await follow(connection, journal: notes)
+    for await case .closed(_, let retry) in connection.stateUpdates() {
+        return .success(retry)
+    }
+    return .success(.never)
+}
+
+var pause = Duration.milliseconds(250)
+retrying: while true {
+    let hint: MMRetryHint
+    switch await journal(followUntilClosed) {
+        case .success(let retry):
+            hint = retry
+        case .failure(let error):
+            logger.warning("journal connection failed", metadata: ["error": "\(error)"])
+            hint = error.retryHint
+    }
+    switch hint {
+        case .now:
+            pause = .milliseconds(250)
+        case .later:
+            try? await Task.sleep(for: pause)
+            pause = min(pause * 2, .seconds(30))
+        case .never:
+            break retrying
+    }
+}
+```
+
+`.now` connects at once, so a server that accepts the hello and closes straight away turns this loop into a busy one; a long-running daemon also caps how often `.now` repeats in a row. Per-call failures carry no hint: the library can't know whether a call is safe to send twice, so retrying a call is the caller's decision.
 
 **Typed calls** return `Result<Response, MMCallError>`; nothing throws on the data path. The example's `append(_:to:)`:
 

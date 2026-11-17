@@ -40,9 +40,10 @@ import NIOPosix
 /// When the loop terminates — EOF, transport error, protocol violation, or
 /// the bracket's dispose — every pending call fails with
 /// `MMCallError.connectionClosed` (or `.transport`) and the ``state``
-/// transitions to `.closed(reason:)`. Reconnection is deliberately out of
-/// scope for v1: a closed connection stays closed, and retry policy belongs
-/// to the application, driven by ``stateUpdates()``.
+/// transitions to `.closed(reason:retry:)`. Reconnection is deliberately out
+/// of scope for v1: a closed connection stays closed, and retry policy
+/// belongs to the application, driven by ``stateUpdates()`` and the close's
+/// ``MMRetryHint``.
 public actor MMClientConnection {
     typealias Writer = BatchingFrameWriter
 
@@ -75,6 +76,11 @@ public actor MMClientConnection {
     }
 
     private var lifecycle: Lifecycle = .idle
+    /// Set once the application asked for the close: ``close()`` was called
+    /// or the task running the loop was cancelled. A clean close it asked
+    /// for hints ``MMRetryHint/never``; one the server or the idle timeout
+    /// caused hints ``MMRetryHint/now``.
+    private var closeRequested = false
 
     private static let connectionIDs = NIOLockedValueBox<UInt64>(0)
 
@@ -166,7 +172,12 @@ public actor MMClientConnection {
                     )
             }
         }
-        .mapError { MMClientError.transport(description: String(describing: $0)) }
+        .mapError { error in
+            MMClientError.transport(
+                cause: .connectFailure(error),
+                description: String(describing: error)
+            )
+        }
         .flatMapAsync { pipeline in
             await Self.establish(
                 channel: pipeline.channel,
@@ -294,7 +305,7 @@ public actor MMClientConnection {
         }
         .mapError { error in
             (error as? HelloFailure)?.clientError
-                ?? .transport(description: String(describing: error))
+                ?? .transport(cause: .closedBeforeHello, description: String(describing: error))
         }
         .flatMap { hello in Self.negotiate(serverHello: hello, configuration: configuration) }
         .tapAsync { _ in await Self.startIdleReaping(on: raw, configuration: configuration) }
@@ -429,11 +440,23 @@ public actor MMClientConnection {
             }
         } catch is CancellationError {
             terminal = nil
+            self.closeRequested = true
         } catch {
-            terminal = .transport(description: String(describing: error))
+            terminal = .transport(
+                cause: .connectionFailure(error),
+                description: String(describing: error)
+            )
         }
         self.lifecycle = .finished
-        self.finish(reason: terminal)
+        // A cancelled inbound sequence may end without throwing, so the
+        // task's own flag decides too.
+        if Task.isCancelled {
+            self.closeRequested = true
+        }
+        self.finish(
+            reason: terminal,
+            retry: terminal?.retryHint ?? (self.closeRequested ? .never : .now)
+        )
         if let terminal {
             self.logger.debug("connection closed", metadata: ["reason": "\(terminal)"])
             return .failure(terminal)
@@ -1129,6 +1152,7 @@ public actor MMClientConnection {
     /// bracket's dispose calls this, so every connected
     /// `MMClientConnection` sees `run()` or `close()`.
     package func close() async {
+        self.closeRequested = true
         switch self.lifecycle {
             case .running, .finished:
                 // run() owns (or owned) the scoped teardown; just signal.
@@ -1136,19 +1160,19 @@ public actor MMClientConnection {
             case .idle:
                 self.lifecycle = .finished
                 try? await self.channel.executeThenClose { _, _ in }
-                self.finish(reason: nil)
+                self.finish(reason: nil, retry: .never)
         }
     }
 
     /// Terminal transition, idempotent (the first reason wins): fails all
-    /// pending calls and writer waiters, moves the state to `.closed`, and
-    /// finishes every state subscriber.
-    private nonisolated func finish(reason: MMClientError?) {
+    /// pending calls and writer waiters, moves the state to `.closed` with
+    /// `retry` as its hint, and finishes every state subscriber.
+    private nonisolated func finish(reason: MMClientError?, retry: MMRetryHint) {
         let callFailure: MMCallError
         switch reason {
             case nil, .protocolViolation:
                 callFailure = .connectionClosed
-            case .transport(let description):
+            case .transport(_, let description):
                 callFailure = .transport(description: description)
             case .some(let other):
                 callFailure = .transport(description: String(describing: other))
@@ -1167,7 +1191,7 @@ public actor MMClientConnection {
         let subscribers = self.states.withLockedValue {
             hub -> [AsyncStream<ClientState>.Continuation] in
             guard case .connected = hub.current else { return [] }
-            hub.current = .closed(reason: reason)
+            hub.current = .closed(reason: reason, retry: retry)
             let drained = Array(hub.subscribers.values)
             hub.subscribers.removeAll()
             return drained
@@ -1188,7 +1212,7 @@ public actor MMClientConnection {
             control.failTerminal(callFailure)
         }
         for subscriber in subscribers {
-            subscriber.yield(.closed(reason: reason))
+            subscriber.yield(.closed(reason: reason, retry: retry))
             subscriber.finish()
         }
     }

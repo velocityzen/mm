@@ -61,7 +61,7 @@ To consume a stream while the same task makes other calls, use ``withStream(_:ea
 
 ``MMClientConnection/discoverSchema(scope:)`` fetches the server's contract through the builtin `server.schema`, filtered by your traversal rights. ``SchemaDifference`` compares it with the locally compiled declaration: signatures and named types, without descriptions. Use the result to decide how to degrade gracefully.
 
-The connection lifecycle is intentionally simple. ``ClientState`` is `.connected`, then `.closed(reason:)`; observe it with `stateUpdates()`. There is no reconnection: a closed connection stays closed. Retry policy belongs to the application.
+The connection lifecycle is intentionally simple. ``ClientState`` is `.connected`, then `.closed(reason:retry:)`; observe it with `stateUpdates()`. There is no reconnection: a closed connection stays closed. Retry policy belongs to the application, and every close tells it whether connecting again can help. ``MMRetryHint`` is `.now` when the server went away from an established connection (a socket-activated daemon starts again on the next connect), `.later` when nothing listens yet or the socket is not there yet, and `.never` when the same attempt fails the same way or the application closed the connection itself. A failed connect carries the same hint in ``MMClientError/retryHint``, from its typed ``MMTransportCause``.
 
 ## Topics
 
@@ -74,6 +74,7 @@ The connection lifecycle is intentionally simple. ``ClientState`` is `.connected
 - ``MMClientConfiguration``
 - ``ServerInfo``
 - ``ClientState``
+- ``MMRetryHint``
 
 ### Streaming handles
 
@@ -89,6 +90,7 @@ The connection lifecycle is intentionally simple. ``ClientState`` is `.connected
 ### Errors
 
 - ``MMClientError``
+- ``MMTransportCause``
 - ``MMCallError``
 - ``MMDeclaredCallError``
 - ``MMCallFailure``

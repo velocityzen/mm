@@ -66,8 +66,9 @@ struct DeathTests {
             }
             return seen
         }
-        #expect(observed.last == .closed(reason: nil))
-        #expect(connection.state == .closed(reason: nil))
+        // The peer went away, so connecting again at once can help.
+        #expect(observed.last == .closed(reason: nil, retry: .now))
+        #expect(connection.state == .closed(reason: nil, retry: .now))
         // Calls after death fail fast.
         let late = await connection.call(ClientTestMethods.boxGet, on: entity("box"), boxRequest(3))
         #expect(late == .failure(.connectionClosed))
@@ -110,7 +111,7 @@ struct DeathTests {
             Issue.record("expected protocolViolation, got \(runResult)")
             return
         }
-        guard case .closed(.some(.protocolViolation)) = connection.state else {
+        guard case .closed(.some(.protocolViolation), .never) = connection.state else {
             Issue.record("expected closed(protocolViolation), got \(connection.state)")
             return
         }
@@ -149,7 +150,7 @@ struct DeathTests {
             }
             return seen
         }
-        #expect(observed == [.closed(reason: nil)])
+        #expect(observed == [.closed(reason: nil, retry: .never)])
     }
 
     @Test("an oversized inbound frame is a transport death, not a clean close")
@@ -205,8 +206,9 @@ struct DeathTests {
             Issue.record("expected run() to return .transport, got \(runResult)")
             return
         }
-        guard case .closed(.some(.transport)) = connection.state else {
-            Issue.record("expected closed(transport), got \(connection.state)")
+        guard case .closed(.some(.transport(.oversizedFrame, _)), .never) = connection.state
+        else {
+            Issue.record("expected closed(transport(oversizedFrame)), got \(connection.state)")
             return
         }
     }
