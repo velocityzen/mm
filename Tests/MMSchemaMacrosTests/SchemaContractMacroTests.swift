@@ -406,6 +406,11 @@ struct SchemaContractMacroTests {
                 #"Call("ping") Errors.Case("odd"): field "inner" declares a nested struct — declare a Type and carry it with Case("name", .reference("Type"), exitCode:)"#
             ),
             (
+                "",
+                #"Errors { Case("odd", exitCode: 10) { Field("mode", .enumeration(cases: [.init(name: "a")])) } }"#,
+                #"Call("ping") Errors.Case("odd"): field "mode" declares an inline .enumeration — declare an Enum and name it: Field("mode", "Name")"#
+            ),
+            (
                 #"Error("Full", exitCode: 12)"#,
                 #"Errors { Case("odd", exitCode: 10) { Field("x", "Full") } }"#,
                 #"Call("ping") Errors.Case("odd").x: reference "Full" does not resolve to an Enum/Type/Union declared in this block"#
@@ -619,6 +624,149 @@ struct SchemaContractMacroTests {
             )
         }
     }
+    @Test("diagnostics: inline enumerations are checked at expansion")
+    func inlineEnumerationDiagnostics() {
+        // Each case: the block's declarations before the call, the put
+        // call's request fields, and the diagnosis.
+        let one = #".enumeration(cases: [.init(name: "a")])"#
+        let rename = "rename the field or declare a named Enum"
+        let cases: [(top: String, fields: String, message: String)] = [
+            (
+                "", #"Field("mode", .enumeration(cases: [Case("a")]))"#,
+                #"put.Request.mode: an inline .enumeration case is .init(name: "a", description:, deprecation:) with literal strings, not Case("a") (static subset)"#
+            ),
+            (
+                "", #"Field("mode", .enumeration(cases: modes))"#,
+                #"put.Request.mode: an inline .enumeration lists its cases in an array literal: .enumeration(cases: [.init(name: "a")]) (static subset)"#
+            ),
+            (
+                "", #"Field("mode", .enumeration(cases: [.init(name: "a", rank: 1)]))"#,
+                "put.Request.mode: unsupported inline .enumeration case argument rank: 1"
+            ),
+            (
+                "", #"Field("mode", .enumeration(cases: [.init(name: "a-b")]))"#,
+                #"put.Request.mode: case name "a-b" must be a Swift identifier — it is both the wire value and the generated case"#
+            ),
+            (
+                "", #"Field("mode", .enumeration(cases: [.init(name: "unknown")]))"#,
+                #"put.Request.mode: "unknown" is reserved — the macro generates it as the unrecognized-value fallback (house wire-enum rule)"#
+            ),
+            (
+                "", #"Field("mode", .enumeration(cases: [.init(name: "a"), .init(name: "a")]))"#,
+                #"put.Request.mode: the inline .enumeration declares case "a" twice"#
+            ),
+            (
+                "", #"Field("mode", .enumeration(cases: []))"#,
+                "put.Request.mode: the inline .enumeration declares no cases"
+            ),
+            (
+                "", #"Field("mode", \#(one), default: "b")"#,
+                #"Call("put").Request: field "mode": the default must name a case of Mode (a)"#
+            ),
+            (
+                "", #"Field("mode", .optional(\#(one)), default: "a")"#,
+                #"Call("put"): field "mode" default: is not supported on enum or alias fields"#
+            ),
+            (
+                "", #"Field("modes", .map(key: \#(one), value: .int))"#,
+                "put.Request.modes: map keys must be .string, .int, or .uint"
+            ),
+            (
+                #"Alias("Mode", \#(one))"#, #"Field("x", .int)"#,
+                #"Alias("Mode"): an inline .enumeration takes its name from its field, and there is none here — declare a named Enum in this block"#
+            ),
+            (
+                "", #"Field("Mode", .optional(.int), cli: .omitted); Field("mode", \#(one))"#,
+                #"PutRequest: field "mode" generates the nested enum Mode, the name of another field — \#(rename)"#
+            ),
+            (
+                "",
+                #"Field("inner") { Field("mode") { Field("x", .int) } }; Field("mode", \#(one))"#,
+                #"PutRequest: field "mode" generates the nested enum Mode, the name of a nested struct in PutRequest — \#(rename)"#
+            ),
+            (
+                #"Union("U") { Case("a") { Field("mode", \#(one)) }; Case("b") { Field("mode", \#(one)) } }"#,
+                #"Field("x", .int)"#,
+                #"U: field "mode" generates the nested enum Mode, which another field "mode" generates too — \#(rename)"#
+            ),
+            (
+                "", #"Field("type", \#(one))"#,
+                #"PutRequest: field "type" generates the nested enum Type, a name Swift or the generated code keeps — \#(rename)"#
+            ),
+            (
+                "", #"Field("string", \#(one))"#,
+                #"PutRequest: field "string" generates the nested enum String, a name Swift or the generated code keeps — \#(rename)"#
+            ),
+            (
+                "", #"Field("codingKeys", \#(one))"#,
+                #"PutRequest: field "codingKeys" generates the nested enum CodingKeys, the name of a member PutRequest generates — \#(rename)"#
+            ),
+            (
+                #"Union("U") { Case("a") { Field("aCodingKeys", \#(one)) } }"#,
+                #"Field("x", .int)"#,
+                #"U: field "aCodingKeys" generates the nested enum ACodingKeys, the name of a member U generates — \#(rename)"#
+            ),
+            (
+                #"Type("Mode") { Field("mode", \#(one)) }"#, #"Field("x", .int)"#,
+                #"Mode: field "mode" generates the nested enum Mode, the name of Mode itself — \#(rename)"#
+            ),
+            (
+                #"Enum("Condition") { Case("new") }"#,
+                #"Field("condition", \#(one)); Field("previous", "Condition")"#,
+                #"PutRequest: field "condition" generates the nested enum Condition, which would hide the type Condition that field "previous" names — \#(rename)"#
+            ),
+            (
+                "", #"Field("other", \#(one)); Field("meta", Other.Meta.self)"#,
+                #"PutRequest: field "other" generates the nested enum Other, which would hide the type Other that field "meta" names — \#(rename)"#
+            ),
+        ]
+        for (top, fields, message) in cases {
+            let source = """
+                #schema("box") {
+                    \(top)
+                    Call("put") {
+                        Access(.write)
+                        Request {
+                            \(fields)
+                        }
+                    }
+                }
+                """
+            assertMacroExpansion(
+                source,
+                expandedSource: source,
+                diagnostics: [DiagnosticSpec(message: message, line: 1, column: 1)],
+                macros: macros
+            )
+        }
+        // A CLI option is no wire field: there is no type to nest its enum in.
+        let option = """
+            #schema("box") {
+                CLI(.enabled)
+                Call("put") {
+                    CLI {
+                        Field("mode", \(one))
+                    }
+                    Access(.write)
+                    Request {
+                        Field("text", .string, cli: .input)
+                    }
+                }
+            }
+            """
+        assertMacroExpansion(
+            option,
+            expandedSource: option,
+            diagnostics: [
+                DiagnosticSpec(
+                    message:
+                        #"Call("put"): CLI option "mode" declares an inline .enumeration, which has no type to generate into — declare an Enum and name it: Field("mode", "Name")"#,
+                    line: 1, column: 1)
+            ],
+            macros: macros
+        )
+    }
+
     @Test("diagnostics: types that hold themselves and field groups are checked at expansion")
     func compositionDiagnostics() {
         // Each case: the block's declarations before the call, the put

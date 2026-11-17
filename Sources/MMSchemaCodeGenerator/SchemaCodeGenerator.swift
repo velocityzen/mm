@@ -185,7 +185,10 @@ package enum SchemaCodeGenerator {
             }
         }
         return (
-            members, topLevel + exitCodeConformances(for: contract, enclosingType: enclosingType)
+            members,
+            topLevel
+                + inlineEnumerationArgumentConformances(in: contract, enclosingType: enclosingType)
+                + exitCodeConformances(for: contract, enclosingType: enclosingType)
         )
     }
 }
@@ -563,6 +566,10 @@ indirect enum ParsedType {
     case map(key: ParsedType, value: ParsedType)
     /// A nested `Field("owner") { ... }` block: generates a nested struct.
     case structure(name: String, fields: [ParsedField])
+    /// An inline `.enumeration(cases: [...])` on a field: generates a nested
+    /// enum named after the field (`Mode` for `mode`), coded like a named
+    /// `Enum`, while the contract keeps the inline enumeration.
+    case enumeration(name: String, cases: [ParsedCase])
     /// A reference to an `Enum`/`Type` declared in the same block, by
     /// unqualified name (`Field("genre", "Genre")`).
     case reference(String)
@@ -847,6 +854,12 @@ private func validateCLIOptions(
                         "Call(\"\(call.name)\"): CLI option \"\(field.name)\" must be an option or a flag"
                 )
         }
+        guard inlineEnumeration(in: field.type) == nil else {
+            throw SchemaMacroError(
+                description:
+                    "Call(\"\(call.name)\"): CLI option \"\(field.name)\" declares an inline .enumeration, which has no type to generate into — declare an Enum and name it: Field(\"\(field.name)\", \"Name\")"
+            )
+        }
         guard case .direct = commandFieldForm(field, argumentTypeNames: argumentTypeNames) else {
             throw SchemaMacroError(
                 description:
@@ -910,6 +923,11 @@ private func validateFieldDefault(
             guard case .string = flagDefault else {
                 throw mismatch("a string literal (the option takes JSON text)")
             }
+        case .enumeration:
+            throw SchemaMacroError(
+                description:
+                    "Call(\"\(call.name)\"): field \"\(field.name)\" default: is not supported on enum or alias fields"
+            )
         case .reference(let name):
             guard !argumentTypeNames.contains(name) else {
                 throw SchemaMacroError(
@@ -990,6 +1008,8 @@ private func validate(types: [ParsedTypeDecl], calls: [ParsedCall]) throws -> Se
                 try check(value, context: context)
             case .structure(_, let fields):
                 try check(fields, context: context)
+            case .enumeration:
+                break
             case .reference(let name):
                 guard typeNames.contains(name) else {
                     throw SchemaMacroError(
@@ -1736,7 +1756,11 @@ private func parseField(_ call: FunctionCallExprSyntax, context: String) throws 
         throw SchemaMacroError(
             description: "\(context): Field(\"\(name)\") requires exactly one type expression")
     }
-    let type = try parseType(typeArgument.expression, context: "\(context).\(name)")
+    let type = try parseType(
+        typeArgument.expression,
+        context: "\(context).\(name)",
+        enumerationName: capitalizedFirst(name)
+    )
     return ParsedField(
         pinnedKey: pinnedKey, name: name, type: type,
         description: description, defaultValue: defaultValue, cliHint: cliHint,
@@ -1749,7 +1773,14 @@ private func parseField(_ call: FunctionCallExprSyntax, context: String) throws 
     )
 }
 
-func parseType(_ expr: ExprSyntax, context: String) throws -> ParsedType {
+/// Parses a field's type expression. `enumerationName` names an inline
+/// `.enumeration` the expression holds: the nested enum a field's
+/// enumeration generates. Where it is nil there is no field to name one.
+func parseType(
+    _ expr: ExprSyntax,
+    context: String,
+    enumerationName: String? = nil
+) throws -> ParsedType {
     // Field("genre", "Genre"): a reference to a type declared in this block.
     if let literal = stringLiteral(expr) {
         guard !literal.contains(".") else {
@@ -1803,13 +1834,29 @@ func parseType(_ expr: ExprSyntax, context: String) throws -> ParsedType {
         switch member.declName.baseName.text {
             case "optional":
                 guard arguments.count == 1 else { break }
-                return .optional(try parseType(arguments[0].expression, context: context))
+                return .optional(
+                    try parseType(
+                        arguments[0].expression,
+                        context: context,
+                        enumerationName: enumerationName
+                    )
+                )
             case "array":
                 guard arguments.count == 1 else { break }
-                return .array(try parseType(arguments[0].expression, context: context))
+                return .array(
+                    try parseType(
+                        arguments[0].expression,
+                        context: context,
+                        enumerationName: enumerationName
+                    )
+                )
             case "map":
                 guard arguments.count == 2 else { break }
-                let key = try parseType(arguments[0].expression, context: context)
+                let key = try parseType(
+                    arguments[0].expression,
+                    context: context,
+                    enumerationName: enumerationName
+                )
                 switch key {
                     case .string, .int, .uint: break
                     default:
@@ -1817,7 +1864,13 @@ func parseType(_ expr: ExprSyntax, context: String) throws -> ParsedType {
                             description: "\(context): map keys must be .string, .int, or .uint")
                 }
                 return .map(
-                    key: key, value: try parseType(arguments[1].expression, context: context))
+                    key: key,
+                    value: try parseType(
+                        arguments[1].expression,
+                        context: context,
+                        enumerationName: enumerationName
+                    )
+                )
             case "reference":
                 guard arguments.count == 1, let name = stringLiteral(arguments[0].expression) else {
                     break
@@ -1825,9 +1878,15 @@ func parseType(_ expr: ExprSyntax, context: String) throws -> ParsedType {
                 return try parseType(
                     ExprSyntax(StringLiteralExprSyntax(content: name)), context: context)
             case "enumeration":
-                throw SchemaMacroError(
-                    description:
-                        "\(context): inline .enumeration has no generated form — declare it as a named Enum in this block"
+                guard let enumerationName else {
+                    throw SchemaMacroError(
+                        description:
+                            "\(context): an inline .enumeration takes its name from its field, and there is none here — declare a named Enum in this block"
+                    )
+                }
+                return .enumeration(
+                    name: enumerationName,
+                    cases: try parseInlineCases(arguments, context: context)
                 )
             default:
                 break
@@ -1837,6 +1896,109 @@ func parseType(_ expr: ExprSyntax, context: String) throws -> ParsedType {
         description:
             "\(context): unsupported type expression \(expr.trimmedDescription) — the macro subset supports primitives, .optional, .array, .map, nested Field(\"name\") { } blocks, \"TypeName\" references, and Swift type references (Other.Name.self)"
     )
+}
+
+/// The cases of an inline `.enumeration(cases: [...])`, each written
+/// `.init(name:description:deprecation:)` or
+/// `TypeSchema.EnumCase(name:description:deprecation:)` with literal strings
+/// (static subset). A case name is both the wire value and the generated
+/// case, so it follows the rules of a named `Enum`'s `Case`.
+private func parseInlineCases(
+    _ arguments: [LabeledExprSyntax],
+    context: String
+) throws -> [ParsedCase] {
+    guard arguments.count == 1, let argument = arguments.first,
+        argument.label?.text == "cases",
+        let array = argument.expression.as(ArrayExprSyntax.self)
+    else {
+        throw SchemaMacroError(
+            description:
+                "\(context): an inline .enumeration lists its cases in an array literal: .enumeration(cases: [.init(name: \"a\")]) (static subset)"
+        )
+    }
+    var cases: [ParsedCase] = []
+    var seen: Set<String> = []
+    for element in array.elements {
+        guard let call = element.expression.as(FunctionCallExprSyntax.self),
+            isEnumCaseInitializer(call.calledExpression),
+            call.trailingClosure == nil
+        else {
+            throw SchemaMacroError(
+                description:
+                    "\(context): an inline .enumeration case is .init(name: \"a\", description:, deprecation:) with literal strings, not \(element.expression.trimmedDescription) (static subset)"
+            )
+        }
+        var name: String?
+        var description: String?
+        var deprecation: String?
+        for caseArgument in call.arguments {
+            let label = caseArgument.label?.text
+            switch label {
+                case "name" where name == nil:
+                    name = stringLiteral(caseArgument.expression)
+                    if name == nil {
+                        throw SchemaMacroError(
+                            description:
+                                "\(context): an inline .enumeration case name must be a literal string (static subset)"
+                        )
+                    }
+                case "description" where description == nil:
+                    description = try requireDescriptionLiteral(
+                        caseArgument.expression,
+                        context: context
+                    )
+                case "deprecation" where deprecation == nil:
+                    deprecation = stringLiteral(caseArgument.expression)
+                    if deprecation == nil {
+                        throw SchemaMacroError(
+                            description:
+                                "\(context): deprecation: must be a literal string (static subset)"
+                        )
+                    }
+                default:
+                    throw SchemaMacroError(
+                        description:
+                            "\(context): unsupported inline .enumeration case argument \(caseArgument.trimmedDescription)"
+                    )
+            }
+        }
+        guard let name else {
+            throw SchemaMacroError(
+                description: "\(context): an inline .enumeration case requires name:"
+            )
+        }
+        guard isValidSwiftIdentifierish(name) else {
+            throw SchemaMacroError(
+                description:
+                    "\(context): case name \"\(name)\" must be a Swift identifier — it is both the wire value and the generated case"
+            )
+        }
+        guard name != "unknown" else {
+            throw SchemaMacroError(
+                description:
+                    "\(context): \"unknown\" is reserved — the macro generates it as the unrecognized-value fallback (house wire-enum rule)"
+            )
+        }
+        guard seen.insert(name).inserted else {
+            throw SchemaMacroError(
+                description: "\(context): the inline .enumeration declares case \"\(name)\" twice"
+            )
+        }
+        cases.append(ParsedCase(name: name, description: description, deprecation: deprecation))
+    }
+    guard !cases.isEmpty else {
+        throw SchemaMacroError(description: "\(context): the inline .enumeration declares no cases")
+    }
+    return cases
+}
+
+/// Whether a called expression builds a `TypeSchema.EnumCase`: `.init`, or the
+/// type named with or without its module, with or without `.init`.
+private func isEnumCaseInitializer(_ called: ExprSyntax) -> Bool {
+    var text = called.trimmedDescription.filter { !$0.isWhitespace }
+    if text == ".init" { return true }
+    if text.hasSuffix(".init") { text.removeLast(".init".count) }
+    return ["TypeSchema.EnumCase", "MMSchema.TypeSchema.EnumCase"].contains(text)
 }
 
 // MARK: - Code generation
@@ -1881,8 +2043,26 @@ func swiftType(_ type: ParsedType) -> String {
         case .array(let element): return "[\(swiftType(element))]"
         case .map(let key, let value): return "[\(swiftType(key)): \(swiftType(value))]"
         case .structure(let name, _): return name
+        case .enumeration(let name, _): return name
         case .reference(let name): return name
         case .external(let path): return path
+    }
+}
+
+/// The Swift type of a field held by `owner`, as code outside `owner` names
+/// it: the nested structs and enums the field generates live in `owner`.
+func swiftType(_ type: ParsedType, nestedIn owner: String) -> String {
+    switch type {
+        case .optional(let wrapped):
+            return "\(swiftType(wrapped, nestedIn: owner))?"
+        case .array(let element):
+            return "[\(swiftType(element, nestedIn: owner))]"
+        case .map(let key, let value):
+            return "[\(swiftType(key, nestedIn: owner)): \(swiftType(value, nestedIn: owner))]"
+        case .structure(let name, _), .enumeration(let name, _):
+            return "\(owner).\(name)"
+        default:
+            return swiftType(type)
     }
 }
 
@@ -1913,6 +2093,8 @@ private func schemaLiteral(_ type: ParsedType, namespace: String) throws -> Stri
         case .structure(_, let fields):
             let keyed = try assignKeys(fields, startingAt: 0, reserving: [])
             return ".structure(fields: [\(try fieldLiterals(keyed, namespace: namespace))])"
+        case .enumeration(_, let cases):
+            return enumerationLiteral(cases)
         case .reference(let name):
             return ".reference(\(quoted("\(namespace).\(name)")))"
         case .external(let path):
@@ -1995,6 +2177,13 @@ func generateStruct(
         lines.append(
             nested.split(separator: "\n").map { "    \($0)" }.joined(separator: "\n"))
     }
+    try checkInlineEnumerationNames(
+        owner: name,
+        fields: fields,
+        fieldsAreMembers: true,
+        members: ["CodingKeys"]
+    )
+    lines.append(contentsOf: inlineEnumerationDeclarations(in: fields))
     let fieldNames = Set(keyed.map(\.field.name))
     for (field, _) in keyed {
         // A boxed property's wrapper keeps the box in `_<property>`.
@@ -2101,6 +2290,122 @@ func nestedStructures(in fields: [ParsedField]) -> [(name: String, fields: [Pars
         }
     }
     return result
+}
+
+/// The enum a field's inline `.enumeration` generates, found through
+/// optionals, arrays and map values; nil when the field holds none.
+func inlineEnumeration(in type: ParsedType) -> (name: String, cases: [ParsedCase])? {
+    switch type {
+        case .enumeration(let name, let cases): (name, cases)
+        case .optional(let wrapped), .array(let wrapped): inlineEnumeration(in: wrapped)
+        case .map(_, let value): inlineEnumeration(in: value)
+        default: nil
+    }
+}
+
+/// The nested enums the fields' inline `.enumeration`s generate, indented
+/// into the type that holds the fields. A nested structure's fields have
+/// theirs generated inside that structure.
+private func inlineEnumerationDeclarations(in fields: [ParsedField]) -> [String] {
+    fields.compactMap { field in
+        inlineEnumeration(in: field.type).map { name, cases in
+            generateEnumeration(
+                name,
+                cases: cases,
+                schema: enumerationLiteral(cases),
+                deprecation: nil
+            )
+            .split(separator: "\n").map { "    \($0)" }.joined(separator: "\n")
+        }
+    }
+}
+
+/// Names a nested type must not take: the ones Swift keeps from type
+/// members, and the ones the members generated beside it use unqualified,
+/// which it would hide. Names that start with `MM` are MMSchema's and
+/// MMWire's, and are refused too.
+private let namesNestedTypesMustNotTake: Set<String> = [
+    "Type", "Protocol", "Self", "Any",
+    "Bool", "Int", "Int32", "Int64", "UInt64", "Float", "Double", "String",
+    "Hasher", "Decoder", "Encoder", "CodingKey", "Codable", "Decodable", "Encodable",
+    "Hashable", "Sendable", "CaseIterable", "RawRepresentable", "Error", "Swift",
+    "TypeSchema", "SchemaDescribable", "SchemaValueError", "Writer", "Reader", "Value",
+]
+
+/// Throws when the enum a field's inline `.enumeration` generates would
+/// clash in `owner`, the struct or union it is nested in: with a name it must
+/// not take, the owner's own name, a member the owner generates, a field when
+/// fields are the owner's members, a nested struct, another field's enum, or
+/// a type a field names, which the nested enum would hide.
+private func checkInlineEnumerationNames(
+    owner: String,
+    fields: [ParsedField],
+    fieldsAreMembers: Bool,
+    members: Set<String>
+) throws {
+    var nestedTypes: [String: String] = [:]
+    for (name, _) in nestedStructures(in: fields) {
+        nestedTypes[name] = "the name of a nested struct in \(owner)"
+    }
+    let fieldNames = fieldsAreMembers ? Set(fields.map(\.name)) : []
+    let namedTypes = typesNamed(by: fields)
+    for field in fields {
+        guard let (name, _) = inlineEnumeration(in: field.type) else { continue }
+        let clash: String? =
+            if name.hasPrefix("MM") || namesNestedTypesMustNotTake.contains(name) {
+                "a name Swift or the generated code keeps"
+            } else if name == owner {
+                "the name of \(owner) itself"
+            } else if members.contains(name) {
+                "the name of a member \(owner) generates"
+            } else if fieldNames.contains(name) {
+                "the name of another field"
+            } else if let nested = nestedTypes[name] {
+                nested
+            } else if let user = namedTypes[name] {
+                "which would hide the type \(name) that field \"\(user)\" names"
+            } else {
+                nil
+            }
+        if let clash {
+            throw SchemaMacroError(
+                description:
+                    "\(owner): field \"\(field.name)\" generates the nested enum \(name), \(clash) — rename the field or declare a named Enum"
+            )
+        }
+        nestedTypes[name] = "which another field \"\(field.name)\" generates too"
+    }
+}
+
+/// The types the fields name, at any depth, by the first field naming each:
+/// the block's declared types they refer to, and the first part of each
+/// Swift type path.
+private func typesNamed(by fields: [ParsedField]) -> [String: String] {
+    var named: [String: String] = [:]
+    func visit(_ type: ParsedType, field: String) {
+        switch type {
+            case .optional(let wrapped), .array(let wrapped):
+                visit(wrapped, field: field)
+            case .map(let key, let value):
+                visit(key, field: field)
+                visit(value, field: field)
+            case .structure(_, let nested):
+                for nestedField in nested {
+                    visit(nestedField.type, field: field)
+                }
+            case .reference(let name):
+                if named[name] == nil { named[name] = field }
+            case .external(let path):
+                let head = String(path.prefix { $0 != "." && $0 != "<" })
+                if named[head] == nil { named[head] = field }
+            default:
+                break
+        }
+    }
+    for field in fields {
+        visit(field.type, field: field.name)
+    }
+    return named
 }
 
 // MARK: - Generated MessagePack code
@@ -2320,11 +2625,12 @@ private func mmPackReadField(_ field: ParsedField, codingKeys: String) -> String
 
 /// Whether reading a value of `type` can reach a `Decodable` conformance,
 /// the only code that throws a `DecodingError`: maps and external types
-/// read through theirs, and a named type's fields can hold either.
+/// read through theirs, and a named type's fields can hold either. An inline
+/// enumeration's enum reads a string.
 private func mmPackReadReachesDecodable(_ type: ParsedType) -> Bool {
     switch type {
         case .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp,
-            .duration, .uuid:
+            .duration, .uuid, .enumeration:
             return false
         case .optional(let wrapped), .array(let wrapped):
             return mmPackReadReachesDecodable(wrapped)
@@ -2357,7 +2663,7 @@ private func mmPackWriteThrows(_ type: ParsedType) -> Bool {
             return false
         case .optional(let wrapped), .array(let wrapped):
             return mmPackWriteThrows(wrapped)
-        case .map, .structure, .reference, .external:
+        case .map, .structure, .enumeration, .reference, .external:
             return true
     }
 }
@@ -2387,7 +2693,7 @@ func mmPackWrite(_ type: ParsedType, value: String) -> String {
             return
                 "\(marker)writer.writeArray(\(value)) { writer, element in \(mmPackWrite(element, value: "element")) }"
         case .map: return "try writer.writeEncodable(\(value))"
-        case .structure, .reference: return "try \(value).encode(mmPack: &writer)"
+        case .structure, .enumeration, .reference: return "try \(value).encode(mmPack: &writer)"
         case .external: return "try writer.write(\(value))"
     }
 }
@@ -2417,10 +2723,97 @@ func mmPackRead(_ type: ParsedType, level: Int) -> String {
             return
                 "try reader.readArray(depth: \(depth)) { reader in \(mmPackRead(element, level: level + 1)) }"
         case .map: return "try reader.readDecodable(\(swiftType(type)).self, depth: \(depth))"
-        case .structure(let name, _), .reference(let name):
+        case .structure(let name, _), .enumeration(let name, _), .reference(let name):
             return "try \(name)(mmPack: &reader, depth: \(depth))"
         case .external(let path): return "try reader.read(\(path).self, depth: \(depth))"
     }
+}
+
+/// A wire enum: one case per declared case, plus the `unknown` fallback that
+/// keeps an undeclared value and writes it back unchanged (house wire-enum
+/// rule). A named `Enum` describes itself as its qualified `.reference`; the
+/// enum an inline `.enumeration` generates describes itself as that
+/// enumeration.
+private func generateEnumeration(
+    _ name: String,
+    cases: [ParsedCase],
+    schema: String,
+    deprecation: String?
+) -> String {
+    var lines: [String] = []
+    if let deprecation {
+        lines.append(deprecationDocLine(deprecation))
+    }
+    lines.append(
+        "public enum \(name): RawRepresentable, Codable, Hashable, Sendable, CaseIterable, SchemaDescribable, MMPackCodable, MMConstraintValidating {"
+    )
+    for enumCase in cases {
+        if let description = enumCase.description {
+            lines.append("    /// \(docCommentText(description))")
+        }
+        if let deprecation = enumCase.deprecation {
+            lines.append("    \(deprecationDocLine(deprecation))")
+        }
+        lines.append("    case `\(enumCase.name)`")
+    }
+    lines.append(
+        "    /// A wire value this contract does not declare, kept so it encodes back unchanged"
+    )
+    lines.append("    /// (house wire-enum rule).")
+    lines.append("    case unknown(String)")
+    lines.append("    /// The declared case named `rawValue`; nil for any other value.")
+    lines.append("    public init?(rawValue: String) {")
+    lines.append("        switch rawValue {")
+    for enumCase in cases {
+        lines.append(
+            "            case \(quoted(enumCase.name)): self = .`\(enumCase.name)`"
+        )
+    }
+    lines.append("            default: return nil")
+    lines.append("        }")
+    lines.append("    }")
+    lines.append(
+        "    /// The wire value: a declared case's name, or the value `unknown` keeps."
+    )
+    lines.append("    public var rawValue: String {")
+    lines.append("        switch self {")
+    for enumCase in cases {
+        lines.append("            case .`\(enumCase.name)`: \(quoted(enumCase.name))")
+    }
+    lines.append("            case .unknown(let raw): raw")
+    lines.append("        }")
+    lines.append("    }")
+    lines.append(
+        "    /// Equal when they write the same wire value, so a map never holds two keys that"
+    )
+    lines.append(
+        "    /// write the same text: an `unknown` holding a declared case's name equals that case."
+    )
+    lines.append("    public static func == (lhs: Self, rhs: Self) -> Bool {")
+    lines.append("        lhs.rawValue == rhs.rawValue")
+    lines.append("    }")
+    lines.append("    public func hash(into hasher: inout Hasher) {")
+    lines.append("        hasher.combine(self.rawValue)")
+    lines.append("    }")
+    lines.append("    /// The declared cases, in declaration order.")
+    lines.append("    public static var allCases: [\(name)] {")
+    lines.append("        [\(cases.map { ".`\($0.name)`" }.joined(separator: ", "))]")
+    lines.append("    }")
+    lines.append("    public init(from decoder: any Decoder) throws {")
+    lines.append("        let raw = try decoder.singleValueContainer().decode(String.self)")
+    lines.append("        self = \(name)(rawValue: raw) ?? .unknown(raw)")
+    lines.append("    }")
+    lines.append("    public func encode(to encoder: any Encoder) throws {")
+    lines.append("        var container = encoder.singleValueContainer()")
+    lines.append("        try container.encode(self.rawValue)")
+    lines.append("    }")
+    lines.append(contentsOf: mmPackEnumMembers(name).map { "    \($0)" })
+    lines.append(contentsOf: constraintViolationFunction([]).map { "    \($0)" })
+    lines.append("    public static var schema: TypeSchema {")
+    lines.append("        \(schema)")
+    lines.append("    }")
+    lines.append("}")
+    return lines.joined(separator: "\n")
 }
 
 private func generateNamedType(
@@ -2448,80 +2841,12 @@ private func generateNamedType(
                 deprecation: type.deprecation
             )
         case .enumeration(let cases):
-            var lines: [String] = []
-            if let deprecation = type.deprecation {
-                lines.append(deprecationDocLine(deprecation))
-            }
-            lines.append(
-                "public enum \(type.name): RawRepresentable, Codable, Hashable, Sendable, CaseIterable, SchemaDescribable, MMPackCodable, MMConstraintValidating {"
+            return generateEnumeration(
+                type.name,
+                cases: cases,
+                schema: ".reference(\(quoted(qualified)))",
+                deprecation: type.deprecation
             )
-            for enumCase in cases {
-                if let description = enumCase.description {
-                    lines.append("    /// \(docCommentText(description))")
-                }
-                if let deprecation = enumCase.deprecation {
-                    lines.append("    \(deprecationDocLine(deprecation))")
-                }
-                lines.append("    case `\(enumCase.name)`")
-            }
-            lines.append(
-                "    /// A wire value this contract does not declare, kept so it encodes back unchanged"
-            )
-            lines.append("    /// (house wire-enum rule).")
-            lines.append("    case unknown(String)")
-            lines.append("    /// The declared case named `rawValue`; nil for any other value.")
-            lines.append("    public init?(rawValue: String) {")
-            lines.append("        switch rawValue {")
-            for enumCase in cases {
-                lines.append(
-                    "            case \(quoted(enumCase.name)): self = .`\(enumCase.name)`"
-                )
-            }
-            lines.append("            default: return nil")
-            lines.append("        }")
-            lines.append("    }")
-            lines.append(
-                "    /// The wire value: a declared case's name, or the value `unknown` keeps."
-            )
-            lines.append("    public var rawValue: String {")
-            lines.append("        switch self {")
-            for enumCase in cases {
-                lines.append("            case .`\(enumCase.name)`: \(quoted(enumCase.name))")
-            }
-            lines.append("            case .unknown(let raw): raw")
-            lines.append("        }")
-            lines.append("    }")
-            lines.append(
-                "    /// Equal when they write the same wire value, so a map never holds two keys that"
-            )
-            lines.append(
-                "    /// write the same text: an `unknown` holding a declared case's name equals that case."
-            )
-            lines.append("    public static func == (lhs: Self, rhs: Self) -> Bool {")
-            lines.append("        lhs.rawValue == rhs.rawValue")
-            lines.append("    }")
-            lines.append("    public func hash(into hasher: inout Hasher) {")
-            lines.append("        hasher.combine(self.rawValue)")
-            lines.append("    }")
-            lines.append("    /// The declared cases, in declaration order.")
-            lines.append("    public static var allCases: [\(type.name)] {")
-            lines.append("        [\(cases.map { ".`\($0.name)`" }.joined(separator: ", "))]")
-            lines.append("    }")
-            lines.append("    public init(from decoder: any Decoder) throws {")
-            lines.append("        let raw = try decoder.singleValueContainer().decode(String.self)")
-            lines.append("        self = \(type.name)(rawValue: raw) ?? .unknown(raw)")
-            lines.append("    }")
-            lines.append("    public func encode(to encoder: any Encoder) throws {")
-            lines.append("        var container = encoder.singleValueContainer()")
-            lines.append("        try container.encode(self.rawValue)")
-            lines.append("    }")
-            lines.append(contentsOf: mmPackEnumMembers(type.name).map { "    \($0)" })
-            lines.append(contentsOf: constraintViolationFunction([]).map { "    \($0)" })
-            lines.append("    public static var schema: TypeSchema {")
-            lines.append("        .reference(\(quoted(qualified)))")
-            lines.append("    }")
-            lines.append("}")
-            return lines.joined(separator: "\n")
         case .union(let cases):
             return note
                 + (try generateUnion(
@@ -2584,6 +2909,15 @@ private func generateUnion(
             lines.append(nested.split(separator: "\n").map { "    \($0)" }.joined(separator: "\n"))
         }
     }
+    // The cases' fields share the union's scope, as their nested structs do.
+    let caseFields = cases.flatMap(\.fields)
+    try checkInlineEnumerationNames(
+        owner: name,
+        fields: caseFields,
+        fieldsAreMembers: false,
+        members: Set(["CodingKeys"] + cases.flatMap { [$0.name, $0.codingKeysName] })
+    )
+    lines.append(contentsOf: inlineEnumerationDeclarations(in: caseFields))
     lines.append("    enum CodingKeys: Int, CodingKey {")
     lines.append("        case `case` = 0")
     lines.append("        case fields = 1")
@@ -2756,6 +3090,22 @@ private func mmPackUnionMembers(
     return lines
 }
 
+/// The `TypeSchema.enumeration` expression for a list of cases, their
+/// descriptions and deprecations included.
+func enumerationLiteral(_ cases: [ParsedCase]) -> String {
+    let caseLiterals = cases.map { enumCase in
+        var literal = "TypeSchema.EnumCase(name: \(quoted(enumCase.name))"
+        if let description = enumCase.description {
+            literal += ", description: \(quoted(description))"
+        }
+        if let deprecation = enumCase.deprecation {
+            literal += ", deprecation: \(quoted(deprecation))"
+        }
+        return literal + ")"
+    }.joined(separator: ", ")
+    return ".enumeration(cases: [\(caseLiterals)])"
+}
+
 /// The definition a named type serves through `types` — full shape with
 /// descriptions (unlike the generated Swift type's `.reference` description).
 private func definitionLiteral(_ type: ParsedTypeDecl, namespace: String) throws -> String {
@@ -2767,17 +3117,7 @@ private func definitionLiteral(_ type: ParsedTypeDecl, namespace: String) throws
             let keyed = try assignKeys(fields, startingAt: 0, reserving: [])
             schema = ".structure(fields: [\(try fieldLiterals(keyed, namespace: namespace))])"
         case .enumeration(let cases):
-            let caseLiterals = cases.map { enumCase in
-                var literal = "TypeSchema.EnumCase(name: \(quoted(enumCase.name))"
-                if let description = enumCase.description {
-                    literal += ", description: \(quoted(description))"
-                }
-                if let deprecation = enumCase.deprecation {
-                    literal += ", deprecation: \(quoted(deprecation))"
-                }
-                return literal + ")"
-            }.joined(separator: ", ")
-            schema = ".enumeration(cases: [\(caseLiterals)])"
+            schema = enumerationLiteral(cases)
         case .union(let cases):
             let caseLiterals = try cases.map { unionCase in
                 let keyed = try assignKeys(unionCase.fields, startingAt: 0, reserving: [])
@@ -3043,15 +3383,18 @@ private enum CommandFieldForm {
 
 /// Classifies a field: primitives, wire enums, and arrays of either surface
 /// as typed options; structures, maps, non-enum references, and externals
-/// take a JSON literal.
+/// take a JSON literal. With an `owner`, the type that holds the field, the
+/// field's nested types are named through it, as code outside it names them.
 private func commandFieldForm(
-    _ field: ParsedField, argumentTypeNames: Set<String>
+    _ field: ParsedField,
+    argumentTypeNames: Set<String>,
+    owner: String? = nil
 ) -> CommandFieldForm {
     if case .omitted = field.cliHint { return .omitted }
     func isDirect(_ type: ParsedType) -> Bool {
         switch type {
             case .bool, .int, .uint, .float, .double, .string, .bytes,
-                .date, .datetime, .timestamp, .duration, .uuid:
+                .date, .datetime, .timestamp, .duration, .uuid, .enumeration:
                 return true
             case .reference(let name):
                 return argumentTypeNames.contains(name)
@@ -3061,7 +3404,7 @@ private func commandFieldForm(
                 return false
         }
     }
-    let swift = swiftType(field.type)
+    let swift = owner.map { swiftType(field.type, nestedIn: $0) } ?? swiftType(field.type)
     return isDirect(field.type) ? .direct(swiftType: swift) : .json(swiftType: swift)
 }
 
@@ -3103,11 +3446,13 @@ private func commandDeclaration(
     // init), or — for external and optional references — a single JSON
     // option.
     var fields = call.request
+    var fieldOwner = call.requestTypeName
     var requestTakesJSON = false
     if let payload = call.requestPayload {
         switch payload {
             case .reference(let name):
                 fields = structsByName[name] ?? []
+                fieldOwner = name
                 requestTakesJSON = structsByName[name] == nil
             default:
                 requestTakesJSON = true
@@ -3187,14 +3532,24 @@ private func commandDeclaration(
         let optionFields = fields.filter { !isPositional($0) }
         for field in requiredPositionals + optionalPositionals {
             emitField(
-                field, call: call, argumentTypeNames: argumentTypeNames,
-                lines: &lines, preludes: &preludes)
+                field,
+                call: call,
+                argumentTypeNames: argumentTypeNames,
+                owner: fieldOwner,
+                lines: &lines,
+                preludes: &preludes
+            )
         }
         lines.append(variadicPositionals.isEmpty ? entityProperty : entityOption)
         for field in variadicPositionals + optionFields {
             emitField(
-                field, call: call, argumentTypeNames: argumentTypeNames,
-                lines: &lines, preludes: &preludes)
+                field,
+                call: call,
+                argumentTypeNames: argumentTypeNames,
+                owner: fieldOwner,
+                lines: &lines,
+                preludes: &preludes
+            )
         }
         if let inputField {
             let valueName = kebabCased(inputField.name)
@@ -3397,6 +3752,42 @@ private func deprecationWarnings(
     return lines
 }
 
+/// The `MMCLIEnumArgument` conformances of the enums that inline
+/// `.enumeration`s generate on the fields a command takes: a call's own
+/// request fields, or the fields of the declared type that is its request.
+/// Two calls taking one declared type share its conformances.
+private func inlineEnumerationArgumentConformances(
+    in contract: ParsedContract,
+    enclosingType: String
+) -> [String] {
+    var declaredFields: [String: [ParsedField]] = [:]
+    for type in contract.types {
+        if case .structure(let fields) = type.payload { declaredFields[type.name] = fields }
+    }
+    var conformed: Set<String> = []
+    var conformances: [String] = []
+    for call in contract.calls where !call.cliOmitted {
+        let owner: String
+        let fields: [ParsedField]
+        switch call.requestPayload {
+            case nil:
+                (owner, fields) = (call.requestTypeName, call.request)
+            case .reference(let name)?:
+                (owner, fields) = (name, declaredFields[name] ?? [])
+            default:
+                continue
+        }
+        for field in fields {
+            guard let (name, cases) = inlineEnumeration(in: field.type) else { continue }
+            let qualified = "\(enclosingType).\(owner).\(name)"
+            if conformed.insert(qualified).inserted {
+                conformances.append(enumArgumentConformance(qualified, cases: cases))
+            }
+        }
+    }
+    return conformances
+}
+
 /// A wire enum's CLI conformance, naming its deprecated values so parsing
 /// one warns.
 private func enumArgumentConformance(_ type: String, cases: [ParsedCase]) -> String {
@@ -3473,6 +3864,7 @@ private func emitCLIOptions(
             field,
             call: call,
             argumentTypeNames: argumentTypeNames,
+            owner: nil,
             lines: &properties,
             preludes: &preludes
         )
@@ -3486,14 +3878,17 @@ private func emitCLIOptions(
 }
 
 /// Emits the property (and any run() prelude) for one request field.
+/// `owner` is the type that holds the field, whose nested types the
+/// property's type names; nil for a CLI option, which holds none.
 private func emitField(
     _ field: ParsedField,
     call: ParsedCall,
     argumentTypeNames: Set<String>,
+    owner: String?,
     lines: inout [String],
     preludes: inout [String]
 ) {
-    let form = commandFieldForm(field, argumentTypeNames: argumentTypeNames)
+    let form = commandFieldForm(field, argumentTypeNames: argumentTypeNames, owner: owner)
     if case .omitted = form { return }
 
     let optionName = cliOptionName(field)

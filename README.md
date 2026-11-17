@@ -469,7 +469,14 @@ A named type can hold itself, and fields shared by several blocks are declared o
     }
     Call("evaluate") {
         Access { .read }
-        Request { Field("expression", "Expression") }
+        Request {
+            Field("expression", "Expression")
+            Field(
+                "rounding",
+                .enumeration(cases: [.init(name: "down"), .init(name: "nearest")]),
+                default: "nearest"
+            )
+        }
         Response {
             Field("value", .int)
             audit
@@ -480,7 +487,16 @@ A named type can hold itself, and fields shared by several blocks are declared o
 
 - **Recursive types.** A type may hold itself directly or through other named types, through an optional, a nested `Field("x") { ... }` structure, a union case, an array or a map. On the wire a value nests only as deep as it does. Swift lays out a struct's properties inline, so `#schema` keeps a field that holds its own type through an optional or a nested structure in an `MMIndirect` box (`@MMIndirect public var parent: Node?`), and makes a union case that holds its union `indirect`. The property types, the initializers, equality and the wire bytes are what they would be without the box. A type whose every value would hold another value of its cycle without end (`Field("next", "Node")` with no optional on the way) is refused at compile time.
 - **Field groups.** `let audit = FieldGroup { ... }` declares fields once; a bare `audit` among a block's fields (a `Type`'s, a union case's, a call part's, a nested structure's) puts them there. Their keys are assigned as if they were written in that place: an unpinned field takes the smallest key the block has not used, a pinned one keeps its pin. So a field added to a group moves the keys of the unpinned fields after the group, in every block that uses it: use groups after a block's own fields, or pin keys, where keys have to stay. The wire, discovery and the fingerprint see only the fields. `#schema` expands a group declared with `let` at the top of its block; the runtime DSL takes one declared anywhere.
+- **Inline enumerations.** A field may list its cases in place: `.enumeration(cases: [...])`, inside an optional, an array or a map's values too. `#schema` generates a nested enum named after the field (`EvaluateRequest.Rounding`) with the same `unknown` case and coding as a named `Enum`, and the contract keeps the inline enumeration, so the wire and the fingerprint are what the runtime DSL gives. A default names one of its cases. The enum's name must be free in the type that holds it: `#schema` refuses one that another field, a nested type, a generated member, or a type a field names already takes. An error case's fields and a call's CLI options name a declared `Enum` instead.
 - **One block at a time.** A macro reads only its own block. A type from another container is a Swift type (`Field("meta", CommonTypes.LineMeta.self)`) whose shape `#schema` never sees: it can't check a default against one, or box a field on a cycle that runs through one. And the compiler doesn't let a macro's arguments use what another macro generated in the same module, so a shared `#schemaTypes` container goes in a module of its own.
+- **Two spellings of one reference.** The runtime DSL names another container's type by its qualified wire name, a dotted reference; `#schema` names it by its Swift type, whose `schema` is that same qualified reference. Both declare one contract:
+
+  | Runtime DSL (`Schema`) | `#schema` |
+  | --- | --- |
+  | `Field("meta", "common.LineMeta")` | `Field("meta", CommonTypes.LineMeta.self)` |
+  | `Response(.reference("common.LineMeta"))` | `Response(CommonTypes.LineMeta.self)` |
+
+  `#schema` refuses the dotted form: it can't know the Swift type behind a wire name, and it has to name that type in the code it generates.
 
 ## Authorization model
 

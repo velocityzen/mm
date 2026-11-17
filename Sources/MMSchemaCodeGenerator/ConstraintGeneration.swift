@@ -332,6 +332,7 @@ func kindName(_ type: ParsedType) -> String {
         case .array: "an array"
         case .map: "a map"
         case .structure: "a structure"
+        case .enumeration: "an enumeration"
         case .reference(let name): name
         case .external(let path): path
     }
@@ -448,7 +449,7 @@ func fieldsHoldConstraints(_ fields: [ParsedField], constrained: Set<String>) ->
 func holdsConstraints(_ type: ParsedType, constrained: Set<String>) -> Bool {
     switch type {
         case .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp,
-            .duration, .uuid:
+            .duration, .uuid, .enumeration:
             return false
         case .optional(let wrapped), .array(let wrapped):
             return holdsConstraints(wrapped, constrained: constrained)

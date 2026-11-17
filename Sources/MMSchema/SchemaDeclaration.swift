@@ -916,7 +916,9 @@ public struct Field: Sendable, Hashable {
     /// `Field("priority", "Priority")` for a type declared in the same block
     /// (qualified by the enclosing `Schema`/`Types`), or
     /// `Field("meta", "common.LineMeta")` for a dotted, already-qualified
-    /// cross-schema reference (validated at server startup).
+    /// cross-schema reference (validated at server startup). `#schema` takes
+    /// the Swift type in the dotted form's place:
+    /// `Field("meta", CommonTypes.LineMeta.self)`.
     public init(
         _ name: String,
         _ typeName: String,

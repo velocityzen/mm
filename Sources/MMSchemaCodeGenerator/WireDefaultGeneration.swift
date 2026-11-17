@@ -17,9 +17,9 @@ struct ParsedWireDefault {
 /// (`TypeSchema.Default.fitted(to:constraints:)`): a `bool`, `int`, `uint`,
 /// `float`, `double` or `string` field takes a value of its own kind that
 /// keeps its constraints, an integer standing for a floating number; a field
-/// of the block's `Enum` takes one of its case names, and of its `Alias` a
-/// value of the alias's scalar that keeps the alias's constraints. Every
-/// other kind takes none.
+/// of the block's `Enum` or of an inline `.enumeration` takes one of its case
+/// names, and of the block's `Alias` a value of the alias's scalar that keeps
+/// the alias's constraints. Every other kind takes none.
 struct WireDefaultResolver {
     let types: [String: ParsedTypeDecl.Payload]
 
@@ -125,21 +125,12 @@ struct WireDefaultResolver {
             case .optional:
                 // An optional field's default is a CLI default.
                 return nil
+            case .enumeration(let name, let cases):
+                return try caseDefault(literal, cases: cases, of: name, context: context)
             case .reference(let name):
                 switch self.types[name] {
                     case .enumeration(let cases)?:
-                        guard case .string(let caseName) = literal,
-                            cases.contains(where: { $0.name == caseName })
-                        else {
-                            throw SchemaMacroError(
-                                description:
-                                    "\(context): the default must name a case of \(name) (\(cases.map(\.name).joined(separator: ", ")))"
-                            )
-                        }
-                        return ParsedWireDefault(
-                            swiftExpression: ".`\(caseName)`",
-                            schemaLiteral: ".string(\(quoted(caseName)))"
-                        )
+                        return try caseDefault(literal, cases: cases, of: name, context: context)
                     case .alias(let scalar, let constraints)?:
                         let fitted = try fittedDefault(
                             literal,
@@ -176,6 +167,28 @@ struct WireDefaultResolver {
                 )
         }
     }
+}
+
+/// The default of a field of a wire enum, named or inline: one of its case
+/// names.
+private func caseDefault(
+    _ literal: ParsedFieldDefault,
+    cases: [ParsedCase],
+    of name: String,
+    context: String
+) throws -> ParsedWireDefault {
+    guard case .string(let caseName) = literal,
+        cases.contains(where: { $0.name == caseName })
+    else {
+        throw SchemaMacroError(
+            description:
+                "\(context): the default must name a case of \(name) (\(cases.map(\.name).joined(separator: ", ")))"
+        )
+    }
+    return ParsedWireDefault(
+        swiftExpression: ".`\(caseName)`",
+        schemaLiteral: ".string(\(quoted(caseName)))"
+    )
 }
 
 /// A `default:` literal fitted to a scalar kind, or the reason it cannot be

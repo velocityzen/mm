@@ -399,15 +399,16 @@
             [
                 "sku", "quantity", "stock", "price", "weight", "active", "condition", "tags",
                 "note", "grid", "lookup", "serials", "released", "updated", "stamped", "stamp",
-                "owner", "photo", "thumbnail", "lead", "grace", "lot", "supplier",
+                "owner", "photo", "thumbnail", "lead", "grace", "lot", "supplier", "finish",
+                "coats", "rooms",
             ],
             optional: ["note", "updated", "stamped", "thumbnail", "grace", "supplier"],
             key: { Catalog.Item.CodingKeys(stringValue: $0)?.rawValue }
         )
 
         static let ownerLayout = FieldLayout(
-            ["name", "since"],
-            optional: ["since"],
+            ["name", "since", "tier"],
+            optional: ["since", "tier"],
             key: { Catalog.Item.Owner.CodingKeys(stringValue: $0)?.rawValue }
         )
 

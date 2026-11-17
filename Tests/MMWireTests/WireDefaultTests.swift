@@ -4,8 +4,8 @@ import NIOCore
 import Testing
 
 /// Every schema-evolution form `#schema` generates: wire defaults on scalar,
-/// enum, alias and union-case fields, reserved keys and names, and
-/// deprecations at every level.
+/// enum, inline enumeration, alias and union-case fields, reserved keys and
+/// names, and deprecations at every level.
 enum Evolving: MethodNamespace {
     #schema("evolving") {
         Enum("Level") {
@@ -34,6 +34,11 @@ enum Evolving: MethodNamespace {
             Request {
                 Field("limit", .int, default: 20)
                 Field("choice", "Choice")
+                Field(
+                    "pace",
+                    .enumeration(cases: [.init(name: "fast"), .init(name: "slow")]),
+                    default: "slow"
+                )
             }
             Response {
                 Field("settings", "Settings")
@@ -111,6 +116,29 @@ struct WireDefaultTests {
         #expect(
             try decodedThroughGeneratedCode(Evolving.Choice.self, from: bytes).get() == .count(n: 3)
         )
+    }
+
+    @Test("an inline enumeration's field reads its default case on both paths")
+    func inlineEnumerationDefault() throws {
+        // {1: {0: "count", 1: {}}}: the choice, and no limit or pace.
+        let bytes = mpBytes("81018200a5636f756e740180")
+        let expected = Evolving.ListRequest(choice: .count(n: 3))
+        #expect(expected.pace == .slow)
+        #expect(try decodedThroughCodable(Evolving.ListRequest.self, from: bytes).get() == expected)
+        #expect(
+            try decodedThroughGeneratedCode(Evolving.ListRequest.self, from: bytes).get()
+                == expected
+        )
+        let request = try Evolving.list.signature().get().request
+        guard case .structure(let fields) = request else {
+            Issue.record("the list request is not a structure")
+            return
+        }
+        let pace = try #require(fields.first { $0.name == "pace" })
+        #expect(
+            pace.type == .optional(.enumeration(cases: [.init(name: "fast"), .init(name: "slow")]))
+        )
+        #expect(pace.defaultValue == .string("slow"))
     }
 
     @Test("a defaulted field is always written, under keys that skip the reserved one")

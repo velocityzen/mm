@@ -17,7 +17,7 @@
     // dictionary's entries in one order: sorted by their keys' bytes.
 
     /// A request's `Codable` bytes with every dictionary's entries sorted by
-    /// their keys' bytes: each item's lookup and serials, and each held
+    /// their keys' bytes: each item's lookup, serials and rooms, and each held
     /// shipment's duties, at any depth of shipments holding shipments.
     /// Everything else keeps its
     /// bytes and its place: a struct's or a union's fields come in
@@ -147,7 +147,7 @@
             typealias Keys = Catalog.Item.CodingKeys
             try self.structure { copy, key in
                 switch key {
-                    case Keys.lookup.rawValue, Keys.serials.rawValue:
+                    case Keys.lookup.rawValue, Keys.serials.rawValue, Keys.rooms.rawValue:
                         try copy.dictionary()
                     default:
                         try copy.value()
@@ -207,6 +207,7 @@
     enum DictionaryPlace: String, CaseIterable, Sendable {
         case lookup = "a lookup in another order"
         case serials = "serials in another order"
+        case rooms = "rooms in another order"
         case duties = "duties in another order"
         case dutiesUnderAnotherShipment = "duties under another shipment in another order"
     }
@@ -225,6 +226,7 @@
                 var item = item
                 item.lookup = self.rebuilt(item.lookup, at: .lookup)
                 item.serials = self.rebuilt(item.serials, at: .serials)
+                item.rooms = self.rebuilt(item.rooms, at: .rooms)
                 return item
             }
             request.shipments = request.shipments.map { shipments in
@@ -296,7 +298,10 @@
         @Test
         func dictionariesEncodeInOneOrder() throws {
             try property(
-                reaching: ["a lookup in another order", "serials in another order"],
+                reaching: [
+                    "a lookup in another order", "serials in another order",
+                    "rooms in another order",
+                ],
                 reachingAfter: [
                     "an undeclared case's fields with two entries or more": 1_000,
                     "duties in another order": 1_000,

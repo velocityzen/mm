@@ -77,6 +77,15 @@
                 Field("owner") {
                     Field("name", .string)
                     Field("since", .optional(.date))
+                    Field(
+                        "tier",
+                        .optional(
+                            .enumeration(cases: [
+                                .init(name: "gold"),
+                                .init(name: "silver", deprecation: "Folded into gold"),
+                            ])
+                        )
+                    )
                 }
                 Field("photo", .bytes)
                 Field("thumbnail", .optional(.bytes))
@@ -84,6 +93,28 @@
                 Field("grace", .optional(.duration))
                 Field("lot", .uuid)
                 Field("supplier", .optional(.uuid))
+                Field(
+                    "finish",
+                    .enumeration(cases: [
+                        .init(name: "matte"),
+                        .init(name: "gloss", description: "Polished to shine"),
+                    ])
+                )
+                Field(
+                    "coats",
+                    .array(
+                        .optional(
+                            .enumeration(cases: [.init(name: "primer"), .init(name: "clear")])
+                        )
+                    )
+                )
+                Field(
+                    "rooms",
+                    .map(
+                        key: .string,
+                        value: .enumeration(cases: [.init(name: "kitchen"), .init(name: "hall")])
+                    )
+                )
             }
             Union("Shipment") {
                 Case("pending")
@@ -112,6 +143,12 @@
                     Field("via") {
                         Field("next", .optional(.reference("Shipment")))
                     }
+                }
+                Case("recalled") {
+                    Field(
+                        "reason",
+                        .enumeration(cases: [.init(name: "damaged"), .init(name: "unwanted")])
+                    )
                 }
             }
             Type("Part") {
@@ -227,13 +264,26 @@
             }
         }
 
-        /// The declared cases, and values the contract does not declare,
-        /// which a newer peer sends and `unknown` keeps.
-        static let condition: Gen<Catalog.Condition> = .oneOf(
-            .allCases,
-            .allCases,
-            Gen<String>.string().map { Catalog.Condition(rawValue: $0) ?? .unknown($0) }
-        )
+        /// A wire enum's declared cases, and values the contract does not
+        /// declare, which a newer peer sends and `unknown` keeps.
+        static func wireEnum<Value: CaseIterable & RawRepresentable & Sendable>(
+            unknown: @escaping @Sendable (String) -> Value
+        ) -> Gen<Value> where Value.RawValue == String {
+            .oneOf(
+                .allCases,
+                .allCases,
+                Gen<String>.string().map { Value(rawValue: $0) ?? unknown($0) }
+            )
+        }
+
+        static let condition = wireEnum(unknown: Catalog.Condition.unknown)
+
+        // The enums the catalog's inline enumerations generate.
+        static let tier = wireEnum(unknown: Catalog.Item.Owner.Tier.unknown)
+        static let finish = wireEnum(unknown: Catalog.Item.Finish.unknown)
+        static let coat = wireEnum(unknown: Catalog.Item.Coats.unknown)
+        static let room = wireEnum(unknown: Catalog.Item.Rooms.unknown)
+        static let reason = wireEnum(unknown: Catalog.Shipment.Reason.unknown)
 
         /// A fixarray holds up to 15 elements.
         func list<Element>(of element: Gen<Element>) -> Gen<[Element]> {
@@ -304,14 +354,18 @@
                     ),
                     owner: Catalog.Item.Owner(
                         name: tc.draw(self.text),
-                        since: tc.draw(.optional(Self.date))
+                        since: tc.draw(.optional(Self.date)),
+                        tier: tc.draw(.optional(Self.tier))
                     ),
                     photo: tc.draw(self.bytes),
                     thumbnail: tc.draw(.optional(self.bytes)),
                     lead: tc.draw(DurationGenerators.durations),
                     grace: tc.draw(.optional(DurationGenerators.durations)),
                     lot: tc.draw(UUIDGenerators.uuids),
-                    supplier: tc.draw(.optional(UUIDGenerators.uuids))
+                    supplier: tc.draw(.optional(UUIDGenerators.uuids)),
+                    finish: tc.draw(Self.finish),
+                    coats: tc.draw(self.list(of: Gen<Catalog.Item.Coats?>.optional(Self.coat))),
+                    rooms: tc.draw(self.map(keys: self.text, values: Self.room))
                 )
             }
         }
@@ -329,7 +383,8 @@
                             condition: tc.draw(Self.condition)
                         )
                     },
-                    self.held
+                    self.held,
+                    Gen { tc in try .recalled(reason: tc.draw(Self.reason)) }
                 ),
                 branch: { shipment in
                     .oneOf(
@@ -400,7 +455,8 @@
             Gen { tc in
                 let name = try tc.draw(self.text)
                 let tag =
-                    ["pending", "shipped", "split", "held", "reissued", "rerouted"].contains(name)
+                    ["pending", "shipped", "split", "held", "reissued", "rerouted", "recalled"]
+                        .contains(name)
                     ? name + "+" : name
                 // In one order, so a replay draws the same bytes.
                 let fields = try tc.draw(.optional(self.map(keys: Self.integer, values: self.text)))
@@ -448,6 +504,10 @@
         var holdsReroutedShipmentWithNext = false
         var holdsPartWithAssembly = false
         var holdsPartWithSpare = false
+        var holdsRecalledShipment = false
+        /// Whether an inline enumeration's enum holds a value the contract
+        /// does not declare.
+        var holdsUndeclaredInlineValue = false
 
         init(_ request: Catalog.PutRequest) {
             self.collections += [request.items.count, request.conditions.count]
@@ -477,8 +537,19 @@
                 [item.photo.bytes.count] + (item.thumbnail.map { [$0.bytes.count] } ?? [])
             self.collections += [
                 item.tags.count, item.grid.count, item.lookup.count, item.serials.count,
+                item.coats.count, item.rooms.count,
             ]
             self.collections += item.grid.map(\.count)
+            self.strings += item.rooms.keys.map(\.utf8.count)
+            if !Catalog.Item.Finish.allCases.contains(item.finish)
+                || item.coats.contains(where: {
+                    $0.map { !Catalog.Item.Coats.allCases.contains($0) } ?? false
+                })
+                || item.rooms.values.contains(where: { !Catalog.Item.Rooms.allCases.contains($0) })
+                || item.owner.tier.map({ !Catalog.Item.Owner.Tier.allCases.contains($0) }) ?? false
+            {
+                self.holdsUndeclaredInlineValue = true
+            }
         }
 
         private mutating func add(_ shipment: Catalog.Shipment, depth: Int) {
@@ -506,6 +577,11 @@
                     if let next = via.next {
                         self.holdsReroutedShipmentWithNext = true
                         self.add(next, depth: depth + 1)
+                    }
+                case .recalled(let reason):
+                    self.holdsRecalledShipment = true
+                    if !Catalog.Shipment.Reason.allCases.contains(reason) {
+                        self.holdsUndeclaredInlineValue = true
                     }
                 default:
                     break
@@ -563,6 +639,12 @@
         if sizes.holdsPartWithSpare {
             try tc.event("a part holding a spare")
         }
+        if sizes.holdsRecalledShipment {
+            try tc.event("a recalled shipment")
+        }
+        if sizes.holdsUndeclaredInlineValue {
+            try tc.event("an inline enumeration value the contract does not declare")
+        }
         try tc.event("shipment nesting depth", value: Double(sizes.shipmentDepth))
         try tc.event("part nesting depth", value: Double(sizes.partDepth))
     }
@@ -572,6 +654,13 @@
         "a reissued shipment", "a rerouted shipment holding the next",
         "a part holding an assembly", "a part holding a spare",
     ]
+
+    /// The events `recordSizes` records for the catalog's inline
+    /// enumerations: a value of their enums that the contract does not
+    /// declare, which `unknown` keeps, and the union case whose field holds
+    /// one, the rarer, claimed once 1,000 cases have passed.
+    let inlineEnumerationEvents = ["an inline enumeration value the contract does not declare"]
+    let inlineEnumerationEventsAfter = ["a recalled shipment": 1_000]
 
     // The two paths, named so each property says which one it takes: generic
     // code that only knows `Encodable`/`Decodable` cannot pick the generated

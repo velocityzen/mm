@@ -128,7 +128,8 @@
                 reaching: [
                     "a binary past bin8", "a collection past fixarray or fixmap",
                     "a string past fixstr", "a string past str8",
-                ] + recursiveShapeEvents
+                ] + recursiveShapeEvents + inlineEnumerationEvents,
+                reachingAfter: inlineEnumerationEventsAfter
             ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let generators = CatalogGenerators(shape)
@@ -175,8 +176,11 @@
                 reaching: [
                     "a binary past bin8", "a collection past fixarray or fixmap",
                     "a string past fixstr", "a string past str8",
-                ] + recursiveShapeEvents,
-                reachingAfter: ["flag holds an absent optional": 1_000]
+                ] + recursiveShapeEvents + inlineEnumerationEvents,
+                reachingAfter: inlineEnumerationEventsAfter.merging(
+                    ["flag holds an absent optional": 1_000],
+                    uniquingKeysWith: max
+                )
             ) { tc in
                 let shape = try #draw(CatalogGenerators.shapes, from: tc)
                 let request = try #draw(CatalogGenerators(shape).putRequest, from: tc)

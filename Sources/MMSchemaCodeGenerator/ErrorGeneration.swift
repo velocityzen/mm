@@ -276,12 +276,19 @@ private func referencedTypeName(
 }
 
 /// Inline error fields stay flat: a namespace error's case is lifted into
-/// every call's enum, and a nested struct would be a different type in each.
+/// every call's enum, and a nested struct or enum would be a different type
+/// in each.
 private func rejectNestedStructures(in fields: [ParsedField], context: String) throws {
     for field in fields where !nestedStructures(in: [field]).isEmpty {
         throw SchemaMacroError(
             description:
                 "\(context): field \"\(field.name)\" declares a nested struct — declare a Type and carry it with Case(\"name\", .reference(\"Type\"), exitCode:)"
+        )
+    }
+    for field in fields where inlineEnumeration(in: field.type) != nil {
+        throw SchemaMacroError(
+            description:
+                "\(context): field \"\(field.name)\" declares an inline .enumeration — declare an Enum and name it: Field(\"\(field.name)\", \"Name\")"
         )
     }
 }
@@ -490,7 +497,7 @@ private func checkReferences(
     func check(_ type: ParsedType, context: String) throws {
         switch type {
             case .bool, .int, .uint, .float, .double, .string, .bytes,
-                .date, .datetime, .timestamp, .duration, .uuid, .external:
+                .date, .datetime, .timestamp, .duration, .uuid, .enumeration, .external:
                 break
             case .optional(let wrapped), .array(let wrapped):
                 try check(wrapped, context: context)

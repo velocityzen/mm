@@ -38,6 +38,10 @@
 ///   container's, and either one inside `.optional(...)` for a part that
 ///   may carry nothing (`Response(.optional(CommonTypes.Stamp.self))` is a
 ///   `Method<..., CommonTypes.Stamp?>`).
+/// - A field's inline `.enumeration(cases: [...])` generates an enum nested in
+///   the type that holds the field and named after it (`Mode` for `mode`),
+///   with the `unknown(String)` case and coding of a named `Enum`; the
+///   contract keeps the inline enumeration.
 /// - On every generated struct and enum, MessagePack code (`MMPackCodable`):
 ///   the wire coders, the server's routes, and the client's calls and
 ///   streams use it in place of the type's `Codable`, writing the same
@@ -60,7 +64,10 @@
 ///
 /// The macro consumes the DSL's **static subset**: literal names and keys, no
 /// runtime conditionals, and no `payload:` shapes (those need hand-written
-/// types with the runtime DSL). `.bytes` fields become ``MMBytes``. Expansion happens at member
+/// types with the runtime DSL). Another container's type is named by its
+/// Swift type (`Field("meta", CommonTypes.LineMeta.self)`), never by the
+/// dotted wire name the runtime DSL takes (`Field("meta", "common.LineMeta")`):
+/// the generated code has to name the Swift type. `.bytes` fields become ``MMBytes``. Expansion happens at member
 /// scope; `#schema` cannot be used at file scope.
 /// A top-level `CLI(.enabled)` entry marks the schema for CLI generation: one
 /// swift-argument-parser command per non-omitted call plus a namespace

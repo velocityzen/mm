@@ -100,6 +100,15 @@ private enum Catalog: MethodNamespace {
             Field("owner") {
                 Field("name", .string)
                 Field("since", .optional(.date))
+                Field(
+                    "tier",
+                    .optional(
+                        .enumeration(cases: [
+                            .init(name: "gold"),
+                            .init(name: "silver", deprecation: "Folded into gold"),
+                        ])
+                    )
+                )
             }
             Field("photo", .bytes)
             Field("thumbnail", .optional(.bytes))
@@ -107,6 +116,25 @@ private enum Catalog: MethodNamespace {
             Field("grace", .optional(.duration))
             Field("lot", .uuid)
             Field("supplier", .optional(.uuid))
+            Field(
+                "finish",
+                .enumeration(cases: [
+                    .init(name: "matte"), .init(name: "gloss", description: "Polished to shine"),
+                ])
+            )
+            Field(
+                "coats",
+                .array(
+                    .optional(.enumeration(cases: [.init(name: "primer"), .init(name: "clear")]))
+                )
+            )
+            Field(
+                "rooms",
+                .map(
+                    key: .string,
+                    value: .enumeration(cases: [.init(name: "kitchen"), .init(name: "hall")])
+                )
+            )
         }
         Union("Shipment") {
             Case("pending")
@@ -135,6 +163,12 @@ private enum Catalog: MethodNamespace {
                 Field("via") {
                     Field("next", .optional(.reference("Shipment")))
                 }
+            }
+            Case("recalled") {
+                Field(
+                    "reason",
+                    .enumeration(cases: [.init(name: "damaged"), .init(name: "unwanted")])
+                )
             }
         }
         Type("Part") {
@@ -213,6 +247,45 @@ struct GeneratedCodingTests {
         #expect(encodedThroughGeneratedCode(Catalog.Item?.none) == .success(mpBytes("c0")))
     }
 
+    @Test("an inline enumeration stays inline in the contract, and its enum keeps any value")
+    func inlineEnumerations() throws {
+        #expect(Catalog.contract.verify(against: Catalog.self) == .success([]))
+        let finish = TypeSchema.enumeration(cases: [
+            .init(name: "matte"), .init(name: "gloss", description: "Polished to shine"),
+        ])
+        let item = try #require(Catalog.contract.types.first { $0.name == "catalog.Item" })
+        guard case .structure(let fields) = item.schema else {
+            Issue.record("catalog.Item is not a structure: \(item.schema)")
+            return
+        }
+        #expect(fields.first { $0.name == "finish" }?.type == finish)
+        #expect(Catalog.Item.Finish.schema == finish)
+        // Discovery serves the generated table: the same definition, the
+        // cases' descriptions included.
+        #expect(Catalog.types.first { $0.name == "catalog.Item" } == item)
+        // "satin" is no declared case: it decodes to unknown and writes back
+        // unchanged, on both paths.
+        let satin = mpBytes("a5736174696e")
+        #expect(
+            encodedThroughGeneratedCode(Catalog.Item.Finish.unknown("satin")) == .success(satin)
+        )
+        #expect(
+            decodedThroughGeneratedCode(Catalog.Item.Finish.self, from: satin)
+                == .success(.unknown("satin"))
+        )
+        #expect(
+            decodedThroughCodable(Catalog.Item.Finish.self, from: satin)
+                == .success(.unknown("satin"))
+        )
+        #expect(
+            decodedThroughGeneratedCode(
+                Catalog.Shipment.Reason.self,
+                from: mpBytes("a8756e77616e746564")
+            )
+                == .success(.unwanted)
+        )
+    }
+
     @Test("keys: first occurrence wins, the integer key before the name, unknown keys skipped")
     func keyRules() {
         let payloads = [
@@ -245,7 +318,7 @@ struct GeneratedCodingTests {
         }
         #expect(
             decodedThroughGeneratedCode(Catalog.Item.Owner.self, from: payloads[4])
-                == .success(Catalog.Item.Owner(name: "kept", since: nil))
+                == .success(Catalog.Item.Owner(name: "kept", since: nil, tier: nil))
         )
         #expect(
             decodedThroughGeneratedCode(Catalog.Item.Owner.self, from: payloads[5])
