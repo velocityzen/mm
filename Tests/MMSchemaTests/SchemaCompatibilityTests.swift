@@ -185,18 +185,25 @@ struct SchemaCompatibilityTests {
             )
                 == [#"renamed or replaced cases: reads "gone", writes "lost""#]
         )
-        // A case with no fields carries none; a reader whose case has fields
-        // reads them, even optional ones.
+        // A case with no fields leaves its fields map out, which a reader
+        // reads as a map of no fields: an optional field reads as absent,
+        // and a required one breaks.
         let goneSince = TypeSchema.UnionCase(
             name: "gone",
             fields: [Field(key: 0, name: "since", type: .optional(.timestamp))]
         )
+        #expect(breaks(reader: .union(cases: [moved, goneSince]), writer: union).isEmpty)
+        #expect(breaks(reader: union, writer: .union(cases: [moved, goneSince])).isEmpty)
+        let goneAt = TypeSchema.UnionCase(
+            name: "gone",
+            fields: [Field(key: 0, name: "at", type: .timestamp)]
+        )
         #expect(
-            breaks(reader: .union(cases: [moved, goneSince]), writer: union) == [
-                "(gone): the reader reads the case's fields, the writer writes none"
+            breaks(reader: .union(cases: [moved, goneAt]), writer: union) == [
+                "(gone).at: required by the reader, not written"
             ]
         )
-        #expect(breaks(reader: union, writer: .union(cases: [moved, goneSince])).isEmpty)
+        #expect(breaks(reader: union, writer: .union(cases: [moved, goneAt])).isEmpty)
         let movedElsewhere = TypeSchema.UnionCase(
             name: "moved",
             fields: [Field(key: 0, name: "to", type: .uuid)]

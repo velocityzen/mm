@@ -371,6 +371,25 @@ func keyedFieldDecode(_ field: ParsedField, container: String) -> String {
     return "try \(container).decode(\(swiftType(field.type)).self, forKey: .\(field.name))"
 }
 
+/// What each of `fields` reads as from a map that holds none of them, in
+/// order: nil for an optional, the wire default for a field that has one.
+/// Nil when one of them is required, which such a map fails on. A union case
+/// with no fields leaves its fields map out, so a reader whose case has
+/// fields reads these from a writer whose case had none.
+func absentFieldValues(_ fields: [ParsedField]) -> [String]? {
+    var values: [String] = []
+    for field in fields {
+        if case .optional = field.type {
+            values.append("nil")
+        } else if let wireDefault = field.wireDefault {
+            values.append(wireDefault.swiftExpression)
+        } else {
+            return nil
+        }
+    }
+    return values
+}
+
 /// The field as the wire carries it: optional when it has a wire default.
 func wireField(_ field: ParsedField) -> ParsedField {
     guard field.wireDefault != nil else { return field }

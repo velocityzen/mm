@@ -2913,7 +2913,9 @@ private func generateNamedType(
 /// labeled associated values — plus the `unknown` fallback, which keeps an
 /// undeclared case's name and its fields' bytes. Its `Codable` writes the wire
 /// map (key 0 the case name, key 1 the case's fields, left out for a case with
-/// none) and its MessagePack code writes the same bytes.
+/// none) and its MessagePack code writes the same bytes. Both read a missing
+/// key 1 as a map of no fields, so a case whose fields are all optional or
+/// have a default reads a writer whose case had none.
 private func generateUnion(
     _ name: String,
     cases: [ParsedUnionCase],
@@ -2989,15 +2991,27 @@ private func generateUnion(
             lines.append("                self = .`\(unionCase.name)`")
             continue
         }
-        lines.append(
-            "                let fields = try container.nestedContainer(keyedBy: \(unionCase.codingKeysName).self, forKey: .fields)"
-        )
         let values = keyed.map { field, _ in
             "\(field.name): \(keyedFieldDecode(field, container: "fields"))"
         }
-        lines.append("                self = .`\(unionCase.name)`(")
-        lines.append(values.map { "                    \($0)" }.joined(separator: ",\n"))
-        lines.append("                )")
+        var decode = [
+            "let fields = try container.nestedContainer(keyedBy: \(unionCase.codingKeysName).self, forKey: .fields)",
+            "self = .`\(unionCase.name)`(",
+        ]
+        decode.append(values.map { "    \($0)" }.joined(separator: ",\n"))
+        decode.append(")")
+        guard let absent = absentFieldValues(keyed.map(\.field)) else {
+            lines.append(contentsOf: decode.map { indented($0, by: 16) })
+            continue
+        }
+        // A writer whose case has no fields leaves key 1 out.
+        lines.append("                if container.contains(.fields) {")
+        lines.append(contentsOf: decode.map { indented($0, by: 20) })
+        lines.append("                } else {")
+        lines.append(
+            "                    self = .`\(unionCase.name)`(\(absentArguments(keyed, absent)))"
+        )
+        lines.append("                }")
     }
     // A coder other than MessagePack's reads the fields as base64 text; any
     // other value there is dropped, so an undeclared case never fails.
@@ -3034,6 +3048,20 @@ private func generateUnion(
     )
     lines.append("}")
     return lines.joined(separator: "\n")
+}
+
+/// Each line of `text` behind `count` spaces.
+func indented(_ text: String, by count: Int) -> String {
+    let indent = String(repeating: " ", count: count)
+    return text.split(separator: "\n", omittingEmptySubsequences: false)
+        .map { indent + $0 }
+        .joined(separator: "\n")
+}
+
+/// A union case's arguments, each field labeled with what it reads as from
+/// a map that holds none (``absentFieldValues(_:)``).
+func absentArguments(_ keyed: [(field: ParsedField, key: Int)], _ absent: [String]) -> String {
+    zip(keyed, absent).map { "\($0.field.name): \($1)" }.joined(separator: ", ")
 }
 
 /// The pattern binding a union case's associated values as `field0`, ...,
@@ -3103,10 +3131,24 @@ private func mmPackUnionMembers(
             lines.append("            self = .`\(unionCase.name)`")
             continue
         }
-        lines.append("            try reader.seek(toRequiredField: fieldsAtKey ?? fieldsAtName, key: 1)")
+        let read =
+            "self = try reader.readField(CodingKeys.fields) { reader in try Self.mmPack\(capitalizedFirst(unionCase.name))(&reader, depth: depth + 1) }"
+        guard let absent = absentFieldValues(keyed.map(\.field)) else {
+            lines.append(
+                "            try reader.seek(toRequiredField: fieldsAtKey ?? fieldsAtName, key: 1)"
+            )
+            lines.append("            \(read)")
+            continue
+        }
+        // As `Codable` reads it: a missing key 1 holds no fields.
+        lines.append("            if let position = fieldsAtKey ?? fieldsAtName {")
+        lines.append("                reader.seek(to: position)")
+        lines.append("                \(read)")
+        lines.append("            } else {")
         lines.append(
-            "            self = try reader.readField(CodingKeys.fields) { reader in try Self.mmPack\(capitalizedFirst(unionCase.name))(&reader, depth: depth + 1) }"
+            "                self = .`\(unionCase.name)`(\(absentArguments(keyed, absent)))"
         )
+        lines.append("            }")
     }
     lines.append("        case let tag:")
     lines.append("            var fields: MMPackRawValue?")

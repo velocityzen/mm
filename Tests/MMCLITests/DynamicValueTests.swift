@@ -690,6 +690,9 @@ private enum Feed: MethodNamespace {
                 Field("seq", .uint)
                 Field("note", .optional(.string))
             }
+            Case("rewound") {
+                Field("to", .optional(.uint))
+            }
         }
         Call("tail") {
             Access { .read }
@@ -761,5 +764,29 @@ struct DynamicUnionTests {
             }
             #expect(MMCLIDynamicJSONText(response.tree, pretty: false) == expected)
         }
+    }
+
+    @Test("a union case without its fields map reads as no fields, unless one is required")
+    func absentFields() throws {
+        let schema = try Feed.tail.signature().get().request
+        /// `{from: {0: tag}, token: <empty>}`: a writer whose case had no fields.
+        func response(_ tag: String) throws -> MMCLIDynamicResponse {
+            var bytes = ByteBuffer()
+            bytes.writeMessagePackMapHeader(count: 2)
+            bytes.writeMessagePackInt(0)
+            bytes.writeMessagePackMapHeader(count: 1)
+            bytes.writeMessagePackInt(0)
+            bytes.writeMessagePackString(tag)
+            bytes.writeMessagePackInt(1)
+            bytes.writeMessagePackBinary(bytes: [] as [UInt8])
+            return try MMCLIDynamicResponse.$schema.withValue((schema, Feed.types)) {
+                try MMPackDecoder().decode(MMCLIDynamicResponse.self, from: bytes).get()
+            }
+        }
+        #expect(
+            MMCLIDynamicJSONText(try response("rewound").tree, pretty: false)
+                == #"{"from":{"case":"rewound","fields":{}},"token":""}"#
+        )
+        #expect(throws: MMWireError.self) { try response("seq") }
     }
 }

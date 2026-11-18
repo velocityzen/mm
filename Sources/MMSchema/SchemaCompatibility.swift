@@ -79,9 +79,10 @@ extension TypeSchema {
     ///   reads, since a reader keeps a value it does not declare as its
     ///   `unknown` case. When each side declares a case the other does not,
     ///   a case was renamed or replaced, and that breaks. A union case both
-    ///   declare compares its fields as a structure does, except that a
-    ///   case the writer declares with no fields carries none, so a reader
-    ///   whose case has fields, even optional ones, breaks.
+    ///   declare compares its fields as a structure does. A case the writer
+    ///   declares with no fields leaves its fields map out, which a reader
+    ///   reads as a map of no fields: a reader's case whose fields are all
+    ///   optional reads it, and one with a required field breaks.
     /// - **Constraints** the reader requires, the writer must keep: a bound
     ///   or length at least as tight, and the same pattern. A field's rules
     ///   and those of the named scalars its type names all hold.
@@ -468,16 +469,10 @@ struct CompatibilityJudge {
                 var judged: Set<String> = []
                 for readerCase in readerCases where judged.insert(readerCase.name).inserted {
                     guard let writerCase = writerByName[readerCase.name] else { continue }
+                    // A case with no fields leaves its fields map out, and
+                    // a reader reads a missing map as one of no fields: only
+                    // a field it requires breaks, as for any other map.
                     let casePath = "\(path)(\(readerCase.name))"
-                    // A case with no fields leaves its fields out of the
-                    // value, and a reader whose case has some reads them.
-                    if !readerCase.fields.isEmpty, writerCase.fields.isEmpty {
-                        self.add(
-                            casePath,
-                            "the reader reads the case's fields, the writer writes none"
-                        )
-                        continue
-                    }
                     self.judgeFields(
                         reader: readerCase.fields,
                         writer: writerCase.fields,

@@ -672,21 +672,45 @@ private func generateErrorEnum(
                 lines.append("                self = .`\(errorCase.name)`")
             case .value(let type, let fields) where fields.isEmpty:
                 lines.append("                self = .`\(errorCase.name)`(\(type)())")
-            case .value(let type, _):
+            case .value(let type, let fields):
+                let decode =
+                    "self = .`\(errorCase.name)`(try container.decode(\(type).self, forKey: .fields))"
+                // A case whose type had no fields left key 1 out.
+                guard let absent = absentFieldValues(fields) else {
+                    lines.append("                \(decode)")
+                    continue
+                }
+                let arguments = zip(fields, absent).map { "\($0.name): \($1)" }
+                lines.append("                if container.contains(.fields) {")
+                lines.append("                    \(decode)")
+                lines.append("                } else {")
                 lines.append(
-                    "                self = .`\(errorCase.name)`(try container.decode(\(type).self, forKey: .fields))"
+                    "                    self = .`\(errorCase.name)`(\(type)(\(arguments.joined(separator: ", "))))"
                 )
+                lines.append("                }")
             case .fields:
                 let keyed = keyedInline[errorCase.name] ?? []
-                lines.append(
-                    "                let fields = try container.nestedContainer(keyedBy: \(codingKeysName(errorCase)).self, forKey: .fields)"
-                )
                 let values = keyed.map { field, _ in
                     "\(field.name): \(keyedFieldDecode(field, container: "fields"))"
                 }
-                lines.append("                self = .`\(errorCase.name)`(")
-                lines.append(values.map { "                    \($0)" }.joined(separator: ",\n"))
-                lines.append("                )")
+                var decode = [
+                    "let fields = try container.nestedContainer(keyedBy: \(codingKeysName(errorCase)).self, forKey: .fields)",
+                    "self = .`\(errorCase.name)`(",
+                ]
+                decode.append(values.map { "    \($0)" }.joined(separator: ",\n"))
+                decode.append(")")
+                // A case that had no fields left key 1 out.
+                guard let absent = absentFieldValues(keyed.map(\.field)) else {
+                    lines.append(contentsOf: decode.map { indented($0, by: 16) })
+                    continue
+                }
+                lines.append("                if container.contains(.fields) {")
+                lines.append(contentsOf: decode.map { indented($0, by: 20) })
+                lines.append("                } else {")
+                lines.append(
+                    "                    self = .`\(errorCase.name)`(\(absentArguments(keyed, absent)))"
+                )
+                lines.append("                }")
         }
     }
     lines.append("            case let name:")

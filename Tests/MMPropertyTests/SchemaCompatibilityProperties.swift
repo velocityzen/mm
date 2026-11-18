@@ -791,14 +791,14 @@
 
         /// An optional field added to one side reads, whichever side and
         /// wherever: at the root, in a named type, in a structure nested
-        /// in another, or in a union case. The one exception: a writer's
-        /// union case with no fields carries none, so a reader's case that
-        /// gains a field breaks there.
+        /// in another, or in a union case, the first field of a case
+        /// included, since a writer's case with no fields leaves its fields
+        /// map out and a reader reads a missing map as one of no fields.
         ///
         /// Mutation check: a field only the reader has judged required
-        /// whatever its type, or a field only the writer has judged at all,
-        /// fails here, and so does a fieldless writer case read by a case
-        /// with fields judged compatible.
+        /// whatever its type, a field only the writer has judged at all, or
+        /// a reader's case with fields judged unable to read a fieldless
+        /// writer case, fails here.
         @Test
         func anAddedOptionalFieldReads() throws {
             try property(
@@ -868,17 +868,8 @@
                 )
                 if toReader, list.isUnionCase, before.isEmpty {
                     try tc.event("added to the reader's fieldless union case")
-                    #expect(
-                        verdict.breaks.contains {
-                            $0.path == list.path
-                                && $0.reason
-                                    == "the reader reads the case's fields, the writer writes none"
-                        },
-                        "a fieldless case read by one with fields: \(verdict)"
-                    )
-                } else {
-                    #expect(verdict == .compatible, "an added optional field breaks: \(verdict)")
                 }
+                #expect(verdict == .compatible, "an added optional field breaks: \(verdict)")
             }
         }
 
@@ -1043,8 +1034,8 @@
         /// when that side reads the part it is in: the server reads the
         /// request and the request stream, the client the response and the
         /// response stream. Added to the side that writes the part, the
-        /// other side skips it. The break names the part and the field, or
-        /// the union case when the writer's case has no fields at all.
+        /// other side skips it. The break names the part and the field, in a
+        /// union case whose writer's case has no fields too.
         ///
         /// Mutation check: a part judged with the client and the server
         /// swapped, or a stream part left unjudged, fails here.
@@ -1059,7 +1050,7 @@
                     "in the request": 1_000, "in the response": 1_000,
                     "in the request stream": 1_000,
                     "in the response stream": 1_000, "in a named type": 1_000,
-                    "in a union case": 1_000,
+                    "in a union case": 1_000, "the first field of a case": 1_000,
                 ]
             ) { tc in
                 let part = try #draw(Gen<CallPart>.element(of: CallPart.allCases), from: tc)
@@ -1082,8 +1073,7 @@
                 if list.definition != nil { try tc.event("in a named type") }
                 if list.inUnionCase { try tc.event("in a union case") }
                 let fieldPath = "\(list.path).\(added.name)"
-                // A writer's case with no fields breaks once, at the case.
-                let breakPath = list.isUnionCase && before.isEmpty ? list.path : fieldPath
+                if list.isUnionCase, before.isEmpty { try tc.event("the first field of a case") }
                 tc.note("added \(added) at \(fieldPath)")
 
                 let (client, server) = byServer ? (side, edited) : (edited, side)
@@ -1096,7 +1086,7 @@
                 try tc.event(verdict.isBreaking ? "judged breaking" : "judged compatible")
                 if byServer == part.readByServer {
                     #expect(
-                        verdict.breaks.contains { $0.path == breakPath },
+                        verdict.breaks.contains { $0.path == fieldPath },
                         "a field the \(byServer ? "server" : "client") reads and requires, unwritten, did not break: \(verdict)"
                     )
                 } else {
@@ -1118,8 +1108,8 @@
         /// Mutation check: a field the writer leaves out or writes as an
         /// optional judged readable by a reader that requires it, a kind
         /// change judged compatible, fields paired by name in a keyed type,
-        /// or a fieldless writer case judged readable by a case with fields,
-        /// fails here.
+        /// or a fieldless writer case judged readable by a case with a
+        /// required field, fails here.
         @Test
         func aCompatibleReaderReadsWhatTheWriterWrites() throws {
             try property(

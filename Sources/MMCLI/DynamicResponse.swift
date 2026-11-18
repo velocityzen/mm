@@ -304,7 +304,9 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
 
     /// A union value: its tag (key 0), then the case's fields (key 1), as
     /// `{"case": ..., "fields": {...}}` — `fields` only for a case that has
-    /// some. A case this schema does not know renders as its tag alone.
+    /// some. A case this schema does not know renders as its tag alone. A
+    /// writer whose case had no fields leaves key 1 out, which reads as a
+    /// map of no fields: `{}` when none of the case's fields is required.
     private static func decodeUnion(
         _ cases: [TypeSchema.UnionCase],
         resolver: TypeResolver,
@@ -319,6 +321,19 @@ public struct MMCLIDynamicResponse: Codable, Sendable {
             !unionCase.fields.isEmpty
         else {
             return .object([tagMember])
+        }
+        if !container.contains(fieldsKey) {
+            let optional = try unionCase.fields.allSatisfy { field in
+                let schema = try Self.resolveOrRephrase(
+                    field.type,
+                    resolver: resolver,
+                    codingPath: container.codingPath + [fieldsKey]
+                )
+                if case .optional = schema { return true } else { return false }
+            }
+            if optional {
+                return .object([tagMember, SchemaValue.Member("fields", .object([]))])
+            }
         }
         let fields = try Self.decodeField(
             .structure(fields: unionCase.fields), resolver: resolver,
