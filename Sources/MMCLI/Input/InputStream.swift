@@ -1,3 +1,5 @@
+import NIOPosix
+
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -36,9 +38,9 @@ public struct MMCLIInput: AsyncSequence, Sendable {
     let storage: Storage
     let reader: MMCLIInputReader
 
-    init(storage: Storage) {
+    init(storage: Storage, pool: NIOThreadPool = .singleton) {
         self.storage = storage
-        self.reader = MMCLIInputReader()
+        self.reader = MMCLIInputReader(pool: pool)
     }
 
     /// An input of these bytes, delivered as one chunk.
@@ -53,8 +55,9 @@ public struct MMCLIInput: AsyncSequence, Sendable {
     }
 
     /// An input read from an open descriptor. `name` identifies it in errors.
-    init(descriptor: CInt, name: String) {
-        self.init(storage: .descriptor(descriptor, name: name))
+    /// Reads run on `pool`; a test passes one it holds, to keep a read queued.
+    init(descriptor: CInt, name: String, pool: NIOThreadPool = .singleton) {
+        self.init(storage: .descriptor(descriptor, name: name), pool: pool)
     }
 
     /// An input that delivers these elements in order, as reads from a

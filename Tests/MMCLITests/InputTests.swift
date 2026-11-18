@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import MMClient
+import MMTestSupport
 import MMWire
 import Synchronization
 import Testing
@@ -81,8 +82,7 @@ struct InputTests {
 
     @Test("an interrupt ends a read parked on an idle pipe")
     func interruptParkedRead() async throws {
-        try await withPipe { readEnd, _ in
-            let input = MMCLIInput(descriptor: readEnd, name: "pipe")
+        try await withPipeInput { input, _ in
             await withTaskGroup(of: [String].self) { tasks in
                 tasks.addTask { await texts(input) }
                 while input.reader.hasParkedRead == false {
@@ -97,8 +97,7 @@ struct InputTests {
 
     @Test("cancelling the reader ends a parked read")
     func cancelParkedRead() async throws {
-        try await withPipe { readEnd, _ in
-            let input = MMCLIInput(descriptor: readEnd, name: "pipe")
+        try await withPipeInput { input, _ in
             await withTaskGroup(of: [String].self) { tasks in
                 tasks.addTask { await texts(input) }
                 while input.reader.hasParkedRead == false {
@@ -107,6 +106,44 @@ struct InputTests {
                 tasks.cancelAll()
                 #expect(await tasks.next() == [])
             }
+        }
+    }
+
+    @Test("closing an interrupted input waits for its queued read, which takes the bytes behind it")
+    func closeWaitsForQueuedRead() async throws {
+        try await withHeldThreadPool { held in
+            var descriptors: [CInt] = [0, 0]
+            guard pipe(&descriptors) == 0 else { throw CLITestFailure(description: "pipe failed") }
+            let (readEnd, writeEnd) = (descriptors[0], descriptors[1])
+            // A second descriptor on the pipe shows what the read left
+            // behind once the input's own descriptor is closed.
+            let witness = dup(readEnd)
+            defer { _ = close(witness) }
+            let input = MMCLIInput(descriptor: readEnd, name: "pipe", pool: held.pool)
+            await withTaskGroup(of: [String].self) { tasks in
+                tasks.addTask { await texts(input) }
+                while input.reader.hasParkedRead == false {
+                    await Task.yield()
+                }
+                input.interrupt()
+                #expect(await tasks.next() == [])
+            }
+            let frame = Array("frame".utf8)
+            #expect(write(writeEnd, frame, frame.count) == frame.count)
+            _ = close(writeEnd)
+            let closed = CompletionFlag()
+            await withTaskGroup(of: Void.self) { tasks in
+                tasks.addTask {
+                    await input.close()
+                    closed.finish()
+                }
+                try? await Task.sleep(for: .milliseconds(20))
+                // The read is still queued on the held pool, so close()
+                // still waits for it.
+                #expect(!closed.isFinished)
+                held.release()
+            }
+            #expect(unreadBytes(in: witness) == [])
         }
     }
 
@@ -255,19 +292,25 @@ func withTemporaryFile<T>(_ contents: String, _ body: (String) async throws -> T
     return try await body(path)
 }
 
-/// A pipe for the body; both ends are closed after it, the write end first
-/// so a pool read still parked on the read end returns.
-func withPipe(_ body: (CInt, CInt) async throws -> Void) async throws {
+/// A pipe for the body, as an input on its read end and its write end.
+/// After the body the write end closes first, so a read parked on the pipe
+/// sees its end, then the input's `close()` closes the read end once no read
+/// is queued or running on it. Closing the read end by hand would free its
+/// number under a read still queued on a busy pool, and that read would then
+/// take bytes from whatever reuses the number, such as a socket of another
+/// test running at the same time.
+func withPipeInput(_ body: (MMCLIInput, CInt) async throws -> Void) async throws {
     var descriptors: [CInt] = [0, 0]
     guard pipe(&descriptors) == 0 else { throw CLITestFailure(description: "pipe failed") }
     let (readEnd, writeEnd) = (descriptors[0], descriptors[1])
+    let input = MMCLIInput(descriptor: readEnd, name: "pipe")
     do {
-        try await body(readEnd, writeEnd)
+        try await body(input, writeEnd)
     } catch {
         _ = close(writeEnd)
-        _ = close(readEnd)
+        await input.close()
         throw error
     }
     _ = close(writeEnd)
-    _ = close(readEnd)
+    await input.close()
 }

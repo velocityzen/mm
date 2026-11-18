@@ -13,7 +13,7 @@ import Android
 #endif
 
 /// The reading side of an ``MMCLIInput``: one blocking `read(2)` at a time
-/// on NIO's singleton thread pool. The awaiting task races the read against
+/// on a thread pool, NIO's singleton unless a test passes its own. The awaiting task races the read against
 /// an interrupt and its own cancellation, so a read parked on a terminal or
 /// an idle pipe never holds the command up. The abandoned read finishes on
 /// its pool thread and its bytes are dropped. The command is ending anyway.
@@ -34,12 +34,18 @@ final class MMCLIInputReader: Sendable {
     static let chunkCapacity = 64 * 1024
 
     private let state = Mutex(State())
+    private let pool: NIOThreadPool
+
+    init(pool: NIOThreadPool = .singleton) {
+        self.pool = pool
+    }
 
     var isInterrupted: Bool {
         self.state.withLock { $0.interrupted }
     }
 
-    /// Whether a read is waiting for input (a test seam).
+    /// Whether a read's waiter is parked (a test seam). The read itself may
+    /// still be queued on the pool, not yet in `read(2)`.
     var hasParkedRead: Bool {
         self.state.withLock { $0.parked != nil }
     }
@@ -60,7 +66,7 @@ final class MMCLIInputReader: Sendable {
         let cell = MMCLIResumeOnce<Outcome>()
         let started = self.state.withLock { state -> EventLoopFuture<Outcome>? in
             guard !state.interrupted else { return nil }
-            let read = NIOThreadPool.singleton.runIfActive(
+            let read = self.pool.runIfActive(
                 eventLoop: NIOSingletons.posixEventLoopGroup.any()
             ) {
                 Self.blockingRead(descriptor)
