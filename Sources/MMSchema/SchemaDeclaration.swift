@@ -1160,7 +1160,8 @@ public func Access(_ mode: () -> AccessMode) -> MethodPart {
 /// whatever the server accepts.
 ///
 /// The target enters the contract: discovery serves it, the fingerprint
-/// hashes it, and changing it is drift. A server route without `Accepts`
+/// hashes it, and changing it is drift: widening it is compatible, and
+/// narrowing it breaks the peers built against it. A server route without `Accepts`
 /// takes it, and an explicit `Accepts` must fall within it. A target that
 /// names exactly one entity (`Target("ledger")`) lets a caller omit it.
 public func Target(_ patterns: EntityPattern...) -> TargetDeclaration {

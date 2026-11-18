@@ -422,7 +422,7 @@ That is right for a daemon with one method family over its own subtree. With **s
 }
 ```
 
-A `Target` inside a `Call` replaces the namespace's for that call. The runtime DSL takes the same `Target(...)` part, and `#schema` checks each pattern at compile time. A declared target is contract: discovery serves it (`MethodSignature` key 4), the fingerprint hashes it, and a changed target is drift. Clients check it before they call: the generated CLI shows it in the entity's help, completes its literal prefix (`journal.`), and refuses an entity outside it before it connects, naming the pattern. `mm call` does the same from discovery, and `mm discover` shows each call's target.
+A `Target` inside a `Call` replaces the namespace's for that call. The runtime DSL takes the same `Target(...)` part, and `#schema` checks each pattern at compile time. A declared target is contract: discovery serves it (`MethodSignature` key 4), the fingerprint hashes it, and a changed target is drift: widening it is compatible, and narrowing it breaks the clients built against it. Clients check it before they call: the generated CLI shows it in the entity's help, completes its literal prefix (`journal.`), and refuses an entity outside it before it connects, naming the pattern. `mm call` does the same from discovery, and `mm discover` shows each call's target.
 
 The routes then repeat nothing. A route without `Accepts` takes its call's declared target, so the example's `JournalHandlers` write `On(Journal.read) { ... }`.
 
@@ -905,10 +905,11 @@ Against the example daemon it prints `server only: server.entity, server.schema`
 - `missingMethods`: absent *or invisible to this peer* (the fix may be an ACL change, not a deploy).
 - `signatureChanged`: the wire contract changed under this build. Each change carries its `compatibility`: the server judged as the reader of the request and request stream, this build as the reader of the response, response stream and errors.
 - `accessChanged`: the verb now needs a different permission class.
+- `targetChanged`: the call's declared target changed. A widened target is compatible; a narrowed one breaks, naming the patterns the server no longer takes.
 - `remoteOnly`: harmless; useful for upgrade planning.
 - `missingTypes`, `typeChanged`, `remoteOnlyTypes`: the named-type buckets. A `typeChanged` entry (same qualified name, different shape or rules) is judged in each direction a local method carries the type, and both ways when none does.
 
-On top of the buckets, `isBreaking` says whether anything breaks, `breaking` and `compatible` split the difference (missing methods and types, changed access and breaking changes against the rest), and `breakingReasons` names each break with its path: `journal.append request.limit: read as int, written as string`.
+On top of the buckets, `isBreaking` says whether anything breaks, `breaking` and `compatible` split the difference (missing methods and types, changed access and breaking changes, a narrowed target among them, against the rest), and `breakingReasons` names each break with its path: `journal.append request.limit: read as int, written as string`.
 
 Prefer `SchemaDifference(local: contract, remote:)` with a `SchemaDeclaration` so types are diffed too. Comparisons ignore descriptions (doc edits are never drift), and buckets are sorted by name for deterministic logs. The value is `CustomStringConvertible`: `"\(difference)"` renders `in sync` or the non-empty buckets (`missing: a.get; types changed: common.Priority`), so log it directly instead of iterating buckets.
 

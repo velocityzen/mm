@@ -18,11 +18,18 @@ private func signature(
         .init(key: 0, name: "ok", type: .bool)
     ]),
     requestStream: TypeSchema? = nil,
-    responseStream: TypeSchema? = nil
+    responseStream: TypeSchema? = nil,
+    target: [EntityPattern]? = nil
 ) -> MethodSignature {
     MethodSignature(
-        name: name, access: access, request: request, response: response,
-        requestStream: requestStream, responseStream: responseStream)
+        name: name,
+        access: access,
+        request: request,
+        response: response,
+        requestStream: requestStream,
+        responseStream: responseStream,
+        target: target
+    )
 }
 
 private func remote(
@@ -124,6 +131,80 @@ struct SchemaDifferenceTests {
         #expect(diff.signatureChanged.isEmpty)
         #expect(diff.missingMethods.isEmpty)
         #expect(diff.isBreaking)
+    }
+
+    @Test("same name, a narrowed target lands in targetChanged, breaking")
+    func targetNarrowed() {
+        let local = signature("box.get", target: ["journal.*"])
+        let served = signature("box.get", target: ["journal.notes"])
+        let diff = SchemaDifference(local: [local], remote: remote([served]))
+        #expect(
+            diff.targetChanged == [
+                SchemaDifference.Change(
+                    local: local,
+                    remote: served,
+                    compatibility: .breaking([
+                        SchemaBreak(
+                            path: "target",
+                            reason: "the client targets journal.*, the server only journal.notes"
+                        )
+                    ])
+                )
+            ]
+        )
+        #expect(diff.accessChanged.isEmpty)
+        #expect(diff.signatureChanged.isEmpty)
+        #expect(diff.isBreaking)
+        #expect(diff.breaking.targetChanged == diff.targetChanged)
+        #expect(diff.compatible.isEmpty)
+        #expect(
+            diff.breakingReasons == [
+                "box.get target: the client targets journal.*, the server only journal.notes"
+            ]
+        )
+        #expect(diff.description == "target changed: box.get")
+    }
+
+    @Test("a widened target, or a server that drops its target, lands in targetChanged, compatible")
+    func targetWidened() {
+        let local = signature("box.get", target: ["journal.notes"])
+        for served in [
+            signature("box.get", target: ["journal", "journal.*"]),
+            signature("box.get"),
+        ] {
+            let diff = SchemaDifference(local: [local], remote: remote([served]))
+            #expect(
+                diff.targetChanged == [
+                    SchemaDifference.Change(
+                        local: local,
+                        remote: served,
+                        compatibility: .compatible
+                    )
+                ]
+            )
+            #expect(!diff.isBreaking)
+            #expect(diff.compatible.targetChanged == diff.targetChanged)
+        }
+    }
+
+    @Test("a server that declares a target where the client declares none breaks it")
+    func targetDeclared() {
+        let local = signature("box.get")
+        let served = signature("box.get", target: ["journal.*"])
+        let diff = SchemaDifference(local: [local], remote: remote([served]))
+        #expect(
+            diff.breakingReasons == [
+                "box.get target: the client targets any entity, the server only journal.*"
+            ]
+        )
+    }
+
+    @Test("a target is a set: the same patterns in another order, or repeated, are no change")
+    func targetAsASet() {
+        let local = signature("box.get", target: ["journal", "journal.*"])
+        var served = signature("box.get")
+        served.target = ["journal.*", "journal", "journal.*"]
+        #expect(SchemaDifference(local: [local], remote: remote([served])).isEmpty)
     }
 
     @Test("same name, a request with an added optional field lands in signatureChanged, compatible")

@@ -485,7 +485,8 @@ struct MethodCompatibilityTests {
         request: TypeSchema = .structure(fields: [Field(key: 0, name: "id", type: .int)]),
         response: TypeSchema = .structure(fields: [Field(key: 0, name: "ok", type: .bool)]),
         requestStream: TypeSchema? = nil,
-        errors: TypeSchema? = nil
+        errors: TypeSchema? = nil,
+        target: [EntityPattern]? = nil
     ) -> MethodSignature {
         MethodSignature(
             name: "box.get",
@@ -493,7 +494,8 @@ struct MethodCompatibilityTests {
             request: request,
             response: response,
             requestStream: requestStream,
-            errors: errors
+            errors: errors,
+            target: target
         )
     }
 
@@ -540,6 +542,60 @@ struct MethodCompatibilityTests {
             Self.verdict(client: Self.method(access: .read), server: Self.method(access: .all)) == [
                 "access: the client expects r--, the server requires rwx"
             ]
+        )
+    }
+
+    @Test("a target the server widens reads; one it narrows breaks, naming what it refuses")
+    func targets() {
+        func verdict(_ client: [EntityPattern]?, _ server: [EntityPattern]?) -> [String] {
+            Self.verdict(client: Self.method(target: client), server: Self.method(target: server))
+        }
+        #expect(verdict(["journal.notes"], ["journal", "journal.*"]).isEmpty)
+        #expect(verdict(["tenants.acme.journal"], ["tenants.*.journal"]).isEmpty)
+        // Each pattern is taken by one of the server's.
+        #expect(verdict(["journal.a", "journal.b.c"], ["journal.*"]).isEmpty)
+        #expect(
+            verdict(["journal.*", "system"], ["journal.notes", "system"]) == [
+                "target: the client targets journal.*, the server only journal.notes, system"
+            ]
+        )
+        #expect(
+            verdict(["tenants.*.journal"], ["tenants.acme.journal"]) == [
+                "target: the client targets tenants.*.journal, the server only tenants.acme.journal"
+            ]
+        )
+        // A pattern of one more depth and one entity of that depth leave
+        // the rest of that depth out.
+        #expect(
+            verdict(["journal.*"], ["journal.*.*", "journal.notes"]) == [
+                "target: the client targets journal.*, the server only journal.*.*, journal.notes"
+            ]
+        )
+        // No pattern but root's own takes root.
+        #expect(
+            verdict([.root], ["*"]) == ["target: the client targets (root), the server only *"]
+        )
+        #expect(
+            verdict(["journal"], []) == ["target: the client targets journal, the server no entity"]
+        )
+    }
+
+    @Test("no target restricts nothing")
+    func absentTargets() {
+        func verdict(_ client: [EntityPattern]?, _ server: [EntityPattern]?) -> [String] {
+            Self.verdict(client: Self.method(target: client), server: Self.method(target: server))
+        }
+        #expect(verdict(nil, nil).isEmpty)
+        #expect(verdict(["journal.*"], nil).isEmpty)
+        #expect(verdict([.root], nil).isEmpty)
+        #expect(verdict(nil, [.all, .root]).isEmpty)
+        #expect(
+            verdict(nil, ["journal.*"]) == [
+                "target: the client targets any entity, the server only journal.*"
+            ]
+        )
+        #expect(
+            verdict(nil, [.all]) == ["target: the client targets any entity, the server only *"]
         )
     }
 

@@ -156,6 +156,29 @@ extension TypeDefinition {
 }
 
 extension MethodSignature {
+    /// Why the server's target refuses an entity the client's target names,
+    /// or nil when it takes them all. A pattern is taken when one of the
+    /// server's patterns matches every entity it does: the last segment of
+    /// a pattern of one depth is a name, never `*`, so no set of patterns
+    /// takes one that none of them takes alone.
+    static func targetBreak(client: [EntityPattern]?, server: [EntityPattern]?) -> String? {
+        guard let server else { return nil }
+        let served =
+            server.isEmpty
+            ? "no entity" : "only " + EntityPattern.listed(EntityPattern.normalized(server))
+        guard let client else {
+            let everything = server.contains(.all) && server.contains(.root)
+            return everything ? nil : "the client targets any entity, the server \(served)"
+        }
+        let refused = EntityPattern.normalized(client).filter { pattern in
+            !server.contains { pattern.isWithin($0) }
+        }
+        guard !refused.isEmpty else { return nil }
+        return "the client targets \(EntityPattern.listed(refused)), the server \(served)"
+    }
+}
+
+extension MethodSignature {
     /// How a client built against `client` works with a server that serves
     /// `server` under the same name. The server reads the request and the
     /// request stream; the client reads the response, the response stream
@@ -167,6 +190,12 @@ extension MethodSignature {
     /// A changed access breaks, and so does a stream only one side declares.
     /// No declared errors read as a union of no cases, so errors only one
     /// side declares are cases only one side declares.
+    ///
+    /// The server's target must take every entity the client's names: a
+    /// widened target is compatible, a narrowed one breaks, at the path
+    /// `target`. No target restricts nothing, so a server without one takes
+    /// any client's, and a client without one breaks with a server that
+    /// declares one, unless it names every entity, root too.
     public static func compatibility(
         client: MethodSignature,
         clientTypes: TypeResolver,
@@ -182,6 +211,9 @@ extension MethodSignature {
                         "the client expects \(client.access), the server requires \(server.access)"
                 )
             )
+        }
+        if let narrowed = Self.targetBreak(client: client.target, server: server.target) {
+            breaks.append(SchemaBreak(path: "target", reason: narrowed))
         }
         func part(
             reader: TypeSchema,

@@ -35,7 +35,9 @@ extension MMClientConnection {
     ///             // disable the dependent features, keep the rest running.
     ///             let broken = diff.breaking
     ///             return .success(
-    ///                 .degraded(disabled: (broken.missingMethods + broken.signatureChanged.map(\.local)).map(\.name)))
+    ///                 .degraded(disabled: (broken.missingMethods
+    ///                     + (broken.accessChanged + broken.targetChanged + broken.signatureChanged).map(\.local))
+    ///                     .map(\.name)))
     ///         }
     ///         // Only compatible changes: proceed at full function.
     ///         return .success(.full)
@@ -54,12 +56,14 @@ extension MMClientConnection {
 /// degrading deliberately after a schema-fingerprint mismatch (see
 /// ``MMClientConnection/discoverSchema(scope:)``).
 ///
-/// All seven buckets are sorted by name, so assertions and logs are
+/// All eight buckets are sorted by name, so assertions and logs are
 /// deterministic.
 ///
 /// Each change is judged too, and the difference splits into its
 /// ``breaking`` part and its ``compatible`` part. A missing method or type
 /// and a changed access break. A server-only method or type is compatible.
+/// A changed target is compatible when the server's still takes every
+/// entity this build's names, and breaks when it was narrowed.
 /// A changed signature or type is judged by what reads it: the server reads
 /// requests and request-stream elements, the client reads responses,
 /// response-stream elements and declared errors (see
@@ -126,6 +130,12 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
     /// Same name on both sides, different `AccessMode` — the verb now needs
     /// a different permission class on its target entity.
     public var accessChanged: [Change]
+    /// Same name on both sides, a different declared target: the entities
+    /// the call may name, as a set of patterns, so order and repeats never
+    /// count. Each change's ``Change/compatibility`` says whether the
+    /// server's target still takes every entity this build's names: a
+    /// widened target does, a narrowed one breaks.
+    public var targetChanged: [Change]
     /// Same name on both sides, different request, response, **stream**
     /// (request stream / response stream) **or declared errors** `TypeSchema`.
     /// A method that gained or lost a stream direction, or its declared
@@ -155,26 +165,28 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
     /// No differences at all.
     public var isEmpty: Bool {
         self.missingMethods.isEmpty && self.accessChanged.isEmpty
-            && self.signatureChanged.isEmpty && self.remoteOnly.isEmpty
+            && self.targetChanged.isEmpty && self.signatureChanged.isEmpty
+            && self.remoteOnly.isEmpty
             && self.missingTypes.isEmpty && self.typeChanged.isEmpty
             && self.remoteOnlyTypes.isEmpty
     }
 
     /// Whether anything in the difference breaks this build: a missing
-    /// method or type, a changed access, or a signature or type change
-    /// judged breaking.
+    /// method or type, a changed access, or a target, signature or type
+    /// change judged breaking.
     public var isBreaking: Bool {
         !self.breaking.isEmpty
     }
 
     /// The part of the difference that breaks this build: the missing
-    /// methods and types, the changed access, and the signature and type
-    /// changes judged breaking. Empty when everything that changed is
-    /// compatible.
+    /// methods and types, the changed access, and the target, signature
+    /// and type changes judged breaking. Empty when everything that changed
+    /// is compatible.
     public var breaking: SchemaDifference {
         SchemaDifference(
             missingMethods: self.missingMethods,
             accessChanged: self.accessChanged,
+            targetChanged: self.targetChanged.filter(\.compatibility.isBreaking),
             signatureChanged: self.signatureChanged.filter(\.compatibility.isBreaking),
             remoteOnly: [],
             missingTypes: self.missingTypes,
@@ -184,11 +196,13 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
     }
 
     /// The part that does not break this build: the server-only methods
-    /// and types, and the signature and type changes judged compatible.
+    /// and types, and the target, signature and type changes judged
+    /// compatible.
     public var compatible: SchemaDifference {
         SchemaDifference(
             missingMethods: [],
             accessChanged: [],
+            targetChanged: self.targetChanged.filter { !$0.compatibility.isBreaking },
             signatureChanged: self.signatureChanged.filter { !$0.compatibility.isBreaking },
             remoteOnly: self.remoteOnly,
             missingTypes: [],
@@ -200,12 +214,13 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
     /// Why each judged change breaks, one line each: the method's name and
     /// the break, `journal.get response.total: read as int, written as
     /// string`, or the type's break, `journal.Kind: renamed or replaced
-    /// cases: reads "debit", writes "withdrawal"`. A method in both
-    /// ``accessChanged`` and ``signatureChanged`` is listed once.
+    /// cases: reads "debit", writes "withdrawal"`. A method in more than
+    /// one of ``accessChanged``, ``targetChanged`` and ``signatureChanged``
+    /// is listed once.
     public var breakingReasons: [String] {
         var reasons: [String] = []
         var listed: Set<String> = []
-        for change in self.accessChanged + self.signatureChanged
+        for change in self.accessChanged + self.targetChanged + self.signatureChanged
         where listed.insert(change.local.name).inserted {
             reasons += change.compatibility.breaks.map { "\(change.local.name) \($0)" }
         }
@@ -218,6 +233,7 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
     private init(
         missingMethods: [MethodSignature],
         accessChanged: [Change],
+        targetChanged: [Change],
         signatureChanged: [Change],
         remoteOnly: [MethodSignature],
         missingTypes: [TypeDefinition],
@@ -226,6 +242,7 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
     ) {
         self.missingMethods = missingMethods
         self.accessChanged = accessChanged
+        self.targetChanged = targetChanged
         self.signatureChanged = signatureChanged
         self.remoteOnly = remoteOnly
         self.missingTypes = missingTypes
@@ -250,6 +267,11 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
         if !self.accessChanged.isEmpty {
             buckets.append(
                 "access changed: \(self.accessChanged.map(\.local.name).joined(separator: ", "))")
+        }
+        if !self.targetChanged.isEmpty {
+            buckets.append(
+                "target changed: \(self.targetChanged.map(\.local.name).joined(separator: ", "))"
+            )
         }
         if !self.signatureChanged.isEmpty {
             buckets.append(
@@ -283,8 +305,8 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
 
     /// Diffs the locally compiled signatures (and optionally the local type
     /// declarations) against a discovery response. Methods pair up by wire
-    /// name; a method can appear in both ``accessChanged`` and
-    /// ``signatureChanged`` when both moved. All comparisons are
+    /// name; a method appears in each of ``accessChanged``,
+    /// ``targetChanged`` and ``signatureChanged`` that it moved in. All comparisons are
     /// description-stripped — doc edits are never drift. References in the
     /// local signatures resolve through `localTypes`, so pass the types the
     /// signatures name: a type only one side defines breaks a change that
@@ -297,6 +319,7 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
         let localResolver = TypeResolver(localTypes)
         let remoteResolver = TypeResolver(remote.types)
         var access: [Change] = []
+        var target: [Change] = []
         var signature: [Change] = []
         let methods = Self.diffByName(
             local: local, remote: remote.methods, name: \.name
@@ -304,13 +327,16 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
             let localStripped = localMethod.strippingDescriptions
             let remoteStripped = remoteMethod.strippingDescriptions
             let accessMoved = localMethod.access != remoteMethod.access
+            let targetMoved =
+                localMethod.target.map(EntityPattern.normalized)
+                != remoteMethod.target.map(EntityPattern.normalized)
             let signatureMoved =
                 localStripped.request != remoteStripped.request
                 || localStripped.response != remoteStripped.response
                 || localStripped.requestStream != remoteStripped.requestStream
                 || localStripped.responseStream != remoteStripped.responseStream
                 || localStripped.errors != remoteStripped.errors
-            guard accessMoved || signatureMoved else { return }
+            guard accessMoved || targetMoved || signatureMoved else { return }
             let change = Change(
                 local: localMethod,
                 remote: remoteMethod,
@@ -322,10 +348,12 @@ public struct SchemaDifference: Sendable, Hashable, CustomStringConvertible {
                 )
             )
             if accessMoved { access.append(change) }
+            if targetMoved { target.append(change) }
             if signatureMoved { signature.append(change) }
         }
         self.missingMethods = methods.missing
         self.accessChanged = access
+        self.targetChanged = target
         self.signatureChanged = signature
         self.remoteOnly = methods.remoteOnly
 

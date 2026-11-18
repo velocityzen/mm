@@ -130,7 +130,9 @@ public struct MethodSignature: Sendable, Hashable, Codable {
     /// ``EntityPattern/normalized(_:)`` form, or nil when it declares none:
     /// then the call targets whatever the server accepts. Contract, not
     /// documentation: hashed into the fingerprint when declared, and a
-    /// changed target is drift.
+    /// changed target is drift, which
+    /// ``compatibility(client:clientTypes:server:serverTypes:)`` judges: a
+    /// widened target is compatible, a narrowed one breaks.
     public var target: [EntityPattern]?
     /// Human-readable documentation of the method, served by discovery. The
     /// five doc slots (keys 2, 11, 13, 21, 23) are never part of the
