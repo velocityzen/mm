@@ -187,28 +187,32 @@
         /// run's share of each swings far around its mean, and none keeps
         /// to a fifth of every such run: each of five kinds is a fifth of
         /// the cases, a nil comes only with the two optional kinds, and even
-        /// with the count weighted to its ends, no elements comes up in
-        /// about a fifth of the cases and a full window in a third.
+        /// with the count weighted to its ends and one short of the window,
+        /// no elements comes up in about a seventh of the cases, and a full
+        /// window and one short of it each in about a quarter.
         @Test
         func elementsCrossTheStreamsAsTheyWereSent() async throws {
             let window = Int(MMStreamFlowControl.initialWindow)
             let kindClaims = StreamElementKind.allCases.map { ("\($0.rawValue) elements", 1_000) }
             try await property(
                 reachingAfter: [
-                    "no elements": 1_000, "a full window": 1_000, "a nil element": 1_000,
+                    "no elements": 1_000, "a full window": 1_000,
+                    "one short of a full window": 1_000, "a nil element": 1_000,
                     "a nil response": 1_000, "a nil element last": 1_000,
                 ].merging(kindClaims) { $1 }
             ) { tc in
                 let kind = try #draw(.element(of: StreamElementKind.allCases), from: tc)
                 // No elements and a full window are where the stream ends at
-                // once and where the sender uses every credit, so about half
-                // the counts are one of the two, and the rest any count.
+                // once and where the sender uses every credit, and one short
+                // of the window leaves a credit unused, so about half the
+                // counts are one of the three, and the rest any count.
                 let count = try #draw(
-                    .oneOf(.element(of: [0, window]), .int(in: 0...window)),
+                    .oneOf(.element(of: [0, window - 1, window]), .int(in: 0...window)),
                     from: tc
                 )
                 try tc.event("\(kind.rawValue) elements")
                 if count == 0 { try tc.event("no elements") }
+                if count == window - 1 { try tc.event("one short of a full window") }
                 if count == window { try tc.event("a full window") }
                 switch kind {
                     case .integer:
