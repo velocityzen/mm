@@ -13,6 +13,7 @@ let package = Package(
         .library(name: "MMServer", targets: ["MMServer"]),
         .library(name: "MMClient", targets: ["MMClient"]),
         .library(name: "MMCLI", targets: ["MMCLI"]),
+        .library(name: "MMContractLock", targets: ["MMContractLock"]),
         .plugin(name: "MMCLIGeneratorPlugin", targets: ["MMCLIGeneratorPlugin"]),
         .executable(name: "mm-example-daemon", targets: ["MMExampleDaemon"]),
         .executable(name: "mm-example-client", targets: ["MMExampleClient"]),
@@ -109,6 +110,13 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],
+            swiftSettings: callerIsolation
+        ),
+        // A test helper: Foundation's JSON and file access stay out of the
+        // runtime libraries.
+        .target(
+            name: "MMContractLock",
+            dependencies: ["MMSchema", "MMClient"],
             swiftSettings: callerIsolation
         ),
         .executableTarget(
@@ -246,6 +254,13 @@ let package = Package(
             ],
             plugins: ["MMCLIGeneratorPlugin"]
         ),
+        .testTarget(
+            name: "MMContractLockTests",
+            dependencies: ["MMContractLock", "MMClient", "MMSchema", "MMExampleAPI"],
+            // The example contract's lock, which the tests read and write as
+            // a file, not as a resource.
+            exclude: ["Locks"]
+        ),
         // Hegel's engine is built for macOS and Linux only, so on the other
         // platforms this target is empty: every file is behind
         // `#if os(macOS) || os(Linux)`.
@@ -260,6 +275,7 @@ let package = Package(
                 "MMSchemaCodeGenerator",
                 "MMServer",
                 "MMClient",
+                "MMContractLock",
                 "MMTestSupport",
                 .product(name: "SwiftParser", package: "swift-syntax"),
                 .product(name: "SwiftSyntax", package: "swift-syntax"),

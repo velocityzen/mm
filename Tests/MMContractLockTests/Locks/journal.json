@@ -1,0 +1,293 @@
+{
+  "fingerprint" : "0x6674131b90ddcf71",
+  "format" : 1,
+  "methods" : [
+    {
+      "access" : "-w-",
+      "errors" : {
+        "union" : [
+          {
+            "name" : "retired"
+          },
+          {
+            "name" : "emptyLine"
+          },
+          {
+            "fields" : [
+              {
+                "key" : 0,
+                "name" : "capacity",
+                "type" : "int"
+              }
+            ],
+            "name" : "full"
+          }
+        ]
+      },
+      "name" : "journal.append",
+      "request" : {
+        "structure" : [
+          {
+            "constraints" : {
+              "maximumLength" : 4096
+            },
+            "key" : 0,
+            "name" : "line",
+            "type" : "string"
+          },
+          {
+            "key" : 1,
+            "name" : "meta",
+            "type" : {
+              "optional" : {
+                "reference" : "journal.LineMeta"
+              }
+            }
+          }
+        ]
+      },
+      "response" : {
+        "structure" : [
+          {
+            "key" : 0,
+            "name" : "count",
+            "type" : "int"
+          }
+        ]
+      },
+      "target" : [
+        "journal.*"
+      ]
+    },
+    {
+      "access" : "r--",
+      "errors" : {
+        "union" : [
+          {
+            "name" : "retired"
+          }
+        ]
+      },
+      "name" : "journal.follow",
+      "request" : {
+        "structure" : [
+
+        ]
+      },
+      "response" : {
+        "structure" : [
+          {
+            "key" : 0,
+            "name" : "delivered",
+            "type" : "int"
+          }
+        ]
+      },
+      "responseStream" : {
+        "reference" : "journal.ChangeEvent"
+      },
+      "target" : [
+        "journal.*"
+      ]
+    },
+    {
+      "access" : "-w-",
+      "errors" : {
+        "union" : [
+          {
+            "name" : "retired"
+          },
+          {
+            "fields" : [
+              {
+                "key" : 0,
+                "name" : "capacity",
+                "type" : "int"
+              }
+            ],
+            "name" : "full"
+          }
+        ]
+      },
+      "name" : "journal.import",
+      "request" : {
+        "structure" : [
+
+        ]
+      },
+      "requestStream" : {
+        "structure" : [
+          {
+            "key" : 0,
+            "name" : "line",
+            "type" : "string"
+          }
+        ]
+      },
+      "response" : {
+        "structure" : [
+          {
+            "key" : 0,
+            "name" : "imported",
+            "type" : "int"
+          },
+          {
+            "key" : 1,
+            "name" : "total",
+            "type" : "int"
+          }
+        ]
+      },
+      "target" : [
+        "journal.*"
+      ]
+    },
+    {
+      "access" : "r--",
+      "errors" : {
+        "union" : [
+          {
+            "name" : "retired"
+          }
+        ]
+      },
+      "name" : "journal.read",
+      "request" : {
+        "structure" : [
+
+        ]
+      },
+      "response" : {
+        "structure" : [
+          {
+            "key" : 0,
+            "name" : "lines",
+            "type" : {
+              "array" : "string"
+            }
+          }
+        ]
+      },
+      "target" : [
+        "journal.*"
+      ]
+    },
+    {
+      "access" : "-w-",
+      "errors" : {
+        "union" : [
+          {
+            "name" : "retired"
+          },
+          {
+            "fields" : [
+              {
+                "key" : 0,
+                "name" : "capacity",
+                "type" : "int"
+              }
+            ],
+            "name" : "full"
+          }
+        ]
+      },
+      "name" : "journal.sync",
+      "request" : {
+        "structure" : [
+
+        ]
+      },
+      "requestStream" : {
+        "structure" : [
+          {
+            "key" : 0,
+            "name" : "line",
+            "type" : "string"
+          }
+        ]
+      },
+      "response" : {
+        "structure" : [
+          {
+            "key" : 0,
+            "name" : "synced",
+            "type" : "int"
+          },
+          {
+            "key" : 1,
+            "name" : "total",
+            "type" : "int"
+          }
+        ]
+      },
+      "responseStream" : {
+        "reference" : "journal.ChangeEvent"
+      },
+      "target" : [
+        "journal.*"
+      ]
+    }
+  ],
+  "types" : [
+    {
+      "constraints" : {
+        "maximumLength" : 64,
+        "minimumLength" : 1
+      },
+      "name" : "journal.Author",
+      "schema" : "string"
+    },
+    {
+      "name" : "journal.ChangeEvent",
+      "schema" : {
+        "structure" : [
+          {
+            "key" : 0,
+            "name" : "entity",
+            "type" : "string"
+          },
+          {
+            "key" : 1,
+            "name" : "line",
+            "type" : "string"
+          },
+          {
+            "key" : 2,
+            "name" : "count",
+            "type" : "int"
+          }
+        ]
+      }
+    },
+    {
+      "name" : "journal.LineMeta",
+      "schema" : {
+        "structure" : [
+          {
+            "key" : 0,
+            "name" : "author",
+            "type" : {
+              "reference" : "journal.Author"
+            }
+          },
+          {
+            "key" : 1,
+            "name" : "priority",
+            "type" : {
+              "reference" : "journal.Priority"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name" : "journal.Priority",
+      "schema" : {
+        "enumeration" : [
+          "normal",
+          "urgent"
+        ]
+      }
+    }
+  ]
+}

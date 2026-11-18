@@ -330,6 +330,7 @@ A top-level `CLI(.enabled)` entry in the schema block generates one swift-argume
 2. Boot the daemon. `contract.verify(against:)` must pass with a clean log.
 3. Run the client against it end to end (`swift run mm-example-daemon` + `swift run mm-example-client`). Include one deliberate denial to confirm the ACL table.
 4. `swift test`. Add tests in the tier that matches what you changed.
+5. Hold the contract to a committed lock with `MMContractLock`: `ContractLock.check([contract], lockFile: "Locks/name.json")` in a test fails on a breaking change and moves the lock on a compatible one, to commit with the change. A deliberate break is accepted by deleting the lock and running the check again. See README, Versioning.
 
 ## Where to go deeper
 

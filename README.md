@@ -14,16 +14,17 @@ SwiftNIO is the async runtime. The public API uses structured concurrency and ty
 
 ## Modules
 
-One package, `MatterInMotion`, with five library products and one build-tool plugin:
+One package, `MatterInMotion`, with six library products and one build-tool plugin:
 
 - `MMWire`: MessagePack coder over `ByteBuffer`, `[u32 LE length][payload]` framing, the RPC envelope, the hello preamble. Depends only on NIOCore and `MMSchema`.
 - `MMSchema`: method descriptors, `TypeSchema` and the schema fingerprint, `EntityACL`, `PeerIdentity`. Pure values: no NIO import, no IO.
 - `MMServer`: `Router` with a result-builder DSL, authorization, peer-credential capture, streaming handlers, and `MMService`, the server as a `BracketAsync`.
 - `MMClient`: `MMClient`, the client as a `BracketAsync`, and the `MMClientConnection` it yields, with typed unary and streaming calls, msgid multiplexing, credit-based flow control, and schema discovery.
 - `MMCLI`: runtime for schema-generated command-line tools (swift-argument-parser): connection options, exit-code mapping, stream drivers, `discover` and raw `call` commands.
+- `MMContractLock`: a test helper that records a contract as a committed JSON lock and fails a test on a breaking change to it. It uses Foundation for the JSON and the file, so it stays out of the runtime libraries.
 - `MMCLIGeneratorPlugin`: generates a `#schema`'s `CLI(.enabled)` commands into the command-line target, so the shared API module (and the daemon) does not depend on MMCLI or swift-argument-parser.
 
-`MMSchema` has no internal dependencies. `MMWire` depends on `MMSchema` (the binary codecs for wire time kinds live there). `MMServer` and `MMClient` depend on both. `MMCLI` depends on `MMClient`. Client-only processes can import `MMSchema`.
+`MMSchema` has no internal dependencies. `MMWire` depends on `MMSchema` (the binary codecs for wire time kinds live there). `MMServer` and `MMClient` depend on both. `MMCLI` depends on `MMClient`, and `MMContractLock` on `MMSchema` and `MMClient`. Client-only processes can import `MMSchema`.
 
 ## Design principles
 
@@ -447,6 +448,7 @@ A contract changes without a version bump. Add fields with `.optional(...)` or a
   - Compatible: an optional field (or one with a default) either side adds, an enum or union case the writer adds (the reader keeps it as `unknown`), a method or type only the server serves, and a rule the writer keeps that is at least as tight as the reader's.
   - Breaking: a changed kind, a field the reader requires that the writer may leave out, cases each side has that the other lacks (a rename), a rule the reader requires that the writer does not keep, a changed access, a method or type the server does not serve, a stream only one side declares, and a union case whose fields the reader reads where the writer's case has none.
   - Discovery's `SchemaDifference` splits its changes into `breaking` and `compatible`. The generated CLI, its `verify` subcommand and `connection.verify()` fail only on a break, and print a note for a compatible change.
+- **A contract lock catches a break before it ships.** A test holds the contract to a committed lock file with the same rule; see [Versioning](#versioning).
 
 ## Schema composition
 
@@ -586,6 +588,7 @@ The DocC API reference is built from `Sources/<Target>/<Target>.docc` and hosted
 - [MMServer](https://swiftpackageindex.com/velocityzen/mm/documentation/mmserver): router, authorization, streaming handlers, service bootstrap.
 - [MMClient](https://swiftpackageindex.com/velocityzen/mm/documentation/mmclient): typed calls, streaming handles, discovery.
 - [MMCLI](https://swiftpackageindex.com/velocityzen/mm/documentation/mmcli): the schema-generated CLI runtime.
+- [MMContractLock](https://swiftpackageindex.com/velocityzen/mm/documentation/mmcontractlock): the contract lock and the test that checks it.
 
 Long-form guides are DocC articles in the same catalogs (also readable in the repository):
 
@@ -632,4 +635,38 @@ swift package --package-path Benchmarks benchmark baseline compare main
 
 The wire protocol version is a single `u8`, currently **1**, independent of the package version. Packages follow semantic versioning. The protocol version changes only on wire-level breaks. Hello negotiation picks the lower version. A fingerprint mismatch triggers discovery, never a disconnect. Schemas evolve without version bumps: payloads are int-keyed maps, unknown keys are skipped, new fields must be optional or have a default, removed fields' keys and names are reserved, and an enum value or union case a peer does not declare is kept and written back unchanged. See [Schema evolution](#schema-evolution).
 
-Compatibility is judged per direction, so an additive change passes verification; see [Schema evolution](#schema-evolution) for the rule. A contract lock, a committed file that a build or test compares the current contract against to catch an accidental breaking change, is planned on top of it (MM-125).
+Compatibility is judged per direction, so an additive change passes verification; see [Schema evolution](#schema-evolution) for the rule.
+
+### Contract lock
+
+A contract lock catches an accidental breaking change, such as an unpinned field inserted mid-struct, which renumbers the fields after it. `MMContractLock` records the contract as a JSON file committed with the code, and a test holds the current contract to it with the verification rule, the lock as a client built against the last release and the current contract as the server:
+
+```swift
+import MMContractLock
+import Testing
+
+@Test func journalKeepsItsContract() {
+    let check = ContractLock.check([journalContract], lockFile: "Locks/journal.json")
+    #expect(check.passed, "\(check)")
+}
+```
+
+The path is relative to the test file. Add the product to the test target, and exclude the lock directory from it:
+
+```swift
+.testTarget(
+    name: "JournalAPITests",
+    dependencies: ["JournalAPI", .product(name: "MMContractLock", package: "mm")],
+    exclude: ["Locks"]
+)
+```
+
+The lock holds what a server serves: every method and the named types they reach (pass `sharedTypes:` for a `#schemaTypes` namespace), without descriptions or deprecations. Each check:
+
+- **No lock:** writes one from the contract and fails. Commit it.
+- **The locked contract:** passes and leaves the file.
+- **A compatible change** (a new call, an optional field): passes and writes the current contract to the lock. Commit the lock with the change, so the next change is judged against it.
+- **A breaking change:** fails, lists each break, and leaves the file.
+- **A file that is not a lock, or a lock edited by hand** (its fingerprint no longer matches its contents): fails and leaves the file.
+
+To accept a break on purpose, delete the lock and run the check again: it writes the new contract, and the lock's diff shows the break in review. The check reads the source tree, so it runs on macOS and Linux, not on a device or an emulator.
