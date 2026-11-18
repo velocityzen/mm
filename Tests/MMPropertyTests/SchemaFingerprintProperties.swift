@@ -360,6 +360,17 @@
             .oneOf(.int(), .element(of: [0, 1, -1, .min, .max]))
         )
 
+        /// The first key none of `taken` is, counting up from `start` and
+        /// on from `Int.min` after `Int.max`. It never traps, and it ends: a
+        /// set of keys never holds every `Int`.
+        static func unusedKey(from start: Int, avoiding taken: Set<Int>) -> Int {
+            var key = start
+            while taken.contains(key) {
+                key &+= 1
+            }
+            return key
+        }
+
         static let leaves: Gen<TypeSchema> = .oneOf(
             .element(of: [
                 .bool, .int, .uint, .float, .double, .string, .bytes, .date, .datetime, .timestamp,

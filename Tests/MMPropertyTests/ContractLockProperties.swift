@@ -177,8 +177,9 @@
             type: TypeSchema
         ) throws -> TypeSchema.Field {
             let keys = Set(fields.compactMap(\.key))
-            var key = try tc.draw(FingerprintGenerators.keys)
-            while let taken = key, keys.contains(taken) { key = taken &+ 1 }
+            let key = try tc.draw(FingerprintGenerators.keys).map {
+                FingerprintGenerators.unusedKey(from: $0, avoiding: keys)
+            }
             var name = try tc.draw(FingerprintGenerators.names)
             while fields.contains(where: { $0.name == name }) { name += "'" }
             return TypeSchema.Field(key: key, name: name, type: type)

@@ -410,6 +410,15 @@
             Int(name) == nil
         }
 
+        /// The key after the largest of `keys`, or the first free one from
+        /// `Int.min` when the largest is `Int.max`; 0 for no keys.
+        static func nextKey(after keys: [Int]) -> Int {
+            FingerprintGenerators.unusedKey(
+                from: keys.max().map { $0 &+ 1 } ?? 0,
+                avoiding: Set(keys)
+            )
+        }
+
         /// A field with an identity none of `fields` has: the next integer
         /// key when they have keys, or a new name when they have none, or
         /// either for no fields.
@@ -421,10 +430,7 @@
         ) throws -> TypeSchema.Field {
             let keys = fields.compactMap(\.key)
             let keyed = fields.isEmpty ? try tc.draw(.bool()) : !keys.isEmpty
-            let key: Int? =
-                keyed
-                ? (keys.max().map { $0 == .max ? keys.min()! - 1 : $0 + 1 } ?? 0)
-                : nil
+            let key: Int? = keyed ? Self.nextKey(after: keys) : nil
             return TypeSchema.Field(
                 key: key,
                 name: try Self.freshName(tc, avoiding: fields.map(\.name), numerals: numerals),
@@ -581,9 +587,9 @@
                         target.list,
                         .fields { fields in
                             var fields = fields
-                            let keys = fields.compactMap(\.key)
-                            fields[target.index].key =
-                                keys.max()! == .max ? keys.min()! - 1 : keys.max()! + 1
+                            fields[target.index].key = CompatibilityGenerators.nextKey(
+                                after: fields.compactMap(\.key)
+                            )
                             return fields
                         }
                     )
