@@ -733,6 +733,10 @@ struct SchemaContractMacroTests {
                 #"Alias("Mode"): an inline .enumeration takes its name from its field, and there is none here — declare a named Enum in this block"#
             ),
             (
+                "", #"Field("Mode", \#(one))"#,
+                #"PutRequest: field "Mode" generates the nested enum Mode, the name of the field itself — \#(rename)"#
+            ),
+            (
                 "", #"Field("Mode", .optional(.int), cli: .omitted); Field("mode", \#(one))"#,
                 #"PutRequest: field "mode" generates the nested enum Mode, the name of another field — \#(rename)"#
             ),
@@ -822,6 +826,115 @@ struct SchemaContractMacroTests {
             ],
             macros: macros
         )
+    }
+
+    @Test("diagnostics: nested struct names are checked at expansion")
+    func nestedStructureNameDiagnostics() {
+        // Each case: the block's declarations before the call, the put
+        // call's request fields, and the diagnosis.
+        let block = #"{ Field("x", .int) }"#
+        let one = #".enumeration(cases: [.init(name: "a")])"#
+        let rename = "rename the field or declare a named Type"
+        let cases: [(top: String, fields: String, message: String)] = [
+            (
+                "", #"Field("codingKeys") \#(block)"#,
+                #"PutRequest: field "codingKeys" generates the nested struct CodingKeys, the name of a member PutRequest generates — \#(rename)"#
+            ),
+            (
+                "", #"Field("string") \#(block); Field("name", .string)"#,
+                #"PutRequest: field "string" generates the nested struct String, a name Swift or the generated code keeps — \#(rename)"#
+            ),
+            (
+                "", #"Field("type") \#(block)"#,
+                #"PutRequest: field "type" generates the nested struct Type, a name Swift or the generated code keeps — \#(rename)"#
+            ),
+            (
+                "", #"Field("duration") \#(block); Field("wait", .duration, default: "PT5S")"#,
+                #"PutRequest: field "duration" generates the nested struct Duration, a name Swift or the generated code keeps — \#(rename)"#
+            ),
+            (
+                "", #"Field("mMPackWriter") \#(block)"#,
+                #"PutRequest: field "mMPackWriter" generates the nested struct MMPackWriter, a name Swift or the generated code keeps — \#(rename)"#
+            ),
+            (
+                #"Type("T") { Field("t") \#(block) }"#, #"Field("x", .int)"#,
+                #"T: field "t" generates the nested struct T, the name of T itself — \#(rename)"#
+            ),
+            (
+                "", #"Field("B") \#(block)"#,
+                #"PutRequest: field "B" generates the nested struct B, the name of the field itself — \#(rename)"#
+            ),
+            (
+                "", #"Field("_x") \#(block)"#,
+                #"PutRequest: field "_x" generates the nested struct _x, the name of the field itself — \#(rename)"#
+            ),
+            (
+                #"Type("T") { Field("b") \#(block); Field("B", .int) }"#, #"Field("x", .int)"#,
+                #"T: field "b" generates the nested struct B, the name of another field — \#(rename)"#
+            ),
+            (
+                #"Type("User") { Field("id", .int) }"#,
+                #"Field("user") \#(block); Field("owner", "User")"#,
+                #"PutRequest: field "user" generates the nested struct User, which would hide the type User that field "owner" names — \#(rename)"#
+            ),
+            (
+                #"Type("User") { Field("id", .int) }"#,
+                #"Field("user") { Field("owner", "User") }"#,
+                #"PutRequest: field "user" generates the nested struct User, which would hide the type User that field "user" names — \#(rename)"#
+            ),
+            (
+                #"Type("T") { Field("a") { Field("t") \#(block); Field("up", .optional(.reference("T"))) } }"#,
+                #"Field("x", .int)"#,
+                #"A: field "t" generates the nested struct T, which would hide the type T that field "up" names — \#(rename)"#
+            ),
+            (
+                #"Union("U") { Case("a") { Field("u") \#(block) } }"#, #"Field("x", .int)"#,
+                #"U: field "u" generates the nested struct U, the name of U itself — \#(rename)"#
+            ),
+            (
+                #"Union("U") { Case("Left") { Field("left") \#(block) } }"#, #"Field("x", .int)"#,
+                #"U: field "left" generates the nested struct Left, the name of a member U generates — \#(rename)"#
+            ),
+            (
+                #"Union("U") { Case("a") { Field("aCodingKeys") \#(block) } }"#,
+                #"Field("x", .int)"#,
+                #"U: field "aCodingKeys" generates the nested struct ACodingKeys, the name of a member U generates — \#(rename)"#
+            ),
+            (
+                #"Union("U") { Case("a") { Field("b") \#(block); Field("B") { Field("y", .int) } } }"#,
+                #"Field("x", .int)"#,
+                #"U: field "B" generates the nested struct B, which another field "b" generates too — \#(rename)"#
+            ),
+            (
+                #"Type("User") { Field("id", .int) }; Union("U") { Case("a") { Field("user") \#(block) }; Case("b") { Field("u", "User") } }"#,
+                #"Field("x", .int)"#,
+                #"U: field "user" generates the nested struct User, which would hide the type User that field "u" names — \#(rename)"#
+            ),
+            (
+                #"Union("U") { Case("a") { Field("mode", \#(one)) }; Case("b") { Field("mode") \#(block) } }"#,
+                #"Field("x", .int)"#,
+                #"U: field "mode" generates the nested enum Mode, the name of a nested struct in U — rename the field or declare a named Enum"#
+            ),
+        ]
+        for (top, fields, message) in cases {
+            let source = """
+                #schema("box") {
+                    \(top)
+                    Call("put") {
+                        Access(.write)
+                        Request {
+                            \(fields)
+                        }
+                    }
+                }
+                """
+            assertMacroExpansion(
+                source,
+                expandedSource: source,
+                diagnostics: [DiagnosticSpec(message: message, line: 1, column: 1)],
+                macros: macros
+            )
+        }
     }
 
     @Test("diagnostics: types that hold themselves and field groups are checked at expansion")

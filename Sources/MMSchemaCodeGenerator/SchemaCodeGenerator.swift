@@ -1048,19 +1048,21 @@ private func validate(types: [ParsedTypeDecl], calls: [ParsedCall]) throws -> Se
                 try check(fields, context: type.name)
             case .union(let cases):
                 // A case's nested `Field("x") { }` structs are generated
-                // inside the union, so their names share one scope.
+                // inside the union, so their names share one scope. Two
+                // fields of one case are checked with the union's other
+                // nested type names (`checkNestedTypeNames`).
                 var nestedNames: Set<String> = []
                 for unionCase in cases {
                     try check(unionCase.fields, context: "\(type.name).\(unionCase.name)")
                     _ = try assignKeys(unionCase.fields, startingAt: 0, reserving: [])
-                    for (nested, _) in nestedStructures(in: unionCase.fields) {
-                        guard nestedNames.insert(nested).inserted else {
-                            throw SchemaMacroError(
-                                description:
-                                    "Union(\"\(type.name)\"): nested struct \"\(nested)\" is declared by two cases — rename one field"
-                            )
-                        }
+                    let caseNames = nestedStructures(in: unionCase.fields).map(\.name)
+                    if let nested = caseNames.first(where: nestedNames.contains) {
+                        throw SchemaMacroError(
+                            description:
+                                "Union(\"\(type.name)\"): nested struct \"\(nested)\" is declared by two cases — rename one field"
+                        )
                     }
+                    nestedNames.formUnion(caseNames)
                 }
             case .enumeration, .alias:
                 break
@@ -2200,6 +2202,12 @@ func generateStruct(
                 lines.append("    }")
             }
     }
+    try checkNestedTypeNames(
+        owner: name,
+        fields: fields,
+        fieldsAreMembers: true,
+        members: ["CodingKeys"]
+    )
     for (nestedName, nestedFields) in nestedStructures(in: fields) {
         let nested = try generateStruct(
             name: nestedName, fields: nestedFields,
@@ -2207,12 +2215,6 @@ func generateStruct(
         lines.append(
             nested.split(separator: "\n").map { "    \($0)" }.joined(separator: "\n"))
     }
-    try checkInlineEnumerationNames(
-        owner: name,
-        fields: fields,
-        fieldsAreMembers: true,
-        members: ["CodingKeys"]
-    )
     lines.append(contentsOf: inlineEnumerationDeclarations(in: fields))
     let fieldNames = Set(keyed.map(\.field.name))
     for (field, _) in keyed {
@@ -2351,52 +2353,71 @@ private func inlineEnumerationDeclarations(in fields: [ParsedField]) -> [String]
 
 /// Names a nested type must not take: the ones Swift keeps from type
 /// members, and the ones the members generated beside it use unqualified,
-/// which it would hide. Names that start with `MM` are MMSchema's and
-/// MMWire's, and are refused too.
+/// which it would hide (`Duration` builds a duration field's default).
+/// Names that start with `MM` are MMSchema's and MMWire's, and are refused
+/// too.
 private let namesNestedTypesMustNotTake: Set<String> = [
     "Type", "Protocol", "Self", "Any",
-    "Bool", "Int", "Int32", "Int64", "UInt64", "Float", "Double", "String",
+    "Bool", "Int", "Int32", "Int64", "UInt64", "Float", "Double", "String", "Duration",
     "Hasher", "Decoder", "Encoder", "CodingKey", "Codable", "Decodable", "Encodable",
     "Hashable", "Sendable", "CaseIterable", "RawRepresentable", "Error", "Swift",
     "TypeSchema", "SchemaDescribable", "SchemaValueError", "Writer", "Reader", "Value",
 ]
 
-/// Throws when the enum a field's inline `.enumeration` generates would
-/// clash in `owner`, the struct or union it is nested in: with a name it must
-/// not take, the owner's own name, a member the owner generates, a field when
-/// fields are the owner's members, a nested struct, another field's enum, or
-/// a type a field names, which the nested enum would hide.
-private func checkInlineEnumerationNames(
+/// Throws when a nested type a field generates would clash in `owner`, the
+/// struct or union it is nested in. The struct a `Field("x") { ... }` block
+/// generates and the enum an inline `.enumeration` generates clash with a
+/// name they must not take, the owner's own name, a member the owner
+/// generates, a field when fields are the owner's members, another nested
+/// type, or a type a field names, which the nested type would hide. The
+/// structs are checked first, so an enum named like a struct is the one
+/// refused.
+private func checkNestedTypeNames(
     owner: String,
     fields: [ParsedField],
     fieldsAreMembers: Bool,
     members: Set<String>
 ) throws {
+    let fieldNames = fieldsAreMembers ? Set(fields.map(\.name)) : []
+    let namedTypes = typesNamed(by: fields)
+    func clash(
+        of name: String,
+        generatedBy field: ParsedField,
+        among nestedTypes: [String: String]
+    ) -> String? {
+        if name.hasPrefix("MM") || namesNestedTypesMustNotTake.contains(name) {
+            "a name Swift or the generated code keeps"
+        } else if name == owner {
+            "the name of \(owner) itself"
+        } else if members.contains(name) {
+            "the name of a member \(owner) generates"
+        } else if fieldNames.contains(name) {
+            name == field.name ? "the name of the field itself" : "the name of another field"
+        } else if let nested = nestedTypes[name] {
+            nested
+        } else if let user = namedTypes[name] {
+            "which would hide the type \(name) that field \"\(user)\" names"
+        } else {
+            nil
+        }
+    }
     var nestedTypes: [String: String] = [:]
+    for field in fields {
+        guard case .structure(let name, _) = field.type else { continue }
+        if let clash = clash(of: name, generatedBy: field, among: nestedTypes) {
+            throw SchemaMacroError(
+                description:
+                    "\(owner): field \"\(field.name)\" generates the nested struct \(name), \(clash) — rename the field or declare a named Type"
+            )
+        }
+        nestedTypes[name] = "which another field \"\(field.name)\" generates too"
+    }
     for (name, _) in nestedStructures(in: fields) {
         nestedTypes[name] = "the name of a nested struct in \(owner)"
     }
-    let fieldNames = fieldsAreMembers ? Set(fields.map(\.name)) : []
-    let namedTypes = typesNamed(by: fields)
     for field in fields {
         guard let (name, _) = inlineEnumeration(in: field.type) else { continue }
-        let clash: String? =
-            if name.hasPrefix("MM") || namesNestedTypesMustNotTake.contains(name) {
-                "a name Swift or the generated code keeps"
-            } else if name == owner {
-                "the name of \(owner) itself"
-            } else if members.contains(name) {
-                "the name of a member \(owner) generates"
-            } else if fieldNames.contains(name) {
-                "the name of another field"
-            } else if let nested = nestedTypes[name] {
-                nested
-            } else if let user = namedTypes[name] {
-                "which would hide the type \(name) that field \"\(user)\" names"
-            } else {
-                nil
-            }
-        if let clash {
+        if let clash = clash(of: name, generatedBy: field, among: nestedTypes) {
             throw SchemaMacroError(
                 description:
                     "\(owner): field \"\(field.name)\" generates the nested enum \(name), \(clash) — rename the field or declare a named Enum"
@@ -2930,6 +2951,14 @@ private func generateUnion(
     lines.append("    public static var schema: TypeSchema {")
     lines.append("        .reference(\(quoted(qualified)))")
     lines.append("    }")
+    // The cases' fields share the union's scope, as their nested structs do.
+    let caseFields = cases.flatMap(\.fields)
+    try checkNestedTypeNames(
+        owner: name,
+        fields: caseFields,
+        fieldsAreMembers: false,
+        members: Set(["CodingKeys"] + cases.flatMap { [$0.name, $0.codingKeysName] })
+    )
     for (unionCase, _) in keyedCases {
         for (nestedName, nestedFields) in nestedStructures(in: unionCase.fields) {
             let nested = try generateStruct(
@@ -2938,14 +2967,6 @@ private func generateUnion(
             lines.append(nested.split(separator: "\n").map { "    \($0)" }.joined(separator: "\n"))
         }
     }
-    // The cases' fields share the union's scope, as their nested structs do.
-    let caseFields = cases.flatMap(\.fields)
-    try checkInlineEnumerationNames(
-        owner: name,
-        fields: caseFields,
-        fieldsAreMembers: false,
-        members: Set(["CodingKeys"] + cases.flatMap { [$0.name, $0.codingKeysName] })
-    )
     lines.append(contentsOf: inlineEnumerationDeclarations(in: caseFields))
     lines.append("    enum CodingKeys: Int, CodingKey {")
     lines.append("        case `case` = 0")

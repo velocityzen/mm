@@ -6,7 +6,8 @@ import Testing
 /// Nested structures at several depths, each generated in the type that
 /// holds its field: sibling fields that each nest a struct of the same name,
 /// in a type, in a union's cases and in a request, and a struct that takes
-/// the name of a struct it is nested in.
+/// the name of a struct it is nested in. A union case's fields are no
+/// members of the union, so a field may take its struct's name there.
 private enum Nest: MethodNamespace {
     #schema("nest") {
         Type("Holder") {
@@ -27,6 +28,10 @@ private enum Nest: MethodNamespace {
                 Field("c") {
                     Field("b") { Field("y", .string) }
                 }
+            }
+            Case("upper") {
+                Field("B") { Field("x", .int) }
+                Field("_x") { Field("y", .string) }
             }
         }
         Call("put") {
@@ -70,5 +75,12 @@ struct NestedStructureTests {
         #expect(try JSONDecoder().decode(Nest.PutRequest.self, from: requestJSON) == request)
         let responseJSON = try JSONEncoder().encode(response)
         #expect(try JSONDecoder().decode(Nest.PutResponse.self, from: responseJSON) == response)
+    }
+
+    @Test("a union case's field may take the name of the struct it nests")
+    func unionCaseFieldsTakeTheirStructsNames() throws {
+        let choice = Nest.Choice.upper(B: Nest.Choice.B(x: 6), _x: Nest.Choice._x(y: "seven"))
+        let json = try JSONEncoder().encode(choice)
+        #expect(try JSONDecoder().decode(Nest.Choice.self, from: json) == choice)
     }
 }

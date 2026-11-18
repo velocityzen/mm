@@ -67,8 +67,8 @@
 
         /// The fields of a block nested `depth` deep in the type named
         /// `holder`, `minimum` of them or more: each name once, and no block
-        /// that generates a struct of its holder's name, a clash `#schema`
-        /// does not check yet (MM-137).
+        /// that generates a struct of its holder's name, which `#schema`
+        /// refuses (see `NestedTypeNameProperties`).
         static func fields(
             _ tc: TestCase,
             policy: NestingPolicy,
