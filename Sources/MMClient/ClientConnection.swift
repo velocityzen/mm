@@ -483,8 +483,9 @@ public actor MMClientConnection {
     /// folded fingerprint matches the hello is proven with zero round-trips;
     /// anything else — a partial slice, or a complete expectation the hello
     /// contradicts — is confirmed with one scoped discovery diff per
-    /// declared contract. A difference logs a warning and lands in the
-    /// verdict; nothing here ever closes the connection (soft-verdict rule).
+    /// declared contract. A breaking difference logs a warning, a compatible
+    /// one an info line, and both land in the verdict; nothing here ever
+    /// closes the connection (soft-verdict rule).
     private nonisolated func performAutoVerification() async {
         guard let expectation = self.configuration.schema else {
             self.verification.failure(.noExpectation)
@@ -501,6 +502,13 @@ public actor MMClientConnection {
         ) {
             case .success(let differences) where differences.isEmpty:
                 self.verification.success(.partial)
+
+            case .success(let differences) where !differences.contains(where: \.isBreaking):
+                self.logger.info(
+                    "compatible schema difference",
+                    metadata: ["namespaces": "\(differences.count)"]
+                )
+                self.verification.success(.compatible(differences))
 
             case .success(let differences):
                 self.logger.warning(

@@ -88,8 +88,10 @@ struct ExampleClient {
                 print("  schema: ok — the hello proves this build's exact composition")
             case .success(.partial):
                 print("  schema: composition changed, but every contract we use is in sync")
+            case .success(.compatible(let differences)):
+                print("  schema: \(differences.count) namespace(s) changed compatibly")
             case .success(.difference(let differences)):
-                print("  schema: DIFFERS — \(differences.count) namespace(s) drifted")
+                print("  schema: BREAKS — \(differences.count) namespace(s) drifted")
             case .failure(let reason):
                 print("  schema: verification unavailable (\(reason))")
         }

@@ -12,6 +12,22 @@ private let phantomContract = Schema("ledger") {
     }
 }
 
+/// A ledger contract the server serves compatibly: it declares two of the
+/// server's calls, and reads an optional field the server never writes.
+private let compatibleContract = Schema("ledger") {
+    Call("importAll") {
+        Access { .read }
+        Response { Field("lines", .array(.string)) }
+    }
+    Call("@") {
+        Access { .read }
+        Response {
+            Field("entries", .int)
+            Field("since", .optional(.timestamp))
+        }
+    }
+}
+
 /// A shared types-only container the ledger server registers via
 /// `sharedTypes:` — the fixture for folding `Types(...)` into completeness
 /// claims (a server registering shared containers folds their definitions
@@ -150,6 +166,26 @@ struct AutoVerificationTests {
                 return
             }
             #expect(!differences.isEmpty)
+        }
+    }
+
+    @Test("a compatible slice reports the differences as compatible")
+    func compatibleSlice() async throws {
+        try await withLedgerServer { options in
+            let verdict = try await self.verdict(
+                options: options,
+                expectation: .partial([compatibleContract])
+            )
+            guard case .success(.compatible(let differences)) = verdict else {
+                Issue.record("expected .success(.compatible), got \(verdict)")
+                return
+            }
+            #expect(differences.count == 1)
+            #expect(differences.allSatisfy { !$0.isBreaking })
+            #expect(differences.first?.signatureChanged.map(\.local.name) == ["ledger"])
+            #expect(
+                differences.first?.remoteOnly.map(\.name) == ["ledger.append", "ledger.compact"]
+            )
         }
     }
 

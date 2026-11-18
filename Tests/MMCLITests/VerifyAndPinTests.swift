@@ -31,6 +31,27 @@ struct VerifyAndPinTests {
         }
     }
 
+    @Test("verify exits 0 when every change is compatible")
+    func verifyCompatible() async throws {
+        // The server reads a note this build never sends, and writes one
+        // this build does not read; this build reads a field the server
+        // never writes, as an optional.
+        let compatible = Schema("echo") {
+            Call("run") {
+                Access { .write }
+                Request { Field("value", .int) }
+                Response {
+                    Field("value", .int)
+                    Reserved(1)
+                    Field("seen", .optional(.timestamp))
+                }
+            }
+        }
+        try await withCLIServer { options in
+            try await MMCLIVerify.run(contract: compatible, options: options)
+        }
+    }
+
     @Test("verify exits 1 on drift")
     func verifyDrift() async throws {
         let drifted = Schema("echo") {

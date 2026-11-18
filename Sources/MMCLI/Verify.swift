@@ -12,8 +12,10 @@ import MMSchema
 /// computed from one namespace at build time; proving that whole-server value
 /// is what an installed ``MMCLIServerContract`` completeness claim is for.
 ///
-/// Like `diff`: "in sync" goes to stderr and the command exits 0; any
-/// difference prints its buckets and exits 1.
+/// Like `diff`, it reports to stderr. "in sync" exits 0. A difference
+/// prints its breaking part with a line for each break, then its compatible
+/// part, and exits 1 when anything breaks, 0 when everything that changed
+/// is compatible.
 public enum MMCLIVerify {
     public static func run(contract: SchemaDeclaration, options: MMCLIOptions) async throws {
         try await MMCLIRunner.invoke(
@@ -31,8 +33,16 @@ public enum MMCLIVerify {
                 MMCLIOutput.note("in sync")
                 return
             }
-            MMCLIOutput.note("\(difference)")
-            throw ExitCode(1)
+            if difference.isBreaking {
+                MMCLIOutput.note("breaking: \(difference.breaking)")
+                for reason in difference.breakingReasons {
+                    MMCLIOutput.note("  \(reason)")
+                }
+            }
+            if !difference.compatible.isEmpty {
+                MMCLIOutput.note("compatible: \(difference.compatible)")
+            }
+            if difference.isBreaking { throw ExitCode(1) }
         }
     }
 }

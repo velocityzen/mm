@@ -342,13 +342,13 @@ Output:
 
 `MMCLI` also has generic commands: `discover` (what the server serves) and `call` (call any method by wire name with `--params` JSON).
 
-**Schema verification is automatic, never manual.** Before dispatch, each generated command checks its namespace against the server with one scoped discovery diff. On drift, it prints the difference and exits 76. `--no-verify` skips the check once.
+**Schema verification is automatic, never manual.** Before dispatch, each generated command checks its namespace against the server with one scoped discovery diff. On a breaking change, it prints what breaks and exits 76. A compatible change, such as an optional field or a case the server added, prints a note and the command runs. `--no-verify` skips the check once.
 
 A purpose-built CLI avoids this round-trip. `await MMCLI { Name("mm"); Commands([...]); Contract(.complete([journalContract])); Endpoint(.unix(path: socketPath)) }` runs the root command, binds the declarations as a task-local (no process-global state), and makes `--socket`/`--tcp` optional. At build time, the expected whole-server hello fingerprint is computed from the declarations the daemon compiled (builtins included). A matching hello proves the whole composition with no extra round-trips. On mismatch, commands fall back to the scoped diff. If the server registers shared `Types(...)` containers, pass the same declarations (`sharedTypes:`) to the claim, or it never matches.
 
-Embedding clients set `configuration.schema = .complete([journalContract])`, or `.partial` to use part of the server (both take `sharedTypes:` for shared `Types(...)` containers). The connection verifies itself after connect. `await connection.verify()` returns `.ok` (whole composition proven), `.partial` (your contracts match; something else changed), or `.difference(differences)`. It never disconnects.
+Embedding clients set `configuration.schema = .complete([journalContract])`, or `.partial` to use part of the server (both take `sharedTypes:` for shared `Types(...)` containers). The connection verifies itself after connect. `await connection.verify()` returns `.ok` (whole composition proven), `.partial` (your contracts match; something else changed), `.compatible(differences)` (your contracts differ from the server's, and nothing breaks), or `.difference(differences)` (something breaks). It never disconnects.
 
-Each group also has a `verify` subcommand. You never type a fingerprint: it is computed from contracts at build time.
+Each group also has a `verify` subcommand. It prints what breaks and what changed compatibly, and fails only on a break. You never type a fingerprint: it is computed from contracts at build time.
 
 ## Streaming
 
@@ -443,6 +443,10 @@ A contract changes without a version bump. Add fields with `.optional(...)` or a
 - **`Reserved` retires keys and names.** `Reserved(1, "author")` takes any mix of integer keys and string names. A later field may not pin a reserved key or take a reserved name, and unpinned fields skip reserved keys, so reserving a removed field keeps the keys after it where they were. Reservations are a declaration rule: never served, hashed or compared.
 - **`deprecated:` is documentation.** It goes on a field, an enum or union case, a type, or a call, with a reason or `""`. A deprecated generated struct field is `@available(*, deprecated)`, and the generated memberwise initializer still takes it. Everywhere else it is a doc-comment note. Discovery serves every deprecation (WireProtocol.md, section 8). The generated CLI marks deprecated calls and options in its help, and warns on stderr when a deprecated call runs or a deprecated option or enum value is given.
 - **The fingerprint** covers a default (a changed default is a contract change) and never a deprecation or a reservation. See WireProtocol.md, section 9.1.
+- **A change is compatible when each reader reads what its writer writes.** The server reads requests and request streams; the client reads responses, response streams and errors. `TypeSchema.compatibility(reader:writer:)` judges one direction, and `MethodSignature.compatibility(client:server:)` a whole call. Fields pair as a reader finds them, by integer key or else by name, so a rename that keeps the key reads.
+  - Compatible: an optional field (or one with a default) either side adds, an enum or union case the writer adds (the reader keeps it as `unknown`), a method or type only the server serves, and a rule the writer keeps that is at least as tight as the reader's.
+  - Breaking: a changed kind, a field the reader requires that the writer may leave out, cases each side has that the other lacks (a rename), a rule the reader requires that the writer does not keep, a changed access, a method or type the server does not serve, a stream only one side declares, and a union case whose fields the reader reads where the writer's case has none.
+  - Discovery's `SchemaDifference` splits its changes into `breaking` and `compatible`. The generated CLI, its `verify` subcommand and `connection.verify()` fail only on a break, and print a note for a compatible change.
 
 ## Schema composition
 
@@ -628,4 +632,4 @@ swift package --package-path Benchmarks benchmark baseline compare main
 
 The wire protocol version is a single `u8`, currently **1**, independent of the package version. Packages follow semantic versioning. The protocol version changes only on wire-level breaks. Hello negotiation picks the lower version. A fingerprint mismatch triggers discovery, never a disconnect. Schemas evolve without version bumps: payloads are int-keyed maps, unknown keys are skipped, new fields must be optional or have a default, removed fields' keys and names are reserved, and an enum value or union case a peer does not declare is kept and written back unchanged. See [Schema evolution](#schema-evolution).
 
-A contract lock, a committed file that a build or test compares the current contract against to catch an accidental breaking change, is pending the contract diff it builds on (MM-72).
+Compatibility is judged per direction, so an additive change passes verification; see [Schema evolution](#schema-evolution) for the rule. A contract lock, a committed file that a build or test compares the current contract against to catch an accidental breaking change, is planned on top of it (MM-125).

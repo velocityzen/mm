@@ -85,6 +85,22 @@ private let driftedContract = Schema("ledger") {
     }
 }
 
+/// A ledger contract the server serves compatibly: two of its calls, one
+/// reading an optional field the server never writes.
+private let compatibleContract = Schema("ledger") {
+    Call("importAll") {
+        Access { .read }
+        Response { Field("lines", .array(.string)) }
+    }
+    Call("@") {
+        Access { .read }
+        Response {
+            Field("entries", .int)
+            Field("since", .optional(.timestamp))
+        }
+    }
+}
+
 private func appendOnce(_ client: MMClientConnection) async throws -> Ledger.AppendResponse {
     try MMCLIFailure.unwrap(
         await client.call(
@@ -140,6 +156,16 @@ struct ServerContractTests {
                 }
             }
         }
+    }
+
+    @Test("automatic verification runs the command after a compatible change")
+    func autoVerifyCompatible() async throws {
+        let response = try await withLedgerServer { options in
+            try await MMCLIRunner.invoke(options, verifying: compatibleContract) { client in
+                try await appendOnce(client)
+            }
+        }
+        #expect(response.total == 1)
     }
 
     @Test("--no-verify skips the diff for one invocation")

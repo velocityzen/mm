@@ -27,10 +27,13 @@ public enum MMCLIRunner {
     ///    namespace for free — no discovery round-trip.
     /// 2. Otherwise, when the command passes its `verifying:` contract
     ///    (every generated command does), the contract's namespace is
-    ///    confirmed with one scoped discovery diff before dispatch: drift
-    ///    prints the difference and exits 76. A *denied* discovery skips
-    ///    with a note — verification is best-effort protection, and a peer
-    ///    may hold call rights without read on the namespace entity.
+    ///    confirmed with one scoped discovery diff before dispatch. A
+    ///    breaking change prints the breaking part of the difference, a line
+    ///    for each break, and exits 76. A compatible change (a server-only
+    ///    method or type, an added optional field, an added case) prints a
+    ///    note and the command runs. A *denied* discovery skips with a note —
+    ///    verification is best-effort protection, and a peer may hold call
+    ///    rights without read on the namespace entity.
     ///
     /// `--no-verify` skips layer 2 for one invocation.
     ///
@@ -141,7 +144,18 @@ public enum MMCLIRunner {
         ) {
             case .success(let differences):
                 guard let difference = differences.first else { return }
-                MMCLIOutput.note("\(contract.namespace): contract drift — \(difference)")
+                guard difference.isBreaking else {
+                    MMCLIOutput.note(
+                        "\(contract.namespace): compatible contract changes — \(difference.compatible)"
+                    )
+                    return
+                }
+                MMCLIOutput.note(
+                    "\(contract.namespace): contract drift — \(difference.breaking)"
+                )
+                for reason in difference.breakingReasons {
+                    MMCLIOutput.note("  \(reason)")
+                }
                 throw ExitCode(76)
             case .failure(.denied):
                 // A peer may hold call rights without read on the namespace

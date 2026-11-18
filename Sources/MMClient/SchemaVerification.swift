@@ -86,7 +86,13 @@ public enum MMSchemaVerification: Sendable {
     /// declaration, or a complete expectation whose hello mismatched (the
     /// composition changed somewhere else on the server).
     case partial
-    /// At least one declared namespace differs; the differences say how.
+    /// At least one declared namespace differs, and nothing that differs
+    /// breaks this build: server-only methods and types, added optional
+    /// fields, added cases. Proceed at full function; the differences say
+    /// what changed.
+    case compatible([SchemaDifference])
+    /// At least one declared namespace differs in a way that breaks this
+    /// build; each difference's ``SchemaDifference/breaking`` part says how.
     case difference([SchemaDifference])
 }
 

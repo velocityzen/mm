@@ -874,14 +874,16 @@ switch await connection.verify() {
         print("  schema: ok — the hello proves this build's exact composition")
     case .success(.partial):
         print("  schema: composition changed, but every contract we use is in sync")
+    case .success(.compatible(let differences)):
+        print("  schema: \(differences.count) namespace(s) changed compatibly")
     case .success(.difference(let differences)):
-        print("  schema: DIFFERS — \(differences.count) namespace(s) drifted")
+        print("  schema: BREAKS — \(differences.count) namespace(s) drifted")
     case .failure(let reason):
         print("  schema: verification unavailable (\(reason))")
 }
 ```
 
-`.ok` means the complete expectation matched the hello: the entire composition is proven with zero discovery round-trips. `.partial` means every declared contract is served verbatim, but the composition changed somewhere this build does not use. `.difference` means the namespaces this build depends on moved: disable the dependent features and keep the rest running. `.failure` (`.noExpectation`, `.denied`, `.failed(callError)`) means no verdict; act per application policy. `verify()` resolves once and can be awaited any number of times.
+`.ok` means the complete expectation matched the hello: the entire composition is proven with zero discovery round-trips. `.partial` means every declared contract is served verbatim, but the composition changed somewhere this build does not use. `.compatible` means a contract this build uses differs from the server's, and this build still reads what the server writes and the server what it writes: an optional field or a case added, a method or type only the server serves. `.difference` means something breaks: disable the dependent features and keep the rest running. `.failure` (`.noExpectation`, `.denied`, `.failed(callError)`) means no verdict; act per application policy. `verify()` resolves once and can be awaited any number of times.
 
 For custom policy over the raw buckets, use the manual flow underneath: `connection.verifyContracts([...])` for a scoped diff, or `discoverSchema()` + `SchemaDifference(local:remote:)`, as the example's `discover(_:)` does:
 
@@ -901,10 +903,12 @@ Against the example daemon it prints `server only: server.entity, server.schema`
 `SchemaDifference` buckets:
 
 - `missingMethods`: absent *or invisible to this peer* (the fix may be an ACL change, not a deploy).
-- `signatureChanged`: the wire contract changed under this build.
+- `signatureChanged`: the wire contract changed under this build. Each change carries its `compatibility`: the server judged as the reader of the request and request stream, this build as the reader of the response, response stream and errors.
 - `accessChanged`: the verb now needs a different permission class.
 - `remoteOnly`: harmless; useful for upgrade planning.
-- `missingTypes`, `typeChanged`, `remoteOnlyTypes`: the named-type buckets. `typeChanged` (same qualified name, different shape) counts like `signatureChanged` for features that carry the type.
+- `missingTypes`, `typeChanged`, `remoteOnlyTypes`: the named-type buckets. A `typeChanged` entry (same qualified name, different shape or rules) is judged in each direction a local method carries the type, and both ways when none does.
+
+On top of the buckets, `isBreaking` says whether anything breaks, `breaking` and `compatible` split the difference (missing methods and types, changed access and breaking changes against the rest), and `breakingReasons` names each break with its path: `journal.append request.limit: read as int, written as string`.
 
 Prefer `SchemaDifference(local: contract, remote:)` with a `SchemaDeclaration` so types are diffed too. Comparisons ignore descriptions (doc edits are never drift), and buckets are sorted by name for deterministic logs. The value is `CustomStringConvertible`: `"\(difference)"` renders `in sync` or the non-empty buckets (`missing: a.get; types changed: common.Priority`), so log it directly instead of iterating buckets.
 

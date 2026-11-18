@@ -107,12 +107,26 @@ struct SchemaDifferenceTests {
         let local = signature("box.get", access: .read)
         let served = signature("box.get", access: .write)
         let diff = SchemaDifference(local: [local], remote: remote([served]))
-        #expect(diff.accessChanged == [SchemaDifference.Change(local: local, remote: served)])
+        #expect(
+            diff.accessChanged == [
+                SchemaDifference.Change(
+                    local: local,
+                    remote: served,
+                    compatibility: .breaking([
+                        SchemaBreak(
+                            path: "access",
+                            reason: "the client expects r--, the server requires -w-"
+                        )
+                    ])
+                )
+            ]
+        )
         #expect(diff.signatureChanged.isEmpty)
         #expect(diff.missingMethods.isEmpty)
+        #expect(diff.isBreaking)
     }
 
-    @Test("same name, different request or response schema lands in signatureChanged")
+    @Test("same name, a request with an added optional field lands in signatureChanged, compatible")
     func signatureChanged() {
         let local = signature("box.get", request: .structure(fields: [
             .init(key: 0, name: "entity", type: .string)
@@ -122,11 +136,18 @@ struct SchemaDifferenceTests {
             .init(key: 1, name: "depth", type: .optional(.int)),
         ]))
         let diff = SchemaDifference(local: [local], remote: remote([served]))
-        #expect(diff.signatureChanged == [SchemaDifference.Change(local: local, remote: served)])
+        #expect(
+            diff.signatureChanged == [
+                SchemaDifference.Change(local: local, remote: served, compatibility: .compatible)
+            ]
+        )
         #expect(diff.accessChanged.isEmpty)
+        #expect(!diff.isBreaking)
+        #expect(diff.breaking.isEmpty)
+        #expect(diff.compatible == diff)
     }
 
-    @Test("a diverged response-stream element lands in signatureChanged")
+    @Test("a diverged response-stream element lands in signatureChanged, breaking")
     func responseStreamChanged() {
         let local = signature(
             "box.follow",
@@ -135,11 +156,29 @@ struct SchemaDifferenceTests {
             "box.follow",
             responseStream: .structure(fields: [.init(key: 0, name: "line", type: .int)]))
         let diff = SchemaDifference(local: [local], remote: remote([served]))
-        #expect(diff.signatureChanged == [SchemaDifference.Change(local: local, remote: served)])
+        #expect(
+            diff.signatureChanged == [
+                SchemaDifference.Change(
+                    local: local,
+                    remote: served,
+                    compatibility: .breaking([
+                        SchemaBreak(
+                            path: "response stream.line",
+                            reason: "read as string, written as int"
+                        )
+                    ])
+                )
+            ]
+        )
         #expect(diff.accessChanged.isEmpty)
+        #expect(
+            diff.breakingReasons == [
+                "box.follow response stream.line: read as string, written as int"
+            ]
+        )
     }
 
-    @Test("gaining or losing a stream direction lands in signatureChanged")
+    @Test("gaining or losing a stream direction lands in signatureChanged, breaking")
     func streamDirectionAppeared() {
         let unary = signature("box.follow")
         let streaming = signature(
@@ -147,7 +186,26 @@ struct SchemaDifferenceTests {
             responseStream: .structure(fields: [.init(key: 0, name: "line", type: .string)]))
         // Local unary, server now streams: a contract move this build cannot see.
         let diff = SchemaDifference(local: [unary], remote: remote([streaming]))
-        #expect(diff.signatureChanged == [SchemaDifference.Change(local: unary, remote: streaming)])
+        #expect(
+            diff.signatureChanged == [
+                SchemaDifference.Change(
+                    local: unary,
+                    remote: streaming,
+                    compatibility: .breaking([
+                        SchemaBreak(path: "response stream", reason: "declared by the server only")
+                    ])
+                )
+            ]
+        )
+        // Local streams, the server no longer does.
+        let lost = SchemaDifference(local: [streaming], remote: remote([unary]))
+        #expect(
+            lost.signatureChanged.map(\.compatibility) == [
+                .breaking([
+                    SchemaBreak(path: "response stream", reason: "declared by the client only")
+                ])
+            ]
+        )
     }
 
     @Test("a request-stream-only divergence is caught (request/response identical)")
@@ -247,11 +305,141 @@ struct SchemaDifferenceTests {
             local: [], localTypes: localTypes, remote: remote([], types: servedTypes))
         #expect(diff.missingTypes.map(\.name) == ["box.Gone"])
         #expect(diff.typeChanged.map(\.local.name) == ["box.Priority"])
+        // No method uses the type, so it is judged both ways: the server
+        // reading this build's values, then this build reading the server's.
+        #expect(
+            diff.typeChanged.map(\.compatibility) == [
+                .breaking([
+                    SchemaBreak(
+                        path: "box.Priority",
+                        reason: #"renamed or replaced cases: reads "urgent", writes "high""#
+                    ),
+                    SchemaBreak(
+                        path: "box.Priority",
+                        reason: #"renamed or replaced cases: reads "high", writes "urgent""#
+                    ),
+                ])
+            ]
+        )
         #expect(diff.remoteOnlyTypes.map(\.name) == ["box.New"])
         #expect(!diff.isEmpty)
+        #expect("\(diff.breaking)" == "missing types: box.Gone; types changed: box.Priority")
+        #expect("\(diff.compatible)" == "server-only types: box.New")
         #expect(
             "\(diff)"
                 == "missing types: box.Gone; types changed: box.Priority; server-only types: box.New"
+        )
+    }
+
+    @Test("a missing method breaks; a server-only one does not")
+    func methodBuckets() {
+        let diff = SchemaDifference(
+            local: [signature("box.gone")],
+            remote: remote([signature("box.new")])
+        )
+        #expect(diff.isBreaking)
+        #expect("\(diff.breaking)" == "missing: box.gone")
+        #expect("\(diff.compatible)" == "server only: box.new")
+        #expect(diff.breakingReasons.isEmpty)
+
+        let added = SchemaDifference(local: [], remote: remote([signature("box.new")]))
+        #expect(!added.isBreaking)
+        #expect(added.breaking.isEmpty)
+        #expect(added.compatible == added)
+    }
+
+    /// A record whose server side gained a required field, used in a
+    /// request or a response.
+    private static func record(required: Bool) -> TypeDefinition {
+        TypeDefinition(
+            name: "box.Record",
+            schema: .structure(
+                fields: [.init(key: 0, name: "id", type: .int)]
+                    + (required ? [.init(key: 1, name: "size", type: .int)] : [])
+            )
+        )
+    }
+
+    @Test("a type change is judged where this build's methods use it")
+    func typeChangeByUse() {
+        let inRequest = signature(
+            "box.put",
+            request: .structure(fields: [
+                .init(key: 0, name: "record", type: .reference("box.Record"))
+            ])
+        )
+        let inResponse = signature(
+            "box.get",
+            response: .structure(fields: [
+                .init(key: 0, name: "record", type: .reference("box.Record"))
+            ])
+        )
+        let served = Self.record(required: true)
+        let local = Self.record(required: false)
+        // The server reads requests: a field it now requires, this build does not write.
+        let put = SchemaDifference(
+            local: [inRequest],
+            localTypes: [local],
+            remote: remote([inRequest], types: [served])
+        )
+        #expect(
+            put.typeChanged.map(\.compatibility) == [
+                .breaking([
+                    SchemaBreak(
+                        path: "box.Record.size",
+                        reason: "required by the reader, not written"
+                    )
+                ])
+            ]
+        )
+        #expect(put.breakingReasons == ["box.Record.size: required by the reader, not written"])
+        // The client reads responses: a field it does not know, it skips.
+        let get = SchemaDifference(
+            local: [inResponse],
+            localTypes: [local],
+            remote: remote([inResponse], types: [served])
+        )
+        #expect(get.typeChanged.map(\.compatibility) == [.compatible])
+        #expect(!get.isBreaking)
+        // A type no method uses is judged both ways.
+        let unused = SchemaDifference(
+            local: [],
+            localTypes: [local],
+            remote: remote([], types: [served])
+        )
+        #expect(unused.typeChanged.map(\.compatibility.isBreaking) == [true])
+    }
+
+    @Test("a changed constraint on a named scalar is a type change")
+    func typeConstraintChange() {
+        let local = TypeDefinition(
+            name: "box.Limit",
+            schema: .int,
+            constraints: TypeSchema.Constraints(minimum: .integer(1), maximum: .integer(100))
+        )
+        var served = local
+        served.constraints = TypeSchema.Constraints(minimum: .integer(1), maximum: .integer(10))
+        let get = signature(
+            "box.get",
+            request: .structure(fields: [
+                .init(key: 0, name: "limit", type: .reference("box.Limit"))
+            ])
+        )
+        let diff = SchemaDifference(
+            local: [get],
+            localTypes: [local],
+            remote: remote([get], types: [served])
+        )
+        #expect(
+            diff.typeChanged.map(\.compatibility) == [
+                .breaking([
+                    SchemaBreak(
+                        path: "box.Limit",
+                        reason:
+                            "the reader requires a maximum of 10, the writer keeps a maximum of 100"
+                    )
+                ])
+            ]
         )
     }
 
