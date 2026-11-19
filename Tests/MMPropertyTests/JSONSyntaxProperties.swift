@@ -14,13 +14,18 @@
         /// `JSONSyntaxError` finds no error in exactly the text `JSONDecoder`
         /// decodes all the way down, but for nesting past the cap, which
         /// `JSONDecoder` allows up to 512. Text that is JSON throughout and
-        /// still does not decode holds a number too large for a double:
-        /// replacing those with 0 makes it decode.
+        /// still does not decode holds a number a double can't hold: one too
+        /// large, or one too small, which a double would round to zero.
+        /// Replacing those with 0 makes it decode.
         ///
         /// A NUL among the first four bytes makes `JSONDecoder` read the
         /// text as UTF-16 or UTF-32, so it may decode text the locator
         /// refuses; there only the refusal is checked. `--params` comes from
         /// argv, which cannot carry a NUL.
+        ///
+        /// The explicit example is the number from the 2026-11-19 nightly
+        /// run, too small for a double, which the oracle took for one that
+        /// fits (MM-212).
         ///
         /// Mutation check: refusing a trailing comma, accepting a lone low
         /// surrogate, or pairing a high surrogate with any `\u` escape fails
@@ -28,6 +33,7 @@
         @Test
         func locatorAgreesWithJSONDecoder() throws {
             try property(
+                examples: [["text": "2.3701892480028235e-324"]],
                 reaching: ["refused by both"],
                 reachingAfter: [
                     "decoded": 1_000, "nested past the cap, which JSONDecoder allows": 1_000,
@@ -37,6 +43,7 @@
                     "expected a digit": 1_000,
                     "expected a hexadecimal digit in a '\\u' escape": 1_000,
                     "refused for a number too large for a double": 10_000,
+                    "refused for a number too small for a double": 10_000,
                 ]
             ) { tc in
                 let text = try #draw(NearJSON.texts, from: tc)
@@ -59,28 +66,42 @@
                             Issue.record("JSONDecoder decodes text the locator refuses: \(error)")
                         }
                     case (nil, false):
-                        try tc.event("refused for a number too large for a double")
-                        let tamed = replacingNumbersTooLargeForADouble(in: text)
+                        let misfits = doubleMisfits(in: text)
+                        if misfits.contains(.tooLarge) {
+                            try tc.event("refused for a number too large for a double")
+                        }
+                        if misfits.contains(.tooSmall) {
+                            try tc.event("refused for a number too small for a double")
+                        }
+                        let tamed = replacingNumbersADoubleCannotHold(in: text)
                         #expect(
                             decodesThroughout(tamed),
-                            "still refused with its numbers too large for a double 0: \(tamed.debugDescription)"
+                            "still refused with its numbers a double can't hold 0: \(tamed.debugDescription)"
                         )
                 }
             }
         }
 
-        /// `parse` refuses text with the locator's error, in its words, and
-        /// text the locator accepts only for a number too large for a double.
+        /// `parse` refuses text with the locator's error, in its words. Text
+        /// the locator accepts it parses exactly when `JSONDecoder` decodes
+        /// it all the way down, reading the first of equal keys as `parse`
+        /// does; it refuses the rest for a number too large or too small for
+        /// a double, saying which, and only where the text holds one.
+        ///
+        /// The explicit example is the number from the 2026-11-19 nightly
+        /// run, too small for a double, which `parse` took as 0 (MM-212).
         ///
         /// Mutation check: asking the locator only once `JSONDecoder` has
         /// failed, which lets nesting past the cap through, fails here.
         @Test
         func parseRefusesWithTheLocatorsError() throws {
             try property(
+                examples: [["text": "2.3701892480028235e-324"]],
                 reaching: ["refused with the locator's error"],
                 reachingAfter: [
                     "parsed": 1_000, "nested too deep": 1_000,
                     "refused for a number too large for a double": 10_000,
+                    "refused for a number too small for a double": 10_000,
                 ]
             ) { tc in
                 let text = try #draw(NearJSON.texts, from: tc)
@@ -93,16 +114,29 @@
                         error == nil,
                         "parsed text the locator refuses: \(error.map(\.description) ?? "")"
                     )
+                    #expect(
+                        decodesThroughout(text, everyKey: false),
+                        "parsed text with a number a double can't hold"
+                    )
                 } catch let refusal as ValidationError {
                     if let error {
                         try tc.event("refused with the locator's error")
                         #expect(refusal.message == error.description)
-                    } else {
+                        return
+                    }
+                    #expect(
+                        !decodesThroughout(text, everyKey: false),
+                        "refused text JSONDecoder decodes: \(refusal.message)"
+                    )
+                    let misfits = doubleMisfits(in: text)
+                    if refusal.message.hasSuffix("is too large for a double.") {
                         try tc.event("refused for a number too large for a double")
-                        #expect(
-                            refusal.message.hasSuffix("is too large for a double."),
-                            "\(refusal.message)"
-                        )
+                        #expect(misfits.contains(.tooLarge), "\(refusal.message)")
+                    } else if refusal.message.hasSuffix("is too small for a double.") {
+                        try tc.event("refused for a number too small for a double")
+                        #expect(misfits.contains(.tooSmall), "\(refusal.message)")
+                    } else {
+                        Issue.record("refused text the locator accepts: \(refusal.message)")
                     }
                 }
             }
@@ -291,14 +325,18 @@
 
     /// Whether `JSONDecoder` decodes `text` all the way down, as `parse`
     /// decodes a `JSONTree`: every value, which is where it checks a string's
-    /// escapes and a number's digits. Each key is made distinct, since
-    /// `JSONDecoder` keeps the first of equal keys and never decodes the
-    /// values of the others.
-    private func decodesThroughout(_ text: String) -> Bool {
+    /// escapes and a number's digits, each number as a double. With
+    /// `everyKey`, each key is made distinct, since `JSONDecoder` keeps the
+    /// first of equal keys and never decodes the values of the others;
+    /// without it, only those first values are decoded, as `parse` decodes
+    /// them.
+    private func decodesThroughout(_ text: String, everyKey: Bool = true) -> Bool {
         let decoder = JSONDecoder()
-        let keys = KeyCounter()
-        decoder.keyDecodingStrategy = .custom { path in
-            MemberKey(stringValue: "\(keys.next()) \(path.last?.stringValue ?? "")")
+        if everyKey {
+            let keys = KeyCounter()
+            decoder.keyDecodingStrategy = .custom { path in
+                MemberKey(stringValue: "\(keys.next()) \(path.last?.stringValue ?? "")")
+            }
         }
         return (try? decoder.decode(EveryValue.self, from: Data(text.utf8))) != nil
     }
@@ -382,22 +420,65 @@
         return (deepest, nil)
     }
 
-    /// `text` with each run of number characters that is a JSON number too
-    /// large for a double replaced by 0. Runs inside strings are replaced
+    /// How a JSON number fails to fit a double.
+    private enum DoubleMisfit {
+        /// A double makes it infinite.
+        case tooLarge
+        /// A double makes it zero, though a digit before its exponent isn't.
+        case tooSmall
+    }
+
+    /// How `token` fails to fit a double, when it is a JSON number that
+    /// does; nil for one that fits and for any other token.
+    private func doubleMisfit(of token: String) -> DoubleMisfit? {
+        // JSON's number grammar, from RFC 8259.
+        guard token.wholeMatch(of: /-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/) != nil,
+            let value = Double(token)
+        else { return nil }
+        if value.isInfinite {
+            return .tooLarge
+        }
+        let significand = token.prefix { $0 != "e" && $0 != "E" }
+        if value == 0, significand.contains(where: { ("1"..."9").contains($0) }) {
+            return .tooSmall
+        }
+        return nil
+    }
+
+    /// The ways the numbers in `text` fail to fit a double. Runs of number
+    /// characters inside strings count too.
+    private func doubleMisfits(in text: String) -> Set<DoubleMisfit> {
+        var misfits: Set<DoubleMisfit> = []
+        _ = mappingNumberRuns(in: text) { token in
+            if let misfit = doubleMisfit(of: token) {
+                misfits.insert(misfit)
+            }
+            return token
+        }
+        return misfits
+    }
+
+    /// `text` with each run of number characters that is a JSON number a
+    /// double can't hold replaced by 0. Runs inside strings are replaced
     /// too, which leaves those strings strings.
-    private func replacingNumbersTooLargeForADouble(in text: String) -> String {
+    private func replacingNumbersADoubleCannotHold(in text: String) -> String {
+        mappingNumberRuns(in: text) { token in
+            doubleMisfit(of: token) == nil ? token : "0"
+        }
+    }
+
+    /// `text` with each run of number characters, inside strings too,
+    /// replaced by what `transform` makes of it.
+    private func mappingNumberRuns(
+        in text: String,
+        _ transform: (String) -> String
+    ) -> String {
         let numberCharacters = Set("0123456789+-.eE".unicodeScalars)
         var result = String.UnicodeScalarView()
         var run = String.UnicodeScalarView()
         func flush() {
-            let token = String(run)
-            // JSON's number grammar, from RFC 8259.
-            if token.wholeMatch(of: /-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/) != nil,
-                Double(token)?.isInfinite == true
-            {
-                result.append("0")
-            } else {
-                result.append(contentsOf: run)
+            if !run.isEmpty {
+                result.append(contentsOf: transform(String(run)).unicodeScalars)
             }
             run = String.UnicodeScalarView()
         }
@@ -429,8 +510,10 @@
         )
 
         /// Number tokens: any integer, any double as Swift writes it (`inf`
-        /// and `nan` included, which are not JSON), and the grammar's edges
-        /// and numbers too large for a double.
+        /// and `nan` included, which are not JSON), and the grammar's edges,
+        /// numbers too large for a double, and numbers too small for one on
+        /// either side of half the smallest subnormal, where a double stops
+        /// rounding to zero.
         static let numbers = Gen<String>.oneOf(
             Gen<Int64>.integer().map { "\($0)" },
             Gen<UInt64>.integer().map { "\($0)" },
@@ -439,6 +522,10 @@
                 "0", "-0", "0.0", "-0.0e-0", "1e5", "1E+05", "0.5e-3", "5e-324",
                 "1.7976931348623157e308", "1e309", "-1e400", "2e308", "-1E999", "1e+400",
                 "123456789012345678901234567890",
+            ]),
+            .element(of: [
+                "1e-400", "-1E-999", "0.1e-323", "2.4703282292062327e-324",
+                "-2.3701892480028235e-324", "2.4703282292062328e-324", "0e-400", "-0.000e-999",
             ])
         )
 

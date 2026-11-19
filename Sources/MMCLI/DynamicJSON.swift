@@ -26,8 +26,9 @@ extension MMCLIDynamicTree {
     ///   literal (`1e3`) therefore parses as an integer; `validated` turns
     ///   it back into `1000.0` wherever the schema says double. A negative
     ///   zero (`-0`, `-0.0`) stays a double, keeping its sign. A number too
-    ///   large for a double (`1e400`) is refused, and one too small for it
-    ///   (`1e-400`) parses as 0.
+    ///   large for a double (`1e400`) is refused, and so is one too small for
+    ///   it (`1e-400`), which a double would round to zero. A zero with any
+    ///   exponent (`0e-400`) is a zero.
     /// - Strings and object keys keep every character, a leading U+FEFF
     ///   included, which `JSONSerialization` drops on Darwin.
     ///
@@ -56,10 +57,19 @@ extension MMCLIDynamicTree {
     }
 }
 
-/// A number too large for a double: the one value `JSONTree` refuses in text
-/// `JSONSyntaxError` lets through.
+/// A number too large or too small for a double: the one value `JSONTree`
+/// refuses in text `JSONSyntaxError` lets through.
 private struct NumberOutOfRange: Error {
     let message: String
+
+    /// A number at `path`, empty for the whole text, that is too large or
+    /// too small, as `size` says, for a double.
+    init(_ path: String, _ size: String) {
+        message =
+            path.isEmpty
+            ? "Number is \(size) for a double."
+            : "Number at \(path) is \(size) for a double."
+    }
 }
 
 /// One JSON value as a loose tree, decoded by trying each JSON kind in
@@ -103,6 +113,12 @@ private struct JSONTree: Decodable {
             // `Int64` takes a negative zero as 0, which would drop its sign.
             tree = .double(number)
         } else if let number = try? value.decode(Int64.self) {
+            // `JSONDecoder` takes a number a double would round to zero
+            // (`1e-400`) as the integer 0, though it refuses it as a double;
+            // a true zero it decodes as both.
+            if number == 0, (try? value.decode(Double.self)) == nil {
+                throw NumberOutOfRange(Self.pathText(value.codingPath), "too small")
+            }
             tree = .int(number)
         } else if let number = try? value.decode(UInt64.self) {
             tree = .uint(number)
@@ -114,12 +130,7 @@ private struct JSONTree: Decodable {
             // Not null, a boolean or a string, and no double or integer
             // holds it: a number too large for a double, since `parse` lets
             // only JSON through.
-            let at = Self.pathText(value.codingPath)
-            throw NumberOutOfRange(
-                message: at.isEmpty
-                    ? "Number is too large for a double."
-                    : "Number at \(at) is too large for a double."
-            )
+            throw NumberOutOfRange(Self.pathText(value.codingPath), "too large")
         }
     }
 

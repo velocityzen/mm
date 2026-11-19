@@ -578,7 +578,7 @@ struct DynamicJSONParseTests {
         }
     }
 
-    @Test("a number too large for a double is refused with its path")
+    @Test("a number too large or too small for a double is refused with its path")
     func numberOutOfRange() throws {
         expectParseFailure("1e400", messageContains: "Number is too large for a double.")
         expectParseFailure(
@@ -587,8 +587,24 @@ struct DynamicJSONParseTests {
         expectParseFailure(
             #"{"b":{"c":1e999}}"#,
             messageContains: "Number at b.c is too large for a double.")
-        // One too small for a double rounds to zero.
-        #expect(try MMCLIDynamicTree.parse(jsonText: "1e-400") == .int(0))
+        // One a double would round to zero.
+        expectParseFailure("1e-400", messageContains: "Number is too small for a double.")
+        expectParseFailure(
+            #"{"a":[1,-1e-400]}"#,
+            messageContains: "Number at a[1] is too small for a double."
+        )
+        // The 2026-11-19 nightly's number, under half the smallest subnormal.
+        expectParseFailure(
+            #"{"b":{"c":2.3701892480028235e-324}}"#,
+            messageContains: "Number at b.c is too small for a double."
+        )
+        // A zero with any exponent is a zero, and a number that rounds to
+        // the smallest subnormal is that subnormal.
+        #expect(try MMCLIDynamicTree.parse(jsonText: "0e-400") == .int(0))
+        #expect(
+            try MMCLIDynamicTree.parse(jsonText: "2.4703282292062328e-324")
+                == .double(.leastNonzeroMagnitude)
+        )
     }
 
     @Test("nesting deeper than 128 is refused before it can overflow the stack")
