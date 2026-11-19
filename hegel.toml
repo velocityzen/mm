@@ -26,7 +26,13 @@
 # A suite of synchronous properties takes the `.offTheCooperativePool` trait
 # next to `.hegel`: a synchronous property holds its thread for its whole
 # run, and the async suites' tasks need the cooperative pool. See
-# Tests/MMPropertyTests/PropertyThreadPool.swift.
+# Tests/MMPropertyTests/PropertyThreadPool.swift. A suite that misses it
+# still passes locally, and fails only the nightly: on the runner's
+# four-thread pool, a few such properties hold most of the threads for a
+# minute or more, and the async properties share what is left. Their cases
+# then outlast the hang limits, as `StillRunning`, `Stalled` or
+# `DeadlineExceeded`. Hegel can't tell that from a hang, because its own
+# watchdog still wakes on time. See MM-209.
 
 # This profile's count applies only to properties without their own
 # `.hegel(testCases:)`; HEGEL_TEST_CASES_SCALE deepens those too. On a CI

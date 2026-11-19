@@ -87,7 +87,7 @@
         ])
     }
 
-    @Suite("Target compatibility", .hegel)
+    @Suite("Target compatibility", .hegel, .offTheCooperativePool)
     struct TargetCompatibilityProperties {
         private static func method(target: [EntityPattern]?) -> MethodSignature {
             MethodSignature(

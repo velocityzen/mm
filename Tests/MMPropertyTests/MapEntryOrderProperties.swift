@@ -260,7 +260,7 @@
     /// in a map whose keys decode as values: keeping the last of the keys
     /// that decode alike, and decoding the value of a key it skips. The
     /// rest of the suite misses three of them, hash order among them.
-    @Suite("A map's entries decode in wire order", .hegel)
+    @Suite("A map's entries decode in wire order", .hegel, .offTheCooperativePool)
     struct MapEntryOrderProperties {
         /// Decoding a wire map into a `[String: Int]` reads its keys in wire
         /// order, whatever its size: it fails with the first value, among
