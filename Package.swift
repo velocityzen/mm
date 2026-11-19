@@ -25,10 +25,10 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-metrics.git", from: "2.11.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.0"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0"..<"700.0.0"),
-        .package(url: "https://github.com/velocityzen/fp-swift.git", from: "4.8.0"),
-        .package(url: "https://github.com/velocityzen/fp-swift-bracket.git", from: "3.0.2"),
-        .package(url: "https://github.com/velocityzen/fp-swift-pipe.git", from: "2.5.1"),
-        .package(url: "https://github.com/velocityzen/fp-swift-service.git", from: "0.2.2"),
+        .package(url: "https://github.com/velocityzen/fp-swift.git", from: "4.9.0"),
+        .package(url: "https://github.com/velocityzen/fp-swift-bracket.git", from: "3.0.3"),
+        .package(url: "https://github.com/velocityzen/fp-swift-pipe.git", from: "2.5.2"),
+        .package(url: "https://github.com/velocityzen/fp-swift-service.git", from: "0.2.3"),
         .package(url: "https://github.com/velocityzen/ProgramStatus.git", from: "0.4.1"),
         // Property-based tests. Test targets only, so the package's users
         // never fetch it.
