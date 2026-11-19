@@ -1,13 +1,13 @@
 {
-  "originHash" : "1f986c272708bcda996603966e721b96f86c4c9ec3cd5ad1be0e117ac9fe2622",
+  "originHash" : "73370d84461e4bd6c4b89554cd10d2000a20ff496e5b7c209cc5b5ece7334555",
   "pins" : [
     {
       "identity" : "fp-swift",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/velocityzen/fp-swift.git",
       "state" : {
-        "revision" : "7dcd038849b5098fd488407fa34f07d0d6e11130",
-        "version" : "4.5.0"
+        "revision" : "1aea1f178706a8626f70604e4efb551a445e16ac",
+        "version" : "4.8.0"
       }
     },
     {
@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/velocityzen/fp-swift-bracket.git",
       "state" : {
-        "revision" : "a811376126c06aed1f3c39a7aa582aee05d36968",
-        "version" : "3.0.0"
+        "revision" : "d6bf4314c4907dd7e5a2fbdfad813a248387559e",
+        "version" : "3.0.2"
       }
     },
     {
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/velocityzen/fp-swift-pipe.git",
       "state" : {
-        "revision" : "b14e9f94fe9c7aa117420edbd01773226d4fb25a",
-        "version" : "2.4.1"
+        "revision" : "6bdd508fc0ce57a11561517deb2811472692f9a5",
+        "version" : "2.5.1"
       }
     },
     {
@@ -33,8 +33,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/velocityzen/fp-swift-service.git",
       "state" : {
-        "revision" : "726b524aef972e2376e2a6719ba3d8a870ee95ba",
-        "version" : "0.2.0"
+        "revision" : "a498e9109911371df523fc885922a6ef0977aa07",
+        "version" : "0.2.2"
       }
     },
     {
@@ -42,8 +42,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/velocityzen/hegel-swift.git",
       "state" : {
-        "revision" : "019e7d3ca28d910793b62efea7afe5f861200168",
-        "version" : "0.51.8"
+        "revision" : "00626c6ca4e9ee947b9f6ca22fe5eff6e464ea33",
+        "version" : "0.52.0"
       }
     },
     {
