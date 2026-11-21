@@ -562,6 +562,92 @@
         }
     }
 
+    /// The bundled database's zone names that Foundation knows too.
+    let foundationZoneNames = ZoneSource.bundled.names.filter { name in
+        guard let zone = try? ZoneSource.bundled.zone(named: name) else { return false }
+        return TimeZone(zone) != nil
+    }
+
+    extension DateGenerators {
+        /// The wire range's wall-clock times, 0000-01-01 to 9999-12-31.
+        static let wireWallClocks: ClosedRange<LocalDateTime> = {
+            let first = LocalDateTime(date: CalendarDate(year: 0, month: 1, day: 1))
+            let last = LocalDateTime(date: CalendarDate(year: 9999, month: 12, day: 31), time: .max)
+            return first...last
+        }()
+
+        /// Wall-clock times in a zone Foundation knows, half of them in the
+        /// wire range and half in any year Hegel draws, a repeated one
+        /// meaning its earlier instant.
+        static let zonedDateTimes: Gen<ZonedDateTime> = {
+            let zones = Zones(names: foundationZoneNames, legacy: true, source: .bundled)
+            return .oneOf(
+                .zonedDateTime(zones: zones, in: .wallClock(wireWallClocks), ambiguous: .earlier),
+                .zonedDateTime(zones: zones, ambiguous: .earlier)
+            )
+        }()
+
+        /// A wall-clock time in `zoned`'s zone within an hour of the wall
+        /// times Foundation's zone skips or repeats at its next change of
+        /// offset after `zoned`, often at either end of them, resolved by
+        /// the bundled database as a zoned draw resolves it. Nil when the
+        /// zone has no next change in the years Hegel draws. A zoned draw
+        /// aims at a change in one case in twenty and lands on a skipped or
+        /// repeated time in a few of those; this reaches them every time.
+        static func nearNextChange(
+            after zoned: ZonedDateTime,
+            in timeZone: TimeZone,
+            _ tc: TestCase
+        ) throws -> ZonedDateTime? {
+            guard let next = timeZone.nextDaylightSavingTimeTransition(after: zoned.timestamp.date)
+            else { return nil }
+            let change = Int(next.timeIntervalSince1970.rounded())
+            let before = timeZone.secondsFromGMT(
+                for: Date(timeIntervalSince1970: Double(change - 1))
+            )
+            let after = timeZone.secondsFromGMT(for: next)
+            let length = abs(after - before)
+            let shift = try tc.draw(
+                .oneOf(
+                    .int(in: -3600...(length + 3600)),
+                    .element(of: [-1, 0, length - 1, length])
+                ),
+                named: "seconds past the first wall time the change skips or repeats"
+            )
+            let local = change + min(before, after) + shift
+            // A day clear of either end, so its instant is a Timestamp too.
+            let clear = (Timestamp.min.seconds + 86_400)...(Timestamp.max.seconds - 86_400)
+            guard clear.contains(local) else { return nil }
+            let wall = Timestamp(seconds: local).utc
+            let civil = LocalDateTime(
+                date: wall.date,
+                time: TimeOfDay(
+                    hour: wall.time.hour,
+                    minute: wall.time.minute,
+                    second: wall.time.second,
+                    nanosecond: zoned.civil.time.nanosecond
+                )
+            )
+            return try ZoneSource.bundled.resolve(civil, in: zoned.zone.name)
+        }
+    }
+
+    /// Whether Foundation's zone has the offsets the bundled database gives
+    /// `zone` at `instants`, in seconds since 1970, each held within the
+    /// years Hegel draws. The two databases can be different releases, and
+    /// before 1970 they can keep a different history for a zone.
+    func databasesAgree(on zone: Zone, _ timeZone: TimeZone, at instants: [Int]) throws -> Bool {
+        try instants.allSatisfy { instant in
+            let seconds = min(max(instant, Timestamp.min.seconds), Timestamp.max.seconds)
+            let bundled = try ZoneSource.bundled.offset(
+                in: zone.name,
+                at: Timestamp(seconds: seconds)
+            )
+            return bundled.offset.seconds
+                == timeZone.secondsFromGMT(for: Date(timeIntervalSince1970: Double(seconds)))
+        }
+    }
+
     @Suite("Date and time properties", .hegel, .offTheCooperativePool)
     struct DateProperties {
         /// Every date, datetime and timestamp renders as its canonical text
@@ -935,6 +1021,125 @@
                         )
                         #expect((left < right) == (leftKey < rightKey))
                 }
+            }
+        }
+
+        /// `DateComponents` naming a wall-clock time in a time zone build a
+        /// timestamp and a VPTS that keep the fields and take the offset the
+        /// zone has in force at that wall time, or for a time its clocks
+        /// skipped or showed twice the offset in force just before the
+        /// change. So the timestamp names the instant the zone gives the
+        /// wall time, the earlier of a repeated one, and the instant
+        /// `Calendar.date(from:)` gives. An offset that is not whole minutes
+        /// (local mean time) gives neither, and a year outside the wire
+        /// range no timestamp.
+        ///
+        /// The bundled tz database is the oracle wherever Foundation's agrees
+        /// with it on the offsets a day either side of the wall time and at
+        /// its two readings; Foundation's calendar is the oracle from 1583
+        /// on, where it is Gregorian.
+        ///
+        /// Mutation check: reading the zone's offset today, as the code did
+        /// before MM-323, fails here; so does taking the later offset for a
+        /// repeated wall time, or for a skipped one.
+        @Test
+        func zonedComponentsTakeTheOffsetAtTheirWallTime() throws {
+            try property(
+                reaching: ["a wall time the clocks showed once", "a zone with daylight saving"],
+                reachingAfter: [
+                    "a repeated wall time": 1_000, "a skipped wall time": 1_000,
+                    "a year past the wire range": 1_000, "an offset with seconds": 1_000,
+                ]
+            ) { tc in
+                var zoned = try #draw(DateGenerators.zonedDateTimes, from: tc)
+                let timeZone = try #require(TimeZone(zoned.zone))
+                let nearChange = try #draw(Gen<Bool>.bool(), from: tc)
+                if nearChange,
+                    let moved = try DateGenerators.nearNextChange(after: zoned, in: timeZone, tc)
+                {
+                    zoned = moved
+                    tc.note("moved to \(moved)")
+                }
+                let civil = zoned.civil
+                let components = DateComponents(
+                    timeZone: timeZone,
+                    year: civil.date.year,
+                    month: civil.date.month,
+                    day: civil.date.day,
+                    hour: civil.time.hour,
+                    minute: civil.time.minute,
+                    second: civil.time.second,
+                    nanosecond: civil.time.nanosecond
+                )
+                let timestamp = MMTimestamp(components)
+                let vpts = MMVPTS(components)
+                if !(0...9999).contains(civil.date.year) {
+                    try tc.event("a year past the wire range")
+                }
+
+                // Both build from the same offset.
+                #expect(vpts?.timestampValue == timestamp)
+                if let timestamp {
+                    #expect(timestamp.dateTime == MMDateTime(components))
+                }
+
+                if let timestamp, civil.date.year >= 1583 {
+                    var calendar = Calendar(identifier: .gregorian)
+                    calendar.timeZone = timeZone
+                    var wholeSeconds = components
+                    wholeSeconds.nanosecond = nil
+                    let date = try #require(calendar.date(from: wholeSeconds))
+                    #expect(timestamp.secondsSinceEpoch.seconds == Int(date.timeIntervalSince1970))
+                }
+
+                let local = Timestamp(utc: civil).seconds
+                let before = try #require(zoned.offsetBefore.seconds)
+                let after = try #require(zoned.offsetAfter.seconds)
+                guard
+                    try databasesAgree(
+                        on: zoned.zone,
+                        timeZone,
+                        at: [local - 86_400, local - before, local - after, local + 86_400]
+                    )
+                else {
+                    try tc.event("the databases disagree")
+                    return
+                }
+                switch zoned.kind {
+                    case .unique: try tc.event("a wall time the clocks showed once")
+                    case .gap: try tc.event("a skipped wall time")
+                    case .fold: try tc.event("a repeated wall time")
+                }
+                if try ZoneSource.bundled.info(for: zoned.zone.name)?.tags.contains(.dst) == true {
+                    try tc.event("a zone with daylight saving")
+                }
+                guard before % 60 == 0 else {
+                    try tc.event("an offset with seconds")
+                    #expect(vpts == nil)
+                    #expect(timestamp == nil)
+                    return
+                }
+                #expect(
+                    vpts
+                        == MMVPTS(
+                            year: Int64(civil.date.year),
+                            month: civil.date.month,
+                            day: civil.date.day,
+                            hour: civil.time.hour,
+                            minute: civil.time.minute,
+                            second: civil.time.second,
+                            fraction: .nanoseconds(UInt32(civil.time.nanosecond)),
+                            offsetMinutes: before / 60
+                        )
+                )
+                guard (0...9999).contains(civil.date.year) else {
+                    #expect(timestamp == nil)
+                    return
+                }
+                let value = try #require(timestamp)
+                #expect(value.offsetMinutes * 60 == before)
+                #expect(value.secondsSinceEpoch.seconds == zoned.timestamp.seconds)
+                #expect(value.secondsSinceEpoch.nanoseconds == zoned.timestamp.nanoseconds)
             }
         }
 

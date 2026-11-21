@@ -185,6 +185,104 @@ struct DateTimeMathTests {
         #expect(MMTimestamp(DateComponents(year: 2026, month: 7, day: 22)) == nil)
     }
 
+    /// Components in `zone`, through the second.
+    private func components(
+        _ zone: String, _ year: Int, _ month: Int, _ day: Int,
+        _ hour: Int, _ minute: Int = 0, _ second: Int = 0
+    ) -> DateComponents {
+        DateComponents(
+            timeZone: TimeZone(identifier: zone)!,
+            year: year, month: month, day: day, hour: hour, minute: minute, second: second
+        )
+    }
+
+    /// The instant Foundation's Gregorian calendar gives for zoned
+    /// components, in seconds since 1970.
+    private func calendarSeconds(_ components: DateComponents) -> Int? {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = components.timeZone!
+        return calendar.date(from: components).map { Int($0.timeIntervalSince1970) }
+    }
+
+    @Test("a zone's offset is the one in force at the components' wall time, not today")
+    func dateComponentsZoneOffsetAtTheirDate() {
+        // Both halves of the year, both hemispheres, a half-hour zone: the
+        // same answer whatever today's date is.
+        let cases = [
+            (components("America/New_York", 2026, 7, 1, 12), "2026-07-01T12:00:00-04:00"),
+            (components("America/New_York", 2026, 1, 15, 12), "2026-01-15T12:00:00-05:00"),
+            (components("Australia/Sydney", 2026, 1, 15, 12), "2026-01-15T12:00:00+11:00"),
+            (components("Australia/Sydney", 2026, 7, 1, 12), "2026-07-01T12:00:00+10:00"),
+            (components("Asia/Kolkata", 2026, 7, 1, 12), "2026-07-01T12:00:00+05:30"),
+        ]
+        for (components, expected) in cases {
+            let timestamp = MMTimestamp(components)
+            #expect(timestamp?.description == expected)
+            #expect(timestamp?.secondsSinceEpoch.seconds == calendarSeconds(components))
+        }
+        // New York kept local mean time, −4:56:02, until 1883: no whole
+        // minute offset, so no timestamp.
+        #expect(MMTimestamp(components("America/New_York", 1800, 1, 1, 12)) == nil)
+    }
+
+    @Test("a skipped or repeated wall time takes the offset before the change, as Calendar does")
+    func dateComponentsGapsAndFolds() {
+        let cases = [
+            // New York goes forward at 02:00 on 2026-03-08: 02:00..<03:00
+            // is skipped, read with EST.
+            (components("America/New_York", 2026, 3, 8, 1, 59, 59), "2026-03-08T01:59:59-05:00"),
+            (components("America/New_York", 2026, 3, 8, 2, 30), "2026-03-08T02:30:00-05:00"),
+            (components("America/New_York", 2026, 3, 8, 3), "2026-03-08T03:00:00-04:00"),
+            // It goes back at 02:00 on 2026-11-01: 01:00..<02:00 shows
+            // twice, the earlier in EDT.
+            (components("America/New_York", 2026, 11, 1, 0, 59, 59), "2026-11-01T00:59:59-04:00"),
+            (components("America/New_York", 2026, 11, 1, 1, 30), "2026-11-01T01:30:00-04:00"),
+            (components("America/New_York", 2026, 11, 1, 2), "2026-11-01T02:00:00-05:00"),
+            // Lord Howe Island moves its clocks by half an hour.
+            (components("Australia/Lord_Howe", 2026, 10, 4, 2, 15), "2026-10-04T02:15:00+10:30"),
+            (components("Australia/Lord_Howe", 2026, 4, 5, 1, 45), "2026-04-05T01:45:00+11:00"),
+        ]
+        for (components, expected) in cases {
+            let timestamp = MMTimestamp(components)
+            #expect(timestamp?.description == expected)
+            #expect(timestamp?.secondsSinceEpoch.seconds == calendarSeconds(components))
+        }
+    }
+
+    @Test("MMVPTS takes a zone's offset at the wall time its fields name")
+    func vptsDateComponentsZoneOffset() {
+        // An absent minute and second read as zero.
+        let summerHour = MMVPTS(
+            DateComponents(
+                timeZone: TimeZone(identifier: "America/New_York")!,
+                year: 2026, month: 7, day: 1, hour: 12
+            )
+        )
+        #expect(summerHour == MMVPTS(year: 2026, month: 7, day: 1, hour: 12, offsetMinutes: -240))
+        // The skipped hour, read with EST.
+        let skippedHour = MMVPTS(
+            DateComponents(
+                timeZone: TimeZone(identifier: "America/New_York")!,
+                year: 2026, month: 3, day: 8, hour: 2
+            )
+        )
+        #expect(skippedHour == MMVPTS(year: 2026, month: 3, day: 8, hour: 2, offsetMinutes: -300))
+        // Any year holds a fixed zone's offset. `DateComponents` reads
+        // Int.max as an absent field, so the top year is one below it.
+        for year in [Int.min, -1, 10_000, Int.max - 1] {
+            let value = MMVPTS(
+                DateComponents(
+                    timeZone: TimeZone(secondsFromGMT: 3600)!,
+                    year: year, month: 7, day: 1, hour: 12
+                )
+            )
+            #expect(value?.offsetMinutes == 60, "year \(year)")
+        }
+        // A zone needs an hour.
+        #expect(
+            MMVPTS(DateComponents(timeZone: TimeZone(secondsFromGMT: 0)!, year: 2026)) == nil)
+    }
+
     @Test("MMVPTS maps DateComponents' optionality one to one")
     func vptsDateComponents() {
         let yearMonth = MMVPTS(year: 2026, month: 7)!
