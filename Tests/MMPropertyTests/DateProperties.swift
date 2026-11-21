@@ -562,12 +562,6 @@
         }
     }
 
-    /// The bundled database's zone names that Foundation knows too.
-    let foundationZoneNames = ZoneSource.bundled.names.filter { name in
-        guard let zone = try? ZoneSource.bundled.zone(named: name) else { return false }
-        return TimeZone(zone) != nil
-    }
-
     extension DateGenerators {
         /// The wire range's wall-clock times, 0000-01-01 to 9999-12-31.
         static let wireWallClocks: ClosedRange<LocalDateTime> = {
@@ -576,11 +570,12 @@
             return first...last
         }()
 
-        /// Wall-clock times in a zone Foundation knows, half of them in the
+        /// Wall-clock times in a zone of Foundation's own database, resolved
+        /// as `TimeZone` and `Calendar` resolve them, half of them in the
         /// wire range and half in any year Hegel draws, a repeated one
         /// meaning its earlier instant.
         static let zonedDateTimes: Gen<ZonedDateTime> = {
-            let zones = Zones(names: foundationZoneNames, legacy: true, source: .bundled)
+            let zones = Zones(source: .foundation)
             return .oneOf(
                 .zonedDateTime(zones: zones, in: .wallClock(wireWallClocks), ambiguous: .earlier),
                 .zonedDateTime(zones: zones, ambiguous: .earlier)
@@ -589,11 +584,12 @@
 
         /// A wall-clock time in `zoned`'s zone within an hour of the wall
         /// times Foundation's zone skips or repeats at its next change of
-        /// offset after `zoned`, often at either end of them, resolved by
-        /// the bundled database as a zoned draw resolves it. Nil when the
-        /// zone has no next change in the years Hegel draws. A zoned draw
-        /// aims at a change in one case in twenty and lands on a skipped or
-        /// repeated time in a few of those; this reaches them every time.
+        /// offset after `zoned`, often at either end of them, resolved
+        /// against Foundation's database as a zoned draw resolves it. Nil
+        /// when the zone has no next change in the years Hegel draws. A
+        /// zoned draw aims at a change in one case in twenty and lands on a
+        /// skipped or repeated time in a few of those; this reaches them
+        /// every time.
         static func nearNextChange(
             after zoned: ZonedDateTime,
             in timeZone: TimeZone,
@@ -628,23 +624,7 @@
                     nanosecond: zoned.civil.time.nanosecond
                 )
             )
-            return try ZoneSource.bundled.resolve(civil, in: zoned.zone.name)
-        }
-    }
-
-    /// Whether Foundation's zone has the offsets the bundled database gives
-    /// `zone` at `instants`, in seconds since 1970, each held within the
-    /// years Hegel draws. The two databases can be different releases, and
-    /// before 1970 they can keep a different history for a zone.
-    func databasesAgree(on zone: Zone, _ timeZone: TimeZone, at instants: [Int]) throws -> Bool {
-        try instants.allSatisfy { instant in
-            let seconds = min(max(instant, Timestamp.min.seconds), Timestamp.max.seconds)
-            let bundled = try ZoneSource.bundled.offset(
-                in: zone.name,
-                at: Timestamp(seconds: seconds)
-            )
-            return bundled.offset.seconds
-                == timeZone.secondsFromGMT(for: Date(timeIntervalSince1970: Double(seconds)))
+            return try ZoneSource.foundation.resolve(civil, in: zoned.zone.name)
         }
     }
 
@@ -1034,10 +1014,10 @@
         /// (local mean time) gives neither, and a year outside the wire
         /// range no timestamp.
         ///
-        /// The bundled tz database is the oracle wherever Foundation's agrees
-        /// with it on the offsets a day either side of the wall time and at
-        /// its two readings; Foundation's calendar is the oracle from 1583
-        /// on, where it is Gregorian.
+        /// The wall times come from Foundation's own tz database, through
+        /// `ZoneSource.foundation`, so Hegel's resolution of each one is the
+        /// oracle in every case; Foundation's calendar is a second oracle
+        /// from 1583 on, where it is Gregorian.
         ///
         /// Mutation check: reading the zone's offset today, as the code did
         /// before MM-323, fails here; so does taking the later offset for a
@@ -1092,25 +1072,14 @@
                     #expect(timestamp.secondsSinceEpoch.seconds == Int(date.timeIntervalSince1970))
                 }
 
-                let local = Timestamp(utc: civil).seconds
                 let before = try #require(zoned.offsetBefore.seconds)
-                let after = try #require(zoned.offsetAfter.seconds)
-                guard
-                    try databasesAgree(
-                        on: zoned.zone,
-                        timeZone,
-                        at: [local - 86_400, local - before, local - after, local + 86_400]
-                    )
-                else {
-                    try tc.event("the databases disagree")
-                    return
-                }
                 switch zoned.kind {
                     case .unique: try tc.event("a wall time the clocks showed once")
                     case .gap: try tc.event("a skipped wall time")
                     case .fold: try tc.event("a repeated wall time")
                 }
-                if try ZoneSource.bundled.info(for: zoned.zone.name)?.tags.contains(.dst) == true {
+                let tags = try ZoneSource.foundation.info(for: zoned.zone.name)?.tags
+                if tags?.contains(.dst) == true {
                     try tc.event("a zone with daylight saving")
                 }
                 guard before % 60 == 0 else {
