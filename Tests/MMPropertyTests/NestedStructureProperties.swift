@@ -230,7 +230,7 @@
                             """
                     }
                 let source = "#schema(\"box\") {\n\(declarations)\n}"
-                try tc.note(source)
+                tc.note(source)
 
                 let expected = blocks.flatMap { nestedStructPaths($0, in: holder.name) }
                 // The first struct name a later case's top-level block

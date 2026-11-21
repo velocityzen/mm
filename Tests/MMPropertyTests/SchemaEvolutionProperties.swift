@@ -722,7 +722,7 @@
                     try tc.event("keys out of the encoder's order")
                 }
                 let bytes = ByteBuffer(bytes: mapBytes(entries))
-                try tc.note("map: \(hex(bytes))")
+                tc.note("map: \(hex(bytes))")
 
                 let second = try codableBytes(written.secondEdition)
                 #expect(
@@ -905,7 +905,7 @@
                         }
                     }
                     """
-                try tc.note(source)
+                tc.note(source)
                 let constraints = rules.isEmpty ? nil : declaredConstraints(rules, on: fitsTo)
                 let expected = literal.value.fitted(to: fitsTo, constraints: constraints)
                 let context =
@@ -1016,7 +1016,7 @@
                         }
                     }
                     """
-                try tc.note(source)
+                tc.note(source)
                 let declared = rules.isEmpty ? nil : declaredConstraints(rules, on: .duration)
                 let expected = literal.value.fitted(to: .duration, constraints: declared)
                 let context = #"Call("put").Request: field "f""# + (alias ? " of Wait" : "") + ": "
@@ -1319,7 +1319,7 @@
                         }
                     }
                     """
-                try tc.note(source)
+                tc.note(source)
                 let expected = fieldKeys(
                     for: fields,
                     reservedKeys: reservedKeys,

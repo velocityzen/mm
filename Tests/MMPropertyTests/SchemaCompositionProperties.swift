@@ -309,7 +309,7 @@
                         }
                     }
                     """
-                try tc.note(source)
+                tc.note(source)
                 guard case .success(let expansion) = schemaExpansion(source) else {
                     Issue.record(
                         "#schema refuses a block the runtime keys: \(schemaExpansion(source))"

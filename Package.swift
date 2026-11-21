@@ -32,7 +32,7 @@ let package = Package(
         .package(url: "https://github.com/velocityzen/ProgramStatus.git", from: "0.4.1"),
         // Property-based tests. Test targets only, so the package's users
         // never fetch it.
-        .package(url: "https://github.com/velocityzen/hegel-swift.git", from: "0.52.0"),
+        .package(url: "https://github.com/velocityzen/hegel-swift.git", branch: "main"),
     ],
     targets: [
         .target(

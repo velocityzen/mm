@@ -396,7 +396,7 @@
     /// when no name clashes.
     func checkNameClashes(_ tc: TestCase, holder: NestingHolder) throws {
         let (source, clash) = try nameClashCase(tc, holder: holder)
-        try tc.note(source)
+        tc.note(source)
         try tc.event("in \(holder.rawValue)")
         if let clash {
             try tc.event("refused")

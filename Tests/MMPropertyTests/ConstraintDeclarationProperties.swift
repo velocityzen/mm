@@ -106,7 +106,7 @@
                         }
                     }
                     """
-                try tc.note(source)
+                tc.note(source)
                 if let problem {
                     try tc.event("refused")
                     for fragment in [
@@ -182,7 +182,7 @@
                         }
                     }
                     """
-                try tc.note(source)
+                tc.note(source)
                 #expect(schemaDiagnosis(source) == problem.map { #"put.Request: Field("f"): \#($0)"# })
             }
         }
@@ -248,7 +248,7 @@
                         }
                     }
                     """
-                try tc.note(source)
+                tc.note(source)
                 #expect(schemaDiagnosis(source) == problem.map { #"put.Request: Field("f"): \#($0)"# })
             }
         }
