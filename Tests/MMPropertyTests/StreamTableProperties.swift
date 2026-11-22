@@ -417,7 +417,7 @@
             #expect(s.table.liveControls().count == s.streamCount)
         }
 
-    @Suite("Stream table properties", .hegel, .offTheCooperativePool)
+    @Suite("Stream table properties", .hegel)
     struct StreamTableProperties {
         /// Never two terminals for one call, never an item past the credit
         /// window, a handler only ever retires its own call, and once every

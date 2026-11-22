@@ -18,7 +18,7 @@
         )
     }
 
-    @Suite("Namespace grammar properties", .hegel, .offTheCooperativePool)
+    @Suite("Namespace grammar properties", .hegel)
     struct NamespaceGrammarProperties {
         /// The `#schema` and `#schemaTypes` macros check their namespace with
         /// `isValidLowerIdentifierPath`, which restates `EntityName.parse`'s

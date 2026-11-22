@@ -5,7 +5,7 @@
     import MMSchema
     import Testing
 
-    @Suite("Constraint declaration properties", .hegel, .offTheCooperativePool)
+    @Suite("Constraint declaration properties", .hegel)
     struct ConstraintDeclarationProperties {
         /// `#schema` refuses a field's `constraints:` list exactly when the
         /// runtime's rules refuse the constraints it declares on the field's

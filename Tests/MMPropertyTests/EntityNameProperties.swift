@@ -138,7 +138,7 @@
         }
     }
 
-    @Suite("EntityName properties", .hegel, .offTheCooperativePool)
+    @Suite("EntityName properties", .hegel)
     struct EntityNameProperties {
         /// `parse` succeeds exactly when the text keeps the documented rules,
         /// and otherwise names a rule it breaks. A parsed name keeps the text

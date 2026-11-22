@@ -329,7 +329,7 @@
         }
     }
 
-    @Suite("Generated decoding work", .hegel, .offTheCooperativePool)
+    @Suite("Generated decoding work", .hegel)
     struct GeneratedDecodingWorkProperties {
         /// Generated decoding makes at most eight reads per payload byte,
         /// whatever order a payload's maps hold their entries in, a key

@@ -8,7 +8,7 @@
     import NIOCore
     import Testing
 
-    @Suite("The ingress walk", .hegel, .offTheCooperativePool)
+    @Suite("The ingress walk", .hegel)
     struct IngressWalkProperties {
         /// The walk ingress runs over params that did not decode finds
         /// nothing wrong with the bytes of a value that fits the schema, and

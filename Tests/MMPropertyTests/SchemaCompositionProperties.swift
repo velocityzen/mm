@@ -213,7 +213,7 @@
         }
     }
 
-    @Suite("Schema composition properties", .hegel, .offTheCooperativePool)
+    @Suite("Schema composition properties", .hegel)
     struct SchemaCompositionProperties {
         /// A fields block that uses a field group keys its fields as the
         /// block with the group's fields written in the group's place: a

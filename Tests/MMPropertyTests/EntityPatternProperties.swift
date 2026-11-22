@@ -355,7 +355,7 @@
         }
     }
 
-    @Suite("EntityPattern properties", .hegel, .offTheCooperativePool)
+    @Suite("EntityPattern properties", .hegel)
     struct EntityPatternProperties {
         /// `admits` matches an entity exactly when the grammar does, for
         /// entities of the pattern and for near misses: a segment changed,

@@ -295,7 +295,7 @@
         )
     }
 
-    @Suite("UUID properties", .hegel, .offTheCooperativePool)
+    @Suite("UUID properties", .hegel)
     struct UUIDProperties {
         /// Every identifier renders as its canonical text and parses back to
         /// itself.

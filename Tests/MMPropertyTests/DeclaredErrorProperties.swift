@@ -585,7 +585,7 @@
         }
     }
 
-    @Suite("Declared error properties", .hegel, .offTheCooperativePool)
+    @Suite("Declared error properties", .hegel)
     struct DeclaredErrorProperties {
         /// Every declared error crosses the wire as itself: code 64, its
         /// case as the message, and a payload the call's error type decodes

@@ -23,16 +23,16 @@
 # count was set (this profile, HEGEL_TEST_CASES or HEGEL_TEST_CASES_SCALE).
 # Rarer events are recorded for the statistics but not claimed.
 #
-# A suite of synchronous properties takes the `.offTheCooperativePool` trait
-# next to `.hegel`: a synchronous property holds its thread for its whole
-# run, and the async suites' tasks need the cooperative pool. See
-# Tests/MMPropertyTests/PropertyThreadPool.swift. A suite that misses it
-# still passes locally, and fails only the nightly: on the runner's
-# four-thread pool, a few such properties hold most of the threads for a
-# minute or more, and the async properties share what is left. Their cases
-# then outlast the hang limits, as `StillRunning`, `Stalled` or
-# `DeadlineExceeded`. Hegel can't tell that from a hang, because its own
-# watchdog still wakes on time. See MM-209.
+# `.hegel` runs each test on threads of Hegel's own, as many as the machine
+# has cores, and an async property hands its test cases back to the
+# cooperative pool. A synchronous property holds its thread for its whole
+# run, a minute or more under this profile. On the cooperative pool, the
+# runner's four threads, a few of them would leave the async properties
+# too little, and those properties' cases would outlast the hang limits, as
+# `StillRunning`, `Stalled` or `DeadlineExceeded`, with nothing hung. So
+# no suite sets a task executor preference of its own: `.hegel` keeps one,
+# and its properties then run there. Before hegel-swift 0.53.0, mm's own
+# `.offTheCooperativePool` trait did this job (MM-209, MM-384).
 
 # This profile's count applies only to properties without their own
 # `.hegel(testCases:)`; HEGEL_TEST_CASES_SCALE deepens those too. On a CI

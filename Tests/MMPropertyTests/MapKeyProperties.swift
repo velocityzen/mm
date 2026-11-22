@@ -104,7 +104,7 @@
         }
     }
 
-    @Suite("Map key properties", .hegel, .offTheCooperativePool)
+    @Suite("Map key properties", .hegel)
     struct MapKeyProperties {
         /// A dictionary keyed by integers or by a generated enum reads the
         /// same on a Swift peer and on the CLI's dynamic side, both ways.

@@ -7,7 +7,7 @@
     import MMWire
     import Testing
 
-    @Suite("Dynamic coding properties", .hegel, .offTheCooperativePool)
+    @Suite("Dynamic coding properties", .hegel)
     struct DynamicCodingProperties {
         /// A request built from `--params` sends the canonical form of its
         /// input, and the response decoder reads it back as that value: an

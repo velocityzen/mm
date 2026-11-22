@@ -418,7 +418,7 @@
         }
     }
 
-    @Suite("Nested type name properties", .hegel, .offTheCooperativePool)
+    @Suite("Nested type name properties", .hegel)
     struct NestedTypeNameProperties {
         /// `#schema` refuses a nested struct or enum whose name clashes in
         /// the type or request that holds it, or in a struct nested in them,

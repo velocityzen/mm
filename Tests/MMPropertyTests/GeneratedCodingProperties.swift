@@ -115,7 +115,7 @@
         }
     }
 
-    @Suite("Generated MessagePack code agrees with Codable", .hegel, .offTheCooperativePool)
+    @Suite("Generated MessagePack code agrees with Codable", .hegel)
     struct GeneratedCodingProperties {
         /// The generated code writes exactly the bytes Codable writes, for a
         /// whole request and for one item.

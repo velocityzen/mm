@@ -281,7 +281,7 @@
         }
     }
 
-    @Suite("A request's dictionaries encode in one order", .hegel, .offTheCooperativePool)
+    @Suite("A request's dictionaries encode in one order", .hegel)
     struct CatalogDictionaryOrderProperties {
         /// Two requests that differ only in their dictionaries' hash tables
         /// encode in one order to the same bytes, as many as `Codable`

@@ -653,7 +653,7 @@
         layout.unit?.name ?? "no fraction"
     }
 
-    @Suite("Duration properties", .hegel, .offTheCooperativePool)
+    @Suite("Duration properties", .hegel)
     struct DurationProperties {
         /// Every duration renders as its canonical text and parses back to
         /// itself.

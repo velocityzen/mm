@@ -274,7 +274,7 @@
             || (MPFormat.array16...MPFormat.map32).contains(format)
     }
 
-    @Suite("Structural walk properties", .hegel, .offTheCooperativePool)
+    @Suite("Structural walk properties", .hegel)
     struct StructuralWalkProperties {
         /// The walk that skips a value stops where the `ByteBuffer` reads it
         /// replaced did, on any bytes, from any depth, under any nesting

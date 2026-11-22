@@ -518,7 +518,7 @@
         if case .failure(let error) = result { error } else { nil }
     }
 
-    @Suite("MessagePack reader properties", .hegel, .offTheCooperativePool)
+    @Suite("MessagePack reader properties", .hegel)
     struct MessagePackReaderProperties {
         /// Every reader, given any bytes at any reader index, returns a value
         /// or an `MMWireError`. A success consumes at least the format byte

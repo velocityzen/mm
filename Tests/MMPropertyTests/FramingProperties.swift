@@ -317,7 +317,7 @@
         return OutboundPayload(label: label, buffer: buffer)
     }
 
-    @Suite("Frame codec properties", .hegel, .offTheCooperativePool)
+    @Suite("Frame codec properties", .hegel)
     struct FramingProperties {
         /// The encoder frames any payloads as the model does, and the decoder
         /// gives them back unchanged and in order however the wire is cut into

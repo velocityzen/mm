@@ -628,7 +628,7 @@
         }
     }
 
-    @Suite("Date and time properties", .hegel, .offTheCooperativePool)
+    @Suite("Date and time properties", .hegel)
     struct DateProperties {
         /// Every date, datetime and timestamp renders as its canonical text
         /// (wire specification, section 6.4) and parses back to itself.

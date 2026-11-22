@@ -110,7 +110,7 @@
         }
     }
 
-    @Suite("EntityACL properties", .hegel, .offTheCooperativePool)
+    @Suite("EntityACL properties", .hegel)
     struct EntityACLProperties {
         /// `permitted` agrees with the POSIX rule read from the `ls` form of
         /// the mode: the first class the peer matches decides alone, even

@@ -155,7 +155,7 @@
         return paths
     }
 
-    @Suite("Nested structure properties", .hegel, .offTheCooperativePool)
+    @Suite("Nested structure properties", .hegel)
     struct NestedStructureProperties {
         /// Every `Field("a") { ... }` block generates its struct once, in the
         /// type that holds the block: in the type, the union or the request

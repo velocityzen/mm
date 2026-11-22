@@ -162,7 +162,7 @@
         }
     }
 
-    @Suite("String reader properties", .hegel, .offTheCooperativePool)
+    @Suite("String reader properties", .hegel)
     struct StringReaderProperties {
         /// `readMessagePackString` reads a string exactly when its payload is
         /// well-formed UTF-8 by the Unicode Standard's table 3-7. Then the

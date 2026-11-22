@@ -192,7 +192,7 @@
         return MMCLIDynamicJSONText(response.tree, pretty: false)
     }
 
-    @Suite("A union case without its fields map", .hegel, .offTheCooperativePool)
+    @Suite("A union case without its fields map", .hegel)
     struct AbsentUnionFieldsProperties {
         /// Cases whose fields may all be absent.
         static let absentable = ["moved", "bumped", "weighed", "nested"]

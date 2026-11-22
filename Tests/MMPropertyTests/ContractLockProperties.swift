@@ -321,7 +321,7 @@
         case nothing = "a check again"
     }
 
-    @Suite("Contract lock properties", .hegel, .offTheCooperativePool)
+    @Suite("Contract lock properties", .hegel)
     struct ContractLockProperties {
         /// Every field anywhere in `schema`.
         static func fields(in schema: TypeSchema) -> [TypeSchema.Field] {

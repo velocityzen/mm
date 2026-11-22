@@ -9,7 +9,7 @@
 
     @testable import MMCLI
 
-    @Suite("JSON syntax properties", .hegel, .offTheCooperativePool)
+    @Suite("JSON syntax properties", .hegel)
     struct JSONSyntaxProperties {
         /// `JSONSyntaxError` finds no error in exactly the text `JSONDecoder`
         /// decodes all the way down, but for nesting past the cap, which

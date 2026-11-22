@@ -419,7 +419,7 @@
         }
     }
 
-    @Suite("Envelope properties", .hegel, .offTheCooperativePool)
+    @Suite("Envelope properties", .hegel)
     struct EnvelopeProperties {
         /// Every kind encodes to the layout the spec's table gives it, with
         /// each integer and header at its narrowest, and decodes back to

@@ -393,7 +393,7 @@
         }
     }
 
-    @Suite("Generated decoding of rearranged maps", .hegel, .offTheCooperativePool)
+    @Suite("Generated decoding of rearranged maps", .hegel)
     struct GeneratedFieldOrderProperties {
         static let itemLayout = FieldLayout(
             [

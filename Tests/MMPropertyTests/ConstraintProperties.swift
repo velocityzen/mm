@@ -5,7 +5,7 @@
     import MMSchema
     import Testing
 
-    @Suite("Constraint properties", .hegel, .offTheCooperativePool)
+    @Suite("Constraint properties", .hegel)
     struct ConstraintProperties {
         /// A value that fits its schema's shape is accepted by
         /// `validated(checkingConstraints: true)` exactly when every

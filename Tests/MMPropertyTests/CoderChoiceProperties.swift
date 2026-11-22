@@ -306,7 +306,7 @@
         }
     }
 
-    @Suite("The coders pick a type's own MessagePack code", .hegel, .offTheCooperativePool)
+    @Suite("The coders pick a type's own MessagePack code", .hegel)
     struct CoderPickProperties {
         /// Each way of picking a type's coder, a check per value or a coder
         /// resolved once, and each called where the type is concrete or not,

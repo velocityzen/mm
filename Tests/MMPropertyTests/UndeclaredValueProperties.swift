@@ -347,7 +347,7 @@
         }
     }
 
-    @Suite("Values a contract does not declare", .hegel, .offTheCooperativePool)
+    @Suite("Values a contract does not declare", .hegel)
     struct UndeclaredValueProperties {
         /// A peer built from an earlier contract reads what a later one
         /// writes and writes it back unchanged: enum values and union cases

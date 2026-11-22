@@ -7,7 +7,7 @@
     import NIOCore
     import Testing
 
-    @Suite("TypeSchema properties", .hegel, .offTheCooperativePool)
+    @Suite("TypeSchema properties", .hegel)
     struct TypeSchemaProperties {
         /// Schemas with room for every node kind: the coding properties
         /// claim each of a dozen scalar kinds, which a budget of eight

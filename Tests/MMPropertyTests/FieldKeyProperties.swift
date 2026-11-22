@@ -31,7 +31,7 @@
         case lock = "the lock helper"
     }
 
-    @Suite("Unused field keys", .hegel, .offTheCooperativePool)
+    @Suite("Unused field keys", .hegel)
     struct FieldKeyProperties {
         /// `unusedKey(from:avoiding:)` returns the first key none of the
         /// taken ones is, counting up from the start and on from `Int.min`

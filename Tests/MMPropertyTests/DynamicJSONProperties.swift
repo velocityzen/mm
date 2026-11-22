@@ -7,7 +7,7 @@
     import MMSchema
     import Testing
 
-    @Suite("Dynamic JSON properties", .hegel, .offTheCooperativePool)
+    @Suite("Dynamic JSON properties", .hegel)
     struct DynamicJSONProperties {
         /// A canonical value rendered as JSON text, compact or pretty, parses
         /// and validates back to itself: bytes through base64, a whole double

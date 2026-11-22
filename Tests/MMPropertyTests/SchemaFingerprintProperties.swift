@@ -744,7 +744,7 @@
         }
     }
 
-    @Suite("SchemaFingerprint properties", .hegel, .offTheCooperativePool)
+    @Suite("SchemaFingerprint properties", .hegel)
     struct SchemaFingerprintProperties {
         /// Reordering the signatures and the type definitions, rewriting or
         /// removing every description and deprecation, and reordering or

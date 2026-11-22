@@ -5,7 +5,7 @@
     import MMSchema
     import Testing
 
-    @Suite("Schema value properties", .hegel, .offTheCooperativePool)
+    @Suite("Schema value properties", .hegel)
     struct SchemaValueProperties {
         /// Every generated value fits its schema: `validated` gives it back
         /// unchanged, strings by their bytes and doubles by bit pattern. So

@@ -653,7 +653,7 @@
         return "another reason: \(message)"
     }
 
-    @Suite("Schema evolution properties", .hegel, .offTheCooperativePool)
+    @Suite("Schema evolution properties", .hegel)
     struct SchemaEvolutionProperties {
         /// The second edition of a record reads any map a peer of either
         /// edition, or of one later still, writes for it: a value where the

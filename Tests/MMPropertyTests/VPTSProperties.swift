@@ -633,7 +633,7 @@
         }
     }
 
-    @Suite("VPTS properties", .hegel, .offTheCooperativePool)
+    @Suite("VPTS properties", .hegel)
     struct VPTSProperties {
         /// Any value encodes to the spec's §2 layout, narrow unless it
         /// needs WIDE, and decodes back to itself. A nanosecond fraction

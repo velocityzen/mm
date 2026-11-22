@@ -705,7 +705,7 @@
         }
     }
 
-    @Suite("Schema compatibility properties", .hegel, .offTheCooperativePool)
+    @Suite("Schema compatibility properties", .hegel)
     struct SchemaCompatibilityProperties {
         /// Every schema reads itself, and every named type reads itself:
         /// schemas of every kind, with references, chains, named types met

@@ -135,7 +135,7 @@
         }
     }
 
-    @Suite("Retry hint properties", .hegel, .offTheCooperativePool)
+    @Suite("Retry hint properties", .hegel)
     struct RetryHintProperties {
         /// A failed connect names the cause its error's errno or type
         /// gives, and its hint is final only for a denied permission or an

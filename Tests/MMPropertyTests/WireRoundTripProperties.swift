@@ -162,7 +162,7 @@
         }
     }
 
-    @Suite("Wire round-trip properties", .hegel, .offTheCooperativePool)
+    @Suite("Wire round-trip properties", .hegel)
     struct WireRoundTripProperties {
         /// Any fixture decodes back to itself, float bits included.
         @Test
