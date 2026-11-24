@@ -453,12 +453,16 @@
             try property(
                 reaching: [
                     "item keys in the encoder's order", "item keys out of order",
-                    "item keys in the encoder's order, and keys naming no field",
-                    "item a repeated key", "item a repeated key with another value",
-                    "item a field under its name",
-                    "item a key naming no field", "item a required field missing",
-                    "owner keys out of order", "decoded", "decoded with keys out of order",
+                    "item a key naming no field", "owner keys out of order", "decoded",
                     "failed with keyNotFound",
+                ],
+                // A 100-case run reaches each of these in under a fifth of
+                // its cases now and then, and once in none (MM-336).
+                reachingAfter: [
+                    "item keys in the encoder's order, and keys naming no field": 1_000,
+                    "item a repeated key": 1_000, "item a repeated key with another value": 1_000,
+                    "item a field under its name": 1_000, "item a required field missing": 1_000,
+                    "decoded with keys out of order": 1_000,
                 ]
             ) { tc in
                 let generators = CatalogGenerators(try #draw(CatalogGenerators.shapes, from: tc))
@@ -522,13 +526,19 @@
             try property(
                 reaching: [
                     "fields keys in the encoder's order", "fields keys out of order",
-                    "fields keys in the encoder's order, and keys naming no field",
-                    "fields a repeated key", "fields a repeated key with another value",
-                    "fields a field under its name",
-                    "fields a key naming no field", "fields a required field missing",
-                    "decoded", "decoded with keys out of order", "failed with keyNotFound",
+                    "fields a key naming no field", "decoded",
                 ],
-                reachingAfter: ["fields a field's name repeated with another value": 1_000]
+                // As for the items: a 100-case run reaches each of these in
+                // under a fifth of its cases now and then (MM-336).
+                reachingAfter: [
+                    "fields keys in the encoder's order, and keys naming no field": 1_000,
+                    "fields a repeated key": 1_000,
+                    "fields a repeated key with another value": 1_000,
+                    "fields a field under its name": 1_000,
+                    "fields a required field missing": 1_000,
+                    "decoded with keys out of order": 1_000, "failed with keyNotFound": 1_000,
+                    "fields a field's name repeated with another value": 1_000,
+                ]
             ) { tc in
                 let generators = CatalogGenerators(try #draw(CatalogGenerators.shapes, from: tc))
                 let carrier = try #draw(generators.text, from: tc)
