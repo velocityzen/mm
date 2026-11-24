@@ -562,12 +562,88 @@
         }
     }
 
+    extension DateFields {
+        /// The fields of a wall-clock time Hegel draws, at offset zero.
+        init(_ civil: LocalDateTime) {
+            self.init(
+                year: civil.date.year,
+                month: civil.date.month,
+                day: civil.date.day,
+                hour: civil.time.hour,
+                minute: civil.time.minute,
+                second: civil.time.second,
+                nanosecond: civil.time.nanosecond
+            )
+        }
+    }
+
     extension DateGenerators {
         /// The wire range's wall-clock times, 0000-01-01 to 9999-12-31.
         static let wireWallClocks: ClosedRange<LocalDateTime> = {
             let first = LocalDateTime(date: CalendarDate(year: 0, month: 1, day: 1))
             let last = LocalDateTime(date: CalendarDate(year: 9999, month: 12, day: 31), time: .max)
             return first...last
+        }()
+
+        /// The wire range's instants, 0000-01-01T00:00:00Z to
+        /// 9999-12-31T23:59:59.999999999Z.
+        static let wireInstants =
+            Timestamp(utc: wireWallClocks.lowerBound)...Timestamp(utc: wireWallClocks.upperBound)
+
+        /// Valid fields as Hegel's calendar draws them: a wall-clock time in
+        /// the wire range, its clock a whole number of some precision's
+        /// units, and an offset of whole minutes within ±18:00. One draw in
+        /// twenty aims at the range's ends, a leap day, the epoch or a
+        /// 32-bit limit. Hegel's `TimeOfDay` never draws second 60.
+        static let hegelCalendarFields: Gen<DateFields> = Gen { tc in
+            let precision = try tc.draw(Gen<Precision>.element(of: Precision.allCases))
+            let civil = try tc.draw(
+                Gen<LocalDateTime>.localDateTime(in: wireWallClocks, precision: precision)
+            )
+            let offset = try tc.draw(
+                Gen<UTCOffset>.utcOffset(in: -64_800...64_800, granularity: .minutes)
+            )
+            var fields = DateFields(civil)
+            fields.setOffset(try #require(offset.seconds) / 60)
+            return fields
+        }
+
+        /// Valid fields for every kind, half from `validFields`' menus, with
+        /// their year edges and second 60, and half from Hegel's calendar.
+        static let wireFields: Gen<DateFields> = .oneOf(validFields, hegelCalendarFields)
+
+        /// Instants, half in the wire range and half past either end of it
+        /// in any year Hegel draws, each often at its range's ends.
+        static let instants: Gen<Timestamp> = {
+            let first = wireInstants.lowerBound
+            let last = wireInstants.upperBound
+            return .oneOf(
+                .timestamp(in: wireInstants),
+                .oneOf(
+                    .timestamp(
+                        in: .min...Timestamp(seconds: first.seconds - 1, nanoseconds: 999_999_999)
+                    ),
+                    .timestamp(in: Timestamp(seconds: last.seconds + 1)...(.max))
+                )
+            )
+        }()
+
+        /// Zones of Foundation's own database, half of them drawn as Hegel
+        /// draws zones, weighting rare features, and half from those whose
+        /// offset today is not whole hours, such as India's +05:30.
+        static let foundationZones: Gen<Zone> = {
+            let names = Set(ZoneSource.foundation.names)
+            let now = Date()
+            let minuteZones = TimeZone.knownTimeZoneIdentifiers.filter { name in
+                guard names.contains(name), let zone = TimeZone(identifier: name) else {
+                    return false
+                }
+                return zone.secondsFromGMT(for: now) % 3600 != 0
+            }
+            return .oneOf(
+                .zone(from: Zones(source: .foundation)),
+                .zone(from: Zones(names: minuteZones, source: .foundation))
+            )
         }()
 
         /// Wall-clock times in a zone of Foundation's own database, resolved
@@ -1004,6 +1080,122 @@
             }
         }
 
+        /// Day numbers, the dates of day numbers, timestamps' instants and
+        /// canonical text agree with Hegel's proleptic Gregorian calendar
+        /// across the wire range, years 0 to 1582 included, where
+        /// Foundation's calendar is Julian and `calendarAgreesWithFoundation`
+        /// stops. Hegel's engine draws the wall times, offsets and instants
+        /// and prints them (RFC 3339), so its calendar is one oracle;
+        /// `Timestamp(utc:)` and `Timestamp.utc`, hegel-swift's own day
+        /// arithmetic, are a second. An instant names a date exactly when
+        /// its day lies in the wire range.
+        ///
+        /// Mutation check: numbering January and February of year 0 with a
+        /// truncated era, days `calendarAgreesWithFoundation` never reaches,
+        /// fails here.
+        @Test
+        func calendarAgreesWithHegelAcrossTheWireRange() throws {
+            try property(
+                examples: [
+                    [
+                        "wall": DateFields(
+                            year: 0,
+                            month: 2,
+                            day: 29,
+                            nanosecond: 500_000_000,
+                            offsetHours: 18
+                        ),
+                        "instant": Timestamp(seconds: firstWireDay * 86_400 - 1),
+                    ]
+                ],
+                reaching: [
+                    "a year before 1583", "an instant in the wire range", "an instant past it",
+                ],
+                reachingAfter: ["a leap second": 1_000]
+            ) { tc in
+                let wall = try #draw(DateGenerators.wireFields, from: tc)
+                let instant = try #draw(DateGenerators.instants, from: tc)
+                if wall.year < 1583 { try tc.event("a year before 1583") }
+
+                // A date has the day number and text Hegel gives it.
+                let date = try #require(MMDate(year: wall.year, month: wall.month, day: wall.day))
+                let calendarDate = CalendarDate(year: wall.year, month: wall.month, day: wall.day)
+                #expect(date.description == calendarDate.description)
+                #expect(
+                    date.daysSinceEpoch * 86_400
+                        == Timestamp(utc: LocalDateTime(date: calendarDate)).seconds
+                )
+
+                // A wall clock and an offset name the instant Hegel names,
+                // a leap second folding into the next minute.
+                guard case .timestamp(let timestamp) = dateValue(of: wall, as: .timestamp) else {
+                    Issue.record("no timestamp for \(wall)")
+                    return
+                }
+                let leapSecond = wall.second == 60
+                if leapSecond { try tc.event("a leap second") }
+                let civil = LocalDateTime(
+                    date: calendarDate,
+                    time: TimeOfDay(
+                        hour: wall.hour,
+                        minute: wall.minute,
+                        second: min(wall.second, 59),
+                        nanosecond: wall.nanosecond
+                    )
+                )
+                let offsetSeconds = wall.offset * 60
+                let seconds = timestamp.secondsSinceEpoch
+                #expect(
+                    seconds.seconds
+                        == Timestamp(utc: civil).seconds + (leapSecond ? 1 : 0) - offsetSeconds
+                )
+                #expect(seconds.nanoseconds == wall.nanosecond)
+                if !leapSecond {
+                    // The engine reads the wall clock back from the instant.
+                    let shifted = Timestamp(
+                        seconds: seconds.seconds + offsetSeconds,
+                        nanoseconds: seconds.nanoseconds
+                    )
+                    #expect(shifted.description == civil.description + "Z")
+                    let offsetText =
+                        wall.offset == 0 ? "Z" : UTCOffset.known(seconds: offsetSeconds).description
+                    #expect(timestamp.dateTime.description == civil.description)
+                    #expect(timestamp.description == civil.description + offsetText)
+                }
+
+                // An instant names the date and wall clock Hegel names, when
+                // its day lies in the wire range.
+                let days =
+                    instant.seconds >= 0
+                    ? instant.seconds / 86_400 : (instant.seconds + 1) / 86_400 - 1
+                let secondOfDay = instant.seconds - days * 86_400
+                let numbered = MMDate.date(daysSinceEpoch: days)
+                #expect((numbered != nil) == wireDays.contains(days), "\(instant)")
+                guard let numbered else {
+                    try tc.event("an instant past it")
+                    return
+                }
+                try tc.event("an instant in the wire range")
+                let utc = instant.utc.date
+                #expect(
+                    fields(of: numbered)
+                        == DateFields(year: utc.year, month: utc.month, day: utc.day)
+                )
+                let clock = try #require(
+                    MMDateTime(
+                        date: numbered,
+                        hour: secondOfDay / 3600,
+                        minute: secondOfDay / 60 % 60,
+                        second: secondOfDay % 60,
+                        nanosecond: instant.nanoseconds
+                    )
+                )
+                let named = try #require(MMTimestamp(dateTime: clock, offsetMinutes: 0))
+                #expect(named.description == instant.description)
+                #expect(named.secondsSinceEpoch.seconds == instant.seconds)
+            }
+        }
+
         /// `DateComponents` naming a wall-clock time in a time zone build a
         /// timestamp and a VPTS that keep the fields and take the offset the
         /// zone has in force at that wall time, or for a time its clocks
@@ -1109,6 +1301,93 @@
                 #expect(value.offsetMinutes * 60 == before)
                 #expect(value.secondsSinceEpoch.seconds == zoned.timestamp.seconds)
                 #expect(value.secondsSinceEpoch.nanoseconds == zoned.timestamp.nanoseconds)
+            }
+        }
+
+        /// `MMTimestamp.now(in:)` gives an instant between two `Date()`
+        /// readings around it, carrying the offset its zone has in force at
+        /// that instant and the wall clock Foundation's calendar shows there;
+        /// `MMDateTime.now(in:)` and `MMDate.today(in:)` give a wall clock
+        /// and a date the zone showed between their readings. The zones are
+        /// Foundation's own, half drawn as Hegel draws zones and half from
+        /// those whose offset is not whole hours.
+        ///
+        /// Mutation check: rounding the zone's offset down to whole hours
+        /// fails here.
+        @Test
+        func nowReadsTheClockInADrawnZone() throws {
+            try property(
+                reaching: ["an offset of whole hours", "an offset with minutes"],
+                reachingAfter: ["a zone with daylight saving": 1_000]
+            ) { tc in
+                let zone = try #draw(DateGenerators.foundationZones, from: tc)
+                let timeZone = try #require(TimeZone(zone))
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = timeZone
+                func wallClock(
+                    at date: Date
+                ) -> (year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int) {
+                    let wall = calendar.dateComponents(
+                        [.year, .month, .day, .hour, .minute, .second],
+                        from: date
+                    )
+                    return (
+                        wall.year ?? -1, wall.month ?? -1, wall.day ?? -1, wall.hour ?? -1,
+                        wall.minute ?? -1, wall.second ?? -1
+                    )
+                }
+
+                let before = Date()
+                let timestamp = MMTimestamp.now(in: timeZone)
+                let dateTime = MMDateTime.now(in: timeZone)
+                let today = MMDate.today(in: timeZone)
+                let after = Date()
+
+                let offset = timeZone.secondsFromGMT(for: before)
+                if offset % 3600 == 0 {
+                    try tc.event("an offset of whole hours")
+                } else {
+                    try tc.event("an offset with minutes")
+                }
+                let tags = try ZoneSource.foundation.info(for: zone.name)?.tags
+                if tags?.contains(.dst) == true {
+                    try tc.event("a zone with daylight saving")
+                }
+
+                // The instant lies between the readings, give or take a
+                // microsecond for a Date's seconds rounded to a Double.
+                let seconds = timestamp.secondsSinceEpoch
+                let instant = Date(
+                    timeIntervalSince1970: Double(seconds.seconds)
+                        + Double(seconds.nanoseconds) / 1_000_000_000
+                )
+                #expect(instant.timeIntervalSince(before) > -0.000_001, "\(timestamp)")
+                #expect(after.timeIntervalSince(instant) > -0.000_001, "\(timestamp)")
+                // A whole second is exact in a Date, so its wall clock is.
+                let second = Date(timeIntervalSince1970: Double(seconds.seconds))
+                #expect(timestamp.offsetMinutes * 60 == timeZone.secondsFromGMT(for: second))
+                let clock = timestamp.dateTime
+                #expect(
+                    (
+                        clock.date.year, clock.date.month, clock.date.day, clock.hour, clock.minute,
+                        clock.second
+                    ) == wallClock(at: second)
+                )
+
+                // The wall clock and the date lie between the readings'.
+                let first = wallClock(at: before)
+                let last = wallClock(at: after)
+                let read = (
+                    dateTime.date.year, dateTime.date.month, dateTime.date.day, dateTime.hour,
+                    dateTime.minute, dateTime.second
+                )
+                #expect(first <= read && read <= last, "\(dateTime)")
+                let day = (today.year, today.month, today.day)
+                #expect(
+                    (first.year, first.month, first.day) <= day
+                        && day <= (last.year, last.month, last.day),
+                    "\(today)"
+                )
             }
         }
 

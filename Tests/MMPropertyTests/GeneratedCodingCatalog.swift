@@ -301,33 +301,38 @@
             )
         }
 
+        /// Dates, datetimes and timestamps from `DateGenerators.wireFields`:
+        /// the menus' year edges and second 60, a leap second the wire
+        /// keeps, beside Hegel's calendar, which aims at the wire range's
+        /// ends, leap days, the epoch and the 32-bit limits.
         static let date: Gen<MMDate> = Gen { tc in
-            let year = try tc.draw(.int(in: 0...9999))
-            let month = try tc.draw(.int(in: 1...12))
-            let day = try tc.draw(.int(in: 1...MMDate.daysIn(month: month, year: year)))
-            return try #require(MMDate(year: year, month: month, day: day))
+            let fields = try tc.draw(DateGenerators.wireFields)
+            return try #require(MMDate(year: fields.year, month: fields.month, day: fields.day))
         }
 
-        /// Second 60 is a leap second, which the wire keeps.
         static let dateTime: Gen<MMDateTime> = Gen { tc in
-            try #require(
-                MMDateTime(
-                    date: tc.draw(date),
-                    hour: tc.draw(.int(in: 0...23)),
-                    minute: tc.draw(.int(in: 0...59)),
-                    second: tc.draw(.int(in: 0...60)),
-                    nanosecond: tc.draw(.oneOf(.just(0), .int(in: 0...999_999_999)))
-                )
-            )
+            try #require(Self.dateTime(of: tc.draw(DateGenerators.wireFields)))
         }
 
         static let timestamp: Gen<MMTimestamp> = Gen { tc in
-            try #require(
-                MMTimestamp(
-                    dateTime: tc.draw(dateTime),
-                    offsetMinutes: tc.draw(.oneOf(.just(0), .int(in: -1080...1080)))
-                )
+            let fields = try tc.draw(DateGenerators.wireFields)
+            return try #require(
+                Self.dateTime(of: fields).flatMap {
+                    MMTimestamp(dateTime: $0, offsetMinutes: fields.offset)
+                }
             )
+        }
+
+        private static func dateTime(of fields: DateFields) -> MMDateTime? {
+            MMDate(year: fields.year, month: fields.month, day: fields.day).flatMap {
+                MMDateTime(
+                    date: $0,
+                    hour: fields.hour,
+                    minute: fields.minute,
+                    second: fields.second,
+                    nanosecond: fields.nanosecond
+                )
+            }
         }
 
         var item: Gen<Catalog.Item> {
