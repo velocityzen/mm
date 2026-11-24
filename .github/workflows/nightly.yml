@@ -18,7 +18,14 @@ jobs:
   properties:
     name: Property tests, nightly profile
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # The test step took 49 to 66 minutes on the nights it passed. On
+    # 2026-11-21 and 2026-11-23 it was still finishing properties when a
+    # 90-minute limit cancelled it, 81 minutes in, about nine tenths done
+    # (MM-460): these runners' speed varies that much. 150 minutes leaves
+    # room for the slowest night seen and for more properties. The price: a
+    # hang that no property's own stall limits catch ends the job an hour
+    # later than it did.
+    timeout-minutes: 150
     container:
       image: swift:6.4
     steps:
@@ -34,8 +41,16 @@ jobs:
       - name: Build
         run: swift build --build-tests
 
+      # The job's output is a pipe, so the test process buffers it and the
+      # log arrives in 4 KB bursts, minutes apart; a cancelled run loses the
+      # last one. stdbuf has the process write each line as it ends.
+      #
+      # Each property prints its statistics as it finishes, so those blocks
+      # are the progress to watch. Swift Testing reports most `.hegel` tests
+      # passed only near the end of the run: hegel-swift's threads take a
+      # finished test's last step after every test not yet started.
       - name: Test the properties
         env:
           HEGEL_DEFAULT_PROFILE: nightly
           HEGEL_STATISTICS: "1"
-        run: swift test --filter MMPropertyTests
+        run: stdbuf -oL -eL swift test --filter MMPropertyTests
