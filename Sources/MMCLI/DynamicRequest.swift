@@ -15,10 +15,12 @@ import NIOCore
 // MARK: - Coding key
 
 /// The dynamic stand-in for a generated `Int`-raw `CodingKeys` case: carries
-/// the wire integer as `intValue` and the field name as `stringValue`, which
-/// satisfies both sides of the codec's faithful-int-key rule (field names are
-/// not decimal numerals, so the int key is honored; string-keyed fields set
-/// no `intValue` and travel as strings).
+/// the wire integer as `intValue` and the field name as `stringValue`, so the
+/// codec's faithful-int-key rule sends it as a generated key would: under the
+/// integer, as every generated field's name is a Swift identifier. A field
+/// whose name reads as another integer ("0" with key 2) travels under its
+/// name, as the compatibility judge pairs it; string-keyed fields set no
+/// `intValue` and travel as strings.
 struct MMCLIDynamicCodingKey: CodingKey {
     let intValue: Int?
     let stringValue: String

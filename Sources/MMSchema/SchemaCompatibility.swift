@@ -63,14 +63,17 @@ extension TypeSchema {
     /// named types: `readerTypes` for the reader's, `writerTypes` for the
     /// writer's.
     ///
-    /// - **Fields** pair up as a reader finds them: a reader's field reads
-    ///   the writer's field of its integer key, or else a writer's field
-    ///   that has no key and the reader's field's name. So a field renamed
-    ///   with its key and type kept reads as before, and a field that gains
-    ///   a key still reads a writer that names it. A field only the writer
-    ///   has is skipped. A field only the
-    ///   reader has must be optional: a field the reader requires breaks
-    ///   when the writer does not write it, or writes it as an optional.
+    /// - **Fields** pair up as a reader finds them. A field travels under
+    ///   its integer key, or under its name when it has no key or when its
+    ///   name reads as another integer, as "0" does for key 2 (the
+    ///   faithful-int-key rule the coders follow). A reader's field reads
+    ///   the writer's field that travels under its key, or else the one
+    ///   that travels under its name. So a field renamed with its key and
+    ///   type kept reads as before, and a field that gains a key still
+    ///   reads a writer that names it. A field only the writer has is
+    ///   skipped. A field only the reader has must be optional: a field the
+    ///   reader requires breaks when the writer does not write it, or
+    ///   writes it as an optional.
     /// - **Kinds** must match once references are followed and optionals
     ///   unwrapped. The reader may take an optional where the writer always
     ///   writes a value. `unknown`, which a kind this peer does not know
@@ -518,13 +521,44 @@ struct CompatibilityJudge {
     }
 
     /// What a field travels under on the wire: its integer key, or its
-    /// name when it has none.
+    /// name when it has none or the name reads as another integer.
     private enum FieldIdentity: Hashable {
         case key(Int)
         case name(String)
 
         init(_ field: TypeSchema.Field) {
-            self = field.key.map(Self.key) ?? .name(field.name)
+            self = field.wireKey.map(Self.key) ?? .name(field.name)
+        }
+    }
+
+    /// A writer's fields, handed out as a reader finds them. A key declared
+    /// twice pairs up in order: the first with the first.
+    ///
+    /// Its own type, not locals of `judgeFields`, so the pairing's
+    /// temporaries stay out of the frame the judge recurses through: a
+    /// debug build judges a schema nested 40 deep within a thread's stack.
+    private struct WrittenFields {
+        private var fields: [FieldIdentity: [TypeSchema.Field]] = [:]
+        private var taken: [FieldIdentity: Int] = [:]
+
+        init(_ writer: [TypeSchema.Field]) {
+            for field in writer {
+                self.fields[FieldIdentity(field), default: []].append(field)
+            }
+        }
+
+        /// The writer's field `reader` reads: the one under its key, or
+        /// else the one under its name.
+        mutating func match(_ reader: TypeSchema.Field) -> TypeSchema.Field? {
+            if let key = reader.wireKey, let field = self.take(.key(key)) { return field }
+            return self.take(.name(reader.name))
+        }
+
+        private mutating func take(_ identity: FieldIdentity) -> TypeSchema.Field? {
+            let occurrence = self.taken[identity, default: 0]
+            self.taken[identity] = occurrence + 1
+            guard let fields = self.fields[identity], occurrence < fields.count else { return nil }
+            return fields[occurrence]
         }
     }
 
@@ -533,23 +567,10 @@ struct CompatibilityJudge {
         writer: [TypeSchema.Field],
         at path: String
     ) {
-        var writerFields: [FieldIdentity: [TypeSchema.Field]] = [:]
-        for field in writer {
-            writerFields[FieldIdentity(field), default: []].append(field)
-        }
-        // A key declared twice pairs up in order: the first with the first.
-        var occurrences: [FieldIdentity: Int] = [:]
-        func written(_ identity: FieldIdentity) -> TypeSchema.Field? {
-            let occurrence = occurrences[identity, default: 0]
-            occurrences[identity] = occurrence + 1
-            guard let fields = writerFields[identity], occurrence < fields.count else { return nil }
-            return fields[occurrence]
-        }
+        var written = WrittenFields(writer)
         for field in reader {
             let fieldPath = path.isEmpty ? field.name : "\(path).\(field.name)"
-            // A reader looks for a field's key, then for its name.
-            let match = field.key.flatMap { written(.key($0)) } ?? written(.name(field.name))
-            if let match {
+            if let match = written.match(field) {
                 self.judge(
                     reader: field.type,
                     readerRules: Rules(field.constraints),

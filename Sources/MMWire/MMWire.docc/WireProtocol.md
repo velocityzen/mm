@@ -277,6 +277,7 @@ String keys are supported as a fallback: a field without an integer key encodes 
 - A wire **integer** key `k` matches a field with integer key `k`. It also matches a string-named entry (such as a dictionary key) whose name is exactly the canonical decimal form of `k` (`"5"`, never `"05"`).
 - A wire **string** key matches the field or entry with exactly that name. As a decode-side fallback, this includes a field that also has an integer key.
 - A wire string key is never parsed into an integer: wire string `"5"` does not match integer field key `5`. Implementations MUST NOT let a string-derived key (such as dictionary key `"05"`) alias a different integer key `5`.
+- A field whose name is itself a number other than its key's canonical decimal form (a field named `"0"` with key 2, or `"05"` with key 5) travels under its name, as a string key, for the same reason. The reference implementation's generated fields are Swift identifiers, so only a schema built by hand has one, and `TypeSchema.compatibility(reader:writer:)` pairs such a field by its name.
 
 ### 5.2 Unknown keys are skipped
 

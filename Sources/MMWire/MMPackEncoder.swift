@@ -744,20 +744,12 @@ struct MPSingleValueEncoding: SingleValueEncodingContainer {
     }
 }
 
-/// The faithful-int-key rule, stated once for encoder and decoder: `intValue`
-/// stands in for the key only when its canonical decimal form equals
-/// `stringValue` (dictionary keys like "5" — `_DictionaryCodingKey` derives
-/// `intValue` via `Int(stringValue)`), or when `stringValue` is not itself
-/// numeric (struct `CodingKeys`, whose `stringValue` is the property name). A
-/// numeric-but-non-canonical string key ("05", "+5") travels as a string key —
-/// honoring its claimed int would silently rewrite it on round trip and could
-/// collide with a distinct real int key.
-///
-/// Checked cheapest first: a property name fails to parse at its first
-/// character, so only a numeric string pays for formatting `intValue`.
+/// The integer `key` travels under, or nil when it travels as its
+/// `stringValue`: the faithful-int-key rule, which MMSchema's
+/// `TypeSchema.Field.wireKey(_:name:)` states once for the encoder, the
+/// decoder and the compatibility judge. A key with no `intValue` travels as
+/// its string without reading it.
 func mpFaithfulIntKey(_ key: some CodingKey) -> Int? {
     guard let intKey = key.intValue else { return nil }
-    let stringValue = key.stringValue
-    guard let parsed = Int(stringValue) else { return intKey }
-    return parsed == intKey && String(intKey) == stringValue ? intKey : nil
+    return TypeSchema.Field.wireKey(intKey, name: key.stringValue)
 }

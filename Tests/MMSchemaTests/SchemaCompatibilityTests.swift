@@ -116,6 +116,38 @@ struct SchemaCompatibilityTests {
         #expect(breaks(reader: named, writer: keyed) == ["id: required by the reader, not written"])
     }
 
+    @Test("a keyed field whose name reads as another integer pairs by its name, as it travels")
+    func numeralNamedField() {
+        // The 2026-11-20 nightly pair (MM-334): "0" with key 2 travels
+        // under "0", so a reader's `a` moved to key 2 finds nothing there.
+        let writer = structure(
+            Field(key: 0, name: "a", type: .bool),
+            Field(key: 1, name: "a'", type: .bool),
+            Field(key: 2, name: "0", type: .bool)
+        )
+        let rekeyed = structure(
+            Field(key: 2, name: "a", type: .bool),
+            Field(key: 1, name: "a'", type: .bool)
+        )
+        #expect(
+            breaks(reader: rekeyed, writer: writer) == ["a: required by the reader, not written"]
+        )
+        // Under another key, "0" still reads it by its name.
+        let movedNumeral = structure(Field(key: 7, name: "0", type: .bool))
+        #expect(breaks(reader: movedNumeral, writer: writer).isEmpty)
+        // A name that is its key's own numeral travels under the key, and a
+        // padded one ("05" for key 5) under its name.
+        let count = structure(Field(key: 5, name: "count", type: .int))
+        #expect(
+            breaks(reader: structure(Field(key: 5, name: "5", type: .int)), writer: count).isEmpty
+        )
+        #expect(
+            breaks(reader: structure(Field(key: 5, name: "05", type: .int)), writer: count) == [
+                "05: required by the reader, not written"
+            ]
+        )
+    }
+
     @Test("a changed field type breaks")
     func changedFieldType() {
         let changed = structure(

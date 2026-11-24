@@ -118,6 +118,33 @@ public indirect enum TypeSchema: Sendable, Hashable {
             self.deprecation = deprecation
         }
 
+        /// The integer the field travels under on the wire, or nil when it
+        /// travels under its ``name``: its ``key``, unless the name reads as
+        /// another integer. See ``wireKey(_:name:)``.
+        package var wireKey: Int? {
+            self.key.flatMap { Self.wireKey($0, name: self.name) }
+        }
+
+        /// The faithful-int-key rule, stated once for MMWire's encoder and
+        /// decoder and for the compatibility judge: a `CodingKey`'s integer
+        /// `key` stands in for it only when its canonical decimal form is
+        /// the key's `name` (dictionary keys like "5", whose
+        /// `_DictionaryCodingKey` derives the integer via `Int(name)`), or
+        /// when the name is not itself numeric (a struct's `CodingKeys`,
+        /// whose name is the property's). A numeric name that is not the
+        /// key's canonical form ("05" or "+5" for 5, "0" for 2) travels as
+        /// that name: honoring the integer would rewrite a dictionary key on
+        /// the round trip, and could collide with a distinct integer key.
+        ///
+        /// Checked cheapest first: a property name fails to parse at its
+        /// first character, so only a numeric name pays for formatting the
+        /// key.
+        @inlinable
+        package static func wireKey(_ key: Int, name: String) -> Int? {
+            guard let parsed = Int(name) else { return key }
+            return parsed == key && String(key) == name ? key : nil
+        }
+
         enum CodingKeys: Int, CodingKey {
             case key = 0
             case name = 1

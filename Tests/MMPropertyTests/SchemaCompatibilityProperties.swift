@@ -389,25 +389,11 @@
             ] + Array(Set(side.definitions.map(\.name))).sorted().map { .reference($0) }
         }
 
-        /// A name none of `taken` is, from the generators' pool, and with
-        /// `numerals` false never one that reads as an integer.
-        static func freshName(
-            _ tc: TestCase,
-            avoiding taken: [String],
-            numerals: Bool = true
-        ) throws -> String {
+        /// A name none of `taken` is, from the generators' pool.
+        static func freshName(_ tc: TestCase, avoiding taken: [String]) throws -> String {
             var name = try tc.draw(SchemaValueGenerators.names)
-            while taken.contains(name) || (!numerals && !Self.travelsByKey(name)) { name += "'" }
+            while taken.contains(name) { name += "'" }
             return name
-        }
-
-        /// Whether a keyed field named `name` travels by its key through
-        /// the dynamic coders, as every field of generated code does: a
-        /// name that reads as an integer travels as a string key instead
-        /// (the faithful-int-key rule), and generated code, whose names
-        /// are Swift identifiers, never has one.
-        static func travelsByKey(_ name: String) -> Bool {
-            Int(name) == nil
         }
 
         /// The key after the largest of `keys`, or the first free one from
@@ -425,15 +411,14 @@
         static func freshField(
             _ tc: TestCase,
             among fields: [TypeSchema.Field],
-            type: TypeSchema,
-            numerals: Bool = true
+            type: TypeSchema
         ) throws -> TypeSchema.Field {
             let keys = fields.compactMap(\.key)
             let keyed = fields.isEmpty ? try tc.draw(.bool()) : !keys.isEmpty
             let key: Int? = keyed ? Self.nextKey(after: keys) : nil
             return TypeSchema.Field(
                 key: key,
-                name: try Self.freshName(tc, avoiding: fields.map(\.name), numerals: numerals),
+                name: try Self.freshName(tc, avoiding: fields.map(\.name)),
                 type: type
             )
         }
@@ -463,13 +448,27 @@
             }
             return try tc.draw(SchemaValueGenerators.fitting(policy))
         }
+
+        /// The writers `structureFitting(_:unknownSlots:leaning:)` draws, as
+        /// one draw an explicit example can give.
+        static func structuresFitting(
+            unknownSlots: Bool,
+            leaning lean: CompositeKind? = nil
+        ) -> Gen<FittingValue> {
+            Gen { tc in try Self.structureFitting(tc, unknownSlots: unknownSlots, leaning: lean) }
+        }
+    }
+
+    /// A reader made from a writer, and the edits that made it, in order.
+    struct EditedReader: Sendable {
+        var side: SchemaSide
+        var edits: [ReaderEdit]
     }
 
     /// How the soundness property changes the reader, one position at a
-    /// time. A name an edit gives a field is never a numeral, as no
-    /// generated field's is: the dynamic coders send a keyed field with a
-    /// numeral name by that name, so a reader's new field named like it
-    /// would find it.
+    /// time. An edit may give a field any name, a numeral among them: the
+    /// judge pairs a keyed field whose name reads as another integer by
+    /// that name, as the coders send it.
     enum ReaderEdit: String, CaseIterable, Sendable {
         case addOptionalField = "an optional field added"
         case addRequiredField = "a required field added"
@@ -516,8 +515,8 @@
                 case .addOptionalField, .addRequiredField: !sites.fieldLists.isEmpty
                 case .removeField, .changeFieldType, .makeFieldOptional:
                     !sites.fields.isEmpty
-                case .renameField: !Self.sentAsDeclared(sites.fields).isEmpty
-                case .rekeyField: Self.sentAsDeclared(sites.fields).contains { $0.field.key != nil }
+                case .renameField: !sites.fields.isEmpty
+                case .rekeyField: sites.fields.contains { $0.field.key != nil }
                 case .makeFieldRequired:
                     sites.fields.contains {
                         if case .optional = $0.field.type { true } else { false }
@@ -528,12 +527,22 @@
             }
         }
 
-        /// The fields a rename or a new key keeps to the soundness oracle's
-        /// domain: the dynamic coders send each as generated code does, a
-        /// keyed one by its key.
-        static func sentAsDeclared(_ fields: [FieldSite]) -> [FieldSite] {
-            fields.filter {
-                $0.field.key == nil || CompatibilityGenerators.travelsByKey($0.field.name)
+        /// Readers made from `writer` by one to three edits, each of
+        /// `family` when one of it applies.
+        static func readers(of writer: SchemaSide, leaning family: Family) -> Gen<EditedReader> {
+            Gen { tc in
+                var reader = EditedReader(side: writer, edits: [])
+                for _ in 0..<(try tc.draw(Gen<Int>.int(in: 1...3))) {
+                    let sites = ReachableSites(reader.side)
+                    let available = Self.allCases.filter { $0.applies(to: sites) }
+                    let preferred = available.filter { $0.family == family }
+                    let edit = try tc.draw(
+                        Gen<ReaderEdit>.element(of: preferred.isEmpty ? available : preferred)
+                    )
+                    reader.side = try edit.applied(tc, to: reader.side, sites: sites)
+                    reader.edits.append(edit)
+                }
+                return reader
             }
         }
 
@@ -549,8 +558,7 @@
                     let field = try CompatibilityGenerators.freshField(
                         tc,
                         among: side.fields(at: list),
-                        type: self == .addOptionalField ? .optional(type) : type,
-                        numerals: false
+                        type: self == .addOptionalField ? .optional(type) : type
                     )
                     return side.rewriting(list, .fields { $0 + [field] })
                 case .removeField:
@@ -562,12 +570,11 @@
                         }
                     )
                 case .renameField:
-                    let target = try tc.draw(.element(of: Self.sentAsDeclared(sites.fields)))
+                    let target = try tc.draw(.element(of: sites.fields))
                     // A field's name is one no other field of its list has.
                     let name = try CompatibilityGenerators.freshName(
                         tc,
-                        avoiding: side.fields(at: target.list).map(\.name),
-                        numerals: false
+                        avoiding: side.fields(at: target.list).map(\.name)
                     )
                     return side.rewriting(
                         target.list,
@@ -579,9 +586,7 @@
                     )
                 case .rekeyField:
                     let target = try tc.draw(
-                        .element(
-                            of: Self.sentAsDeclared(sites.fields).filter { $0.field.key != nil }
-                        )
+                        .element(of: sites.fields.filter { $0.field.key != nil })
                     )
                     return side.rewriting(
                         target.list,
@@ -1116,9 +1121,48 @@
         /// change judged compatible, fields paired by name in a keyed type,
         /// or a fieldless writer case judged readable by a case with a
         /// required field, fails here.
+        ///
+        /// The explicit example is the pair from the 2026-11-20 nightly run
+        /// (MM-334): the writer's field "0" with key 2 travels under its
+        /// name, and the reader drops it and moves `a` to key 2. The judge
+        /// paired the two by key and called the reader compatible, yet the
+        /// read found nothing under key 2.
         @Test
         func aCompatibleReaderReadsWhatTheWriterWrites() throws {
+            let nightlyWriter = SchemaSide(
+                schema: .structure(fields: [
+                    TypeSchema.Field(key: 0, name: "a", type: .bool),
+                    TypeSchema.Field(key: 1, name: "a'", type: .bool),
+                    TypeSchema.Field(key: 2, name: "0", type: .bool),
+                ]),
+                definitions: []
+            )
+            let nightlyReader = SchemaSide(
+                schema: .structure(fields: [
+                    TypeSchema.Field(key: 2, name: "a", type: .bool),
+                    TypeSchema.Field(key: 1, name: "a'", type: .bool),
+                ]),
+                definitions: []
+            )
             try property(
+                examples: [
+                    [
+                        "family": ReaderEdit.Family.fields,
+                        "fitting": FittingValue(
+                            schema: nightlyWriter.schema,
+                            definitions: nightlyWriter.definitions,
+                            value: .object([
+                                SchemaValue.Member("a", .bool(false)),
+                                SchemaValue.Member("a'", .bool(false)),
+                                SchemaValue.Member("0", .bool(false)),
+                            ])
+                        ),
+                        "edited": EditedReader(
+                            side: nightlyReader,
+                            edits: [.removeField, .rekeyField]
+                        ),
+                    ]
+                ],
                 reaching: ["judged compatible", "judged breaking", "read back"],
                 reachingAfter: Dictionary(
                     uniqueKeysWithValues: [
@@ -1134,25 +1178,17 @@
                     Gen<ReaderEdit.Family>.element(of: [.fields, .fields, .enumerations, .unions]),
                     from: tc
                 )
-                let fitting = try CompatibilityGenerators.structureFitting(
-                    tc,
-                    unknownSlots: false,
-                    leaning: family.composite
+                let fitting = try #draw(
+                    CompatibilityGenerators.structuresFitting(
+                        unknownSlots: false,
+                        leaning: family.composite
+                    ),
+                    from: tc
                 )
                 let writer = SchemaSide(schema: fitting.schema, definitions: fitting.definitions)
-                var reader = writer
-                var edits: [ReaderEdit] = []
-                for _ in 0..<(try #draw(Gen<Int>.int(in: 1...3), from: tc)) {
-                    let sites = ReachableSites(reader)
-                    let available = ReaderEdit.allCases.filter { $0.applies(to: sites) }
-                    let preferred = available.filter { $0.family == family }
-                    let edit = try #draw(
-                        Gen<ReaderEdit>.element(of: preferred.isEmpty ? available : preferred),
-                        from: tc
-                    )
-                    reader = try edit.applied(tc, to: reader, sites: sites)
-                    edits.append(edit)
-                }
+                let edited = try #draw(ReaderEdit.readers(of: writer, leaning: family), from: tc)
+                let reader = edited.side
+                let edits = edited.edits
                 for edit in Set(edits) { try tc.event(edit.rawValue) }
                 tc.note("reader: \(reader.schema)\n\(reader.definitions)")
 
