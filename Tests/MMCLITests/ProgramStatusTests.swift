@@ -1,6 +1,6 @@
 import ArgumentParser
 import MMClient
-import ProgramStatus
+import OSC
 import Synchronization
 import Testing
 

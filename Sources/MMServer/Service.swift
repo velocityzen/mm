@@ -8,7 +8,7 @@ import Metrics
 import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
-import ProgramStatus
+import OSC
 
 #if canImport(Darwin)
 import Darwin

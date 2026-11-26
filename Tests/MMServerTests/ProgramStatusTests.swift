@@ -1,6 +1,6 @@
 import Foundation  // Tests only: a Pipe to read the reporter's bytes back.
 import MMTestSupport
-import ProgramStatus
+import OSC
 import Synchronization
 import Testing
 

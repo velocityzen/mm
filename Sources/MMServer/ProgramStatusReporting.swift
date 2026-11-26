@@ -1,7 +1,7 @@
 import NIOCore
-import ProgramStatus
+import OSC
 
-/// Turns on [Program Status Protocol](https://github.com/velocityzen/ProgramStatus)
+/// Turns on [Program Status Protocol](https://github.com/velocityzen/OperatingSystemCommands)
 /// reporting (OSC 7501) for the server, as `app`: a stable identifier of 1 to
 /// 32 characters of `[A-Za-z0-9_.+-]`, such as the daemon's name. Optional, at
 /// most once.

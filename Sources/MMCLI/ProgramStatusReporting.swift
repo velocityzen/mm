@@ -1,7 +1,7 @@
 import MMSchema
-import ProgramStatus
+import OSC
 
-/// The tool's [Program Status Protocol](https://github.com/velocityzen/ProgramStatus)
+/// The tool's [Program Status Protocol](https://github.com/velocityzen/OperatingSystemCommands)
 /// reporting (OSC 7501): the terminal learns whether a command is working,
 /// done, blocked on the user, or failed, and can show it on the tab or notify.
 /// Declared with ``ProgramStatusReporting(app:_:)`` in the ``MMCLI(_:)``

@@ -2,7 +2,7 @@ import ArgumentParser
 import FPPipe
 import MMCLI
 import MMExampleAPI
-import ProgramStatus
+import OSC
 
 /// The generated command-line face of the example daemon: every subcommand
 /// under `journal` is generated into this target by the `MMCLIGeneratorPlugin`

@@ -530,7 +530,7 @@ Server and client emit [swift-metrics](https://github.com/apple/swift-metrics) i
 
 ## Terminal status
 
-A daemon or a CLI can tell the terminal what it is doing with the [Program Status Protocol](https://github.com/velocityzen/ProgramStatus) (OSC 7501), so a terminal that supports it shows each tab's state and can notify when it changes. It is opt-in, one part in the declaration:
+A daemon or a CLI can tell the terminal what it is doing with the [Program Status Protocol](https://github.com/velocityzen/OperatingSystemCommands) (OSC 7501), so a terminal that supports it shows each tab's state and can notify when it changes. It is opt-in, one part in the declaration:
 
 ```swift
 MMService {
@@ -559,7 +559,7 @@ Reports go to the controlling terminal, so they arrive even when stdout is piped
 ## Requirements
 
 - Swift 6.4+ (strict concurrency). Everything runs on macOS 27+, Linux and Android. The client (`MMClient`, `MMSchema`, `MMWire`) also runs on iOS, iPadOS, tvOS, watchOS and visionOS 27+.
-- Runtime dependencies (complete list): [swift-nio](https://github.com/apple/swift-nio), [swift-log](https://github.com/apple/swift-log), [swift-metrics](https://github.com/apple/swift-metrics), [fp-swift](https://github.com/velocityzen/fp-swift), [fp-swift-bracket](https://github.com/velocityzen/fp-swift-bracket), [fp-swift-service](https://github.com/velocityzen/fp-swift-service) (`FPService` for the server's shutdown fan-out, `ProcessSignals` for `MMCLI`), and [ProgramStatus](https://github.com/velocityzen/ProgramStatus) (terminal status for `MMServer` and `MMCLI`). The CLI example and tests also use [fp-swift-pipe](https://github.com/velocityzen/fp-swift-pipe). MessagePack is implemented in this repository. [swift-syntax](https://github.com/swiftlang/swift-syntax) is a compile-time-only dependency of the `#schema` macro and the `MMCLIGeneratorPlugin`. It is never linked into products.
+- Runtime dependencies (complete list): [swift-nio](https://github.com/apple/swift-nio), [swift-log](https://github.com/apple/swift-log), [swift-metrics](https://github.com/apple/swift-metrics), [fp-swift](https://github.com/velocityzen/fp-swift), [fp-swift-bracket](https://github.com/velocityzen/fp-swift-bracket), [fp-swift-service](https://github.com/velocityzen/fp-swift-service) (`FPService` for the server's shutdown fan-out, `ProcessSignals` for `MMCLI`), and [OperatingSystemCommands](https://github.com/velocityzen/OperatingSystemCommands) (`OSC`, terminal status for `MMServer` and `MMCLI`). The CLI example and tests also use [fp-swift-pipe](https://github.com/velocityzen/fp-swift-pipe). MessagePack is implemented in this repository. [swift-syntax](https://github.com/swiftlang/swift-syntax) is a compile-time-only dependency of the `#schema` macro and the `MMCLIGeneratorPlugin`. It is never linked into products.
 
 ## Installation
 

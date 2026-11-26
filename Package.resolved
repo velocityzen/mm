@@ -1,5 +1,5 @@
 {
-  "originHash" : "60a7292bcc2ad8dfb648588105833113d21224ad1d0e0951fd9f1073f0c5767a",
+  "originHash" : "160deadd6398f1408ac727fd831779bf0b9a54a856398961242403ac098af40f",
   "pins" : [
     {
       "identity" : "fp-swift",
@@ -47,12 +47,12 @@
       }
     },
     {
-      "identity" : "programstatus",
+      "identity" : "operatingsystemcommands",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/velocityzen/ProgramStatus.git",
+      "location" : "https://github.com/velocityzen/OperatingSystemCommands.git",
       "state" : {
-        "revision" : "e1a5839a8bc676e7999584151cab82c76980aff9",
-        "version" : "0.4.1"
+        "branch" : "main",
+        "revision" : "67fba616414def3d84cb624c8037622f546d5f6f"
       }
     },
     {

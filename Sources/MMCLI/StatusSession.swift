@@ -1,5 +1,5 @@
 import ArgumentParser
-import ProgramStatus
+import OSC
 import Synchronization
 
 /// One invocation's record on the terminal: ``MMCLIRunner`` opens it around
