@@ -29,8 +29,7 @@ let package = Package(
         .package(url: "https://github.com/velocityzen/fp-swift-bracket.git", from: "3.0.3"),
         .package(url: "https://github.com/velocityzen/fp-swift-pipe.git", from: "2.5.2"),
         .package(url: "https://github.com/velocityzen/fp-swift-service.git", from: "0.2.3"),
-        // TODO: switch to from: "<version>" once OperatingSystemCommands has a tagged release.
-        .package(url: "https://github.com/velocityzen/OperatingSystemCommands.git", branch: "main"),
+        .package(url: "https://github.com/velocityzen/OperatingSystemCommands.git", from: "0.5.0"),
         // Property-based tests. Test targets only, so the package's users
         // never fetch it.
         .package(url: "https://github.com/velocityzen/hegel-swift.git", from: "0.53.0"),
